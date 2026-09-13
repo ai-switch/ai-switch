@@ -36,28 +36,44 @@ function link(repo, tag, assetName, text = assetName) {
 }
 
 async function readPlatforms(assetsDir) {
-  const entries = await readdir(assetsDir, { withFileTypes: true });
-  const directories = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
-  const known = PLATFORMS.filter(({ id }) => directories.includes(id));
+  const filesByPlatform = new Map();
+
+  async function collect(directory) {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        await collect(path.join(directory, entry.name));
+      } else if (entry.isFile()) {
+        // download-artifact adds a wrapper around the staged platform folders.
+        // The Linux artifact also carries an ARM64 server, so its wrapper name
+        // is not necessarily the target platform: use the file's parent folder.
+        const platform = path.basename(directory);
+        if (!filesByPlatform.has(platform)) {
+          filesByPlatform.set(platform, new Set());
+        }
+        filesByPlatform.get(platform).add(entry.name);
+      }
+    }
+  }
+
+  await collect(assetsDir);
+  const known = PLATFORMS.filter(({ id }) => filesByPlatform.has(id));
   // A new build target should show up in the table instead of vanishing.
-  const unknown = directories
+  const unknown = [...filesByPlatform.keys()]
     .filter((id) => !PLATFORMS.some((platform) => platform.id === id))
     .sort()
     .map((id) => ({ id, label: id }));
 
-  const platforms = [];
-  for (const platform of [...known, ...unknown]) {
-    const files = await readdir(path.join(assetsDir, platform.id));
-    platforms.push({
+  return [...known, ...unknown].map((platform) => {
+    const files = [...filesByPlatform.get(platform.id)].sort();
+    return {
       ...platform,
       installers: files
         .filter((file) => installerRank(file) >= 0)
         .sort((left, right) => installerRank(left) - installerRank(right) || left.localeCompare(right)),
       server: files.find((file) => /^ai-switch-server[-_]/i.test(file)),
-    });
-  }
-
-  return platforms;
+    };
+  });
 }
 
 export async function createReleaseBody({ assetsDir, tag, repo, notesFile, output }) {
@@ -69,7 +85,7 @@ export async function createReleaseBody({ assetsDir, tag, repo, notesFile, outpu
 
   const lines = [];
   if (installable.length > 0) {
-    lines.push("**下载 · Downloads**", "", "| 平台 · Platform | 安装包 · Installer |", "| --- | --- |");
+    lines.push("## 下载 · Downloads", "", "| 平台 · Platform | 安装包 · Installer |", "| --- | --- |");
     for (const { label, installers } of installable) {
       const downloads = installers.map((file) => link(repo, tag, file)).join(" · ");
       lines.push(`| ${label} | ${downloads} |`);

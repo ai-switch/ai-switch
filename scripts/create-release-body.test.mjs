@@ -78,6 +78,79 @@ test("puts a labelled download table above the changelog", async () => {
   }
 });
 
+test("renders installer downloads from nested GitHub Actions artifacts", async () => {
+  const root = await assetsFixture([
+    "windows-x86_64/windows-x86_64/ai-switch-0.9.1-windows-x86_64-setup.exe",
+    "windows-x86_64/windows-x86_64/ai-switch-0.9.1-windows-x86_64-setup.exe.sig",
+    "windows-x86_64/windows-x86_64/ai-switch-tsnet_v0.9.1_windows-x86_64.zip",
+    "darwin-aarch64/darwin-aarch64/ai-switch-0.9.1-darwin-aarch64.dmg",
+    "darwin-aarch64/darwin-aarch64/ai-switch-updater-0.9.1-darwin-aarch64.app.tar.gz",
+    "darwin-x86_64/darwin-x86_64/ai-switch-0.9.1-darwin-x86_64.dmg",
+    "linux-x86_64/linux-x86_64/ai-switch-0.9.1-linux-x86_64.AppImage",
+    "linux-x86_64/linux-x86_64/ai-switch-0.9.1-linux-x86_64.deb",
+    "latest.json",
+  ]);
+
+  try {
+    const output = path.join(root, "release-body.md");
+    await createReleaseBody({
+      assetsDir: root,
+      tag: "v0.9.1",
+      repo: "ai-switch/ai-switch",
+      notesFile: path.join(root, "release-notes.md"),
+      output,
+    });
+
+    const body = await readFile(output, "utf8");
+    const rows = body.split("\n").filter((line) => /^\| (Windows|macOS|Linux)/.test(line));
+    assert.deepEqual(
+      rows.map((row) => row.split(" | ")[0].replace("| ", "")),
+      ["Windows (x64)", "macOS (Apple Silicon)", "macOS (Intel)", "Linux (x64)"],
+    );
+    for (const file of [
+      "ai-switch-0.9.1-windows-x86_64-setup.exe",
+      "ai-switch-0.9.1-darwin-aarch64.dmg",
+      "ai-switch-0.9.1-darwin-x86_64.dmg",
+      "ai-switch-0.9.1-linux-x86_64.AppImage",
+      "ai-switch-0.9.1-linux-x86_64.deb",
+    ]) {
+      assert.ok(body.includes(`[${file}](https://github.com/ai-switch/ai-switch/releases/download/v0.9.1/${file})`));
+    }
+    assert.ok(body.startsWith("## 下载 · Downloads\n\n"), "the download heading must lead the release");
+    assert.ok(body.endsWith(`${NOTES}\n`), "the bilingual notes must remain intact");
+    assert.doesNotMatch(body, /\.sig|app\.tar\.gz|tsnet|latest\.json/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("labels nested Linux server downloads by target, not the artifact wrapper", async () => {
+  const root = await assetsFixture([
+    "linux-x86_64/linux-x86_64/ai-switch-server_v0.9.1_linux-x86_64.zip",
+    "linux-x86_64/linux-aarch64/ai-switch-server_v0.9.1_linux-aarch64.zip",
+  ]);
+
+  try {
+    const output = path.join(root, "release-body.md");
+    const body = await createReleaseBody({
+      assetsDir: root,
+      tag: "v0.9.1",
+      repo: "ai-switch/ai-switch",
+      notesFile: path.join(root, "release-notes.md"),
+      output,
+    });
+
+    assert.ok(body.includes(
+      "Standalone server: [Linux (x64)](https://github.com/ai-switch/ai-switch/releases/download/v0.9.1/ai-switch-server_v0.9.1_linux-x86_64.zip) · " +
+      "[Linux (ARM64)](https://github.com/ai-switch/ai-switch/releases/download/v0.9.1/ai-switch-server_v0.9.1_linux-aarch64.zip)",
+    ));
+    assert.match(body, /Linux one-click install/);
+    assert.match(body, /https:\/\/raw\.githubusercontent\.com\/ai-switch\/ai-switch\/main\/scripts\/install-server\.sh/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("shows the one-click installer when only the Linux ARM64 server is available", async () => {
   const root = await assetsFixture([
     "linux-aarch64/ai-switch-server_v0.8.0_linux-aarch64.zip",
