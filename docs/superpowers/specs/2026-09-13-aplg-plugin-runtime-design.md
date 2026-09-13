@@ -519,6 +519,16 @@ ai-switch 的最小接入点：
 - ai-switch 业务能力经过单独审查注册 `ai-switch.*`。首期不导出凭据读取、任意 SQL、内部 AppState 或无约束的算力池代理钩子。
 - 内置 SaaS/生图可以使用统一管理项描述，但不强行转换为外部 `.aplg`，不承诺第三方插件拥有它们的核心服务权限。
 
+### 13.1 独立插件源码示例
+
+已按用户要求使用 `gh` 创建公开模板仓库 [ai-switch/plugin-example](https://github.com/ai-switch/plugin-example)，GitHub 仓库 ID 为 `1368555334`，默认分支 `main`，初始源码提交为 `c30cd40`。可通过 GitHub 的 “Use this template” 复用。
+
+示例为无权限文本统计页面，使用原生 HTML/CSS/JavaScript、Vite 和 Node 内置测试，提供 `aplg.json`、相对资源构建、README、MIT LICENSE 和只读 CI。文本仅在页面内存处理，不申请文件、网络、剪贴板或原生权限，不含 Rust。
+
+它是插件作者的源码模板，不是 `examples/aplg-plain-host/` 所承担的通用宿主演示。由于公共 runtime/devkit 尚未实现或发布，该项目不依赖不存在的 npm 版本，也不自行补出桥接或打包器；当前只证明页面可独立运行，不能代替真实 Tauri/standalone-server 插件装载验收。
+
+正式 `.aplg` 打包、签名 Release 和商店发布申请仍通过后续公共工具链与 plugin-store 流程。示例目前不发布安装包、不自动向商店创建 PR；README 明确区分普通 `pnpm build` 输出与受控签名插件资产。示例仓库的公开和基础 CI 不表示宿主运行时已经可用。
+
 ## 14. 验证与验收要求
 
 | 验证面 | 必须证明的结果 |
