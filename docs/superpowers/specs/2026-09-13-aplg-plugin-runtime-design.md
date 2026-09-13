@@ -1,7 +1,7 @@
 # APLG 通用插件运行时与 ai-switch 双模式接入设计
 
 - 日期：2026-09-13
-- 状态：总体方向已确认；本文纳入通用 npm runtime、允许放弃 MenuGit 旧插件兼容及 `.aplg` 扩展名的新要求，等待书面规格审阅。尚未实施或发布。
+- 状态：总体方向、npm 包名和公开 PR 发布入口已确认；本文同步 `ai-switch/plugin-store` 的职责与信任边界，等待书面规格审阅。已创建远程仓库及贡献文档，runtime、devkit 和自动发布流水线尚未实施或发布。
 - 工作树：`D:\Repos\worktree\ai-switch-plugin-design`
 - 分支：`docs/plugin-architecture`
 - ai-switch 调研基线：`a8387b5`。
@@ -16,10 +16,10 @@
 | 简单插件不写 Rust | HTML/JS/TS 插件调用 Node 风格异步 API，由 Rust 宿主执行特权操作 |
 | 通用 npm runtime | 发布与 ai-switch、Tauri、React、Vue 无关的运行时；业务、鉴权和传输从宿主注入 |
 | 复杂插件可用 Rust | 独立原生进程经版本化 RPC 接入，不向主进程加载第三方动态库 |
-| 插件通过 GitHub CI Release 发布 | 正式安装源是经过校验的 GitHub Release 资产，Actions artifact 不作为发布终点 |
+| 插件通过 GitHub CI Release 发布 | 公开 `ai-switch/plugin-store` 接收任何人的发布申请 PR；审核合并后由受控 CI 构建、签名并发布 Release，Actions artifact 不作为发布终点 |
 | 插件扩展名 | 统一为 `.aplg`；内部使用 ZIP 容器和 `aplg.json` 清单 |
 | 架构优先于旧插件兼容 | MenuGit 仅作设计参考；不承诺 `.oplg`、`window.otools`、同步 Noder I/O 或旧 C ABI 兼容 |
-| 本轮交付 | 只提供设计规格，不实现运行时、不修改依赖、不执行 npm/GitHub 发布 |
+| 本轮交付 | 修订设计，使用 gh 创建 plugin-store 并初始化贡献文档和 PR 模板；不实现运行时、不配置自动发布、不执行 npm 或插件 Release 发布 |
 
 “支持 Node API”指明确定义的接口和行为子集，不指完整 Node.js、任意 npm 包或无限制的系统权限。通用 npm 包也不能凭空为普通浏览器增加真实文件系统能力。
 
@@ -56,12 +56,12 @@
 
 ```text
 插件页面：HTML / React / Vue / JS / TS
-  ├─ @aplg/runtime/plugin          生命周期、能力客户端
+  ├─ @ai-switch/tauri-plugin-runtime/plugin          生命周期、能力客户端
   └─ node:fs/promises 等           devkit 构建期映射
                   │
           隔离 iframe + MessagePort
                   │
-         @aplg/runtime/host        装载、实例路由、事件分发
+         @ai-switch/tauri-plugin-runtime/host        装载、实例路由、事件分发
                   │
           宿主注入的 HostTransport
            ┌──────┴──────┐
@@ -77,7 +77,7 @@
 
 依赖方向为“应用适配器依赖公共运行时/宿主”，公共组件不得反向引用 ai-switch。
 
-### 4.1 npm 包：`@aplg/runtime`
+### 4.1 npm 包：`@ai-switch/tauri-plugin-runtime`
 
 ESM、TypeScript 声明、浏览器标准 API；框架无关。导入模块本身不启动容器、不读宿主凭据，允许 SSR/构建工具安全导入；实际挂载阶段才要求 DOM。
 
@@ -90,9 +90,9 @@ ESM、TypeScript 声明、浏览器标准 API；框架无关。导入模块本�
 
 宿主和插件是不同入口、不同运行上下文，不是把宿主对象挂到插件的全局变量上。`/host` 不打包进插件产物；打包体积与依赖检查验证此约束。即使恶意插件自行导入 `/host`，它也不能获得真实凭据和后端授权。
 
-首期不另发 `@aplg/sdk`、框架组件包或 MenuGit 兼容包。React/Vue 宿主只需自行用组件包装 `mount()` / `dispose()`。
+首期不另发独立 SDK 包、框架组件包或 MenuGit 兼容包。React/Vue 宿主只需自行用组件包装 `mount()` / `dispose()`。
 
-### 4.2 npm 包：`@aplg/devkit`
+### 4.2 npm 包：`@ai-switch/tauri-plugin-devkit`
 
 面向构建阶段的 Node 工具，不进入插件浏览器运行时：
 
@@ -114,7 +114,7 @@ crate 是独立源码/发布单元，不把平台二进制塞进 npm `postinstal
 
 ### 4.4 命名与许可
 
-以上 npm scope 和 crate 名称是建议命名，尚未核验注册归属；正式发布前必须确认账号及名称控制权。名称变化不改变 `.aplg` 容器或协议语义。新公共代码建议延续本仓库 MIT 许可，随包携带许可证和必要的第三方声明；不迁入已有业务模块的实现代码。
+npm 包名按用户要求固定为 `@ai-switch/tauri-plugin-runtime` 和 `@ai-switch/tauri-plugin-devkit`。名称中的 `tauri` 不改变宿主中立性：浏览器入口仍不依赖 Tauri，其他应用可以实现同一协议。GitHub 的 `ai-switch` 组织权限已确认，但不能据此推定 npm 同名 scope 或包的发布权限；正式 npm 发布前仍需核验并配置。Rust crate `aplg-host` 仍为建议命名，发布前核验注册归属。新公共代码建议延续本仓库 MIT 许可，随包携带许可证和必要的第三方声明；不迁入已有业务模块的实现代码。
 
 ## 5. 对外接入体验
 
@@ -136,7 +136,7 @@ ai-switch 适配器把 APLG 操作封装为现有 `Transport.call("aplg_dispatch
 ```ts
 import fs from "node:fs/promises";
 import path from "node:path";
-import { aplg } from "@aplg/runtime/plugin";
+import { aplg } from "@ai-switch/tauri-plugin-runtime/plugin";
 
 await aplg.ready();
 const file = path.join("/data", "preferences.json");
@@ -163,7 +163,7 @@ const preferences = JSON.parse(await fs.readFile(file, "utf8"));
 
 同一 JS 包装接口不强制所有宿主提供全部能力。只有通过对应能力契约测试的 Provider 才能宣告支持，不能用空实现“模拟成功”。
 
-协议与 manifest 的 schema 以 `packages/aplg-runtime/src/protocol/schema/` 为唯一源，供 devkit 和外部宿主使用。TS/Rust 类型由该契约生成并提交，CI 检查生成物与共同夹具一致；普通 Cargo 用户不需要先安装 Node 才能编译公共 crate。
+协议与 manifest 的 schema 以 `packages/tauri-plugin-runtime/src/protocol/schema/` 为唯一源，供 devkit 和外部宿主使用。TS/Rust 类型由该契约生成并提交，CI 检查生成物与共同夹具一致；普通 Cargo 用户不需要先安装 Node 才能编译公共 crate。
 
 ### 6.2 请求边界
 
@@ -321,7 +321,7 @@ example-1.2.3.aplg               ZIP，扩展名不作为真实性凭据
 
 `permissions.filesystem[].root` 首期只接受 `plugin-data` 和 `user-selected`，分别表示 `/data` 与通过交互授权挂载的资源；声明 `user-selected` 本身不创建 grant。`/app` 只允许读取自身包，不能写入。
 
-ID 为稳定的小写命名空间标识，不因显示名或 GitHub 仓库改名变化。宿主将首次批准的 ID 与发布者密钥/仓库身份绑定，不能凭自报 ID 冒用已安装插件。
+ID 为稳定的小写命名空间标识，不因显示名或 GitHub 仓库改名变化。官方登记将 ID 与核验过的维护者、源码仓库身份绑定；分发信任另绑定 plugin-store 的仓库身份与签名密钥。不能凭自报 ID、维护者数组或商店共用公钥冒用其他已登记插件。
 
 `requires` 不满足则不能启动，`optional` 只用于功能降级。首期贡献点仅为独立页面和显式打开动作，不允许注册任意 HTTP 路由、访问数据库表或把插件代码直接注入算力池/账务热路径。宿主可以将 `contributes.views` 映射为侧栏或工具列表。
 
@@ -337,7 +337,7 @@ ID 为稳定的小写命名空间标识，不因显示名或 GitHub 仓库改名
 
 后端注册表是安装状态的权威来源；npm runtime 只镜像展示状态，不以浏览器 localStorage 决定哪个插件被信任或启用。
 
-安装记录包含：插件 ID、版本、包摘要、发布者/仓库身份、来源 Release、启用状态、授权修订、数据版本、当前及上一个可用版本。使用 ID/版本/摘要管理不可变目录，不原地覆盖正在使用的文件。
+安装记录包含：插件 ID、版本、包摘要、源码仓库 ID/源码 commit、分发仓库 ID/商店 commit、签名 key ID、来源 Release、启用状态、授权修订、数据版本、当前及上一个可用版本。源码作者身份与分发签名身份不能合并为一个含糊的“发布者”。使用 ID/版本/摘要管理不可变目录，不原地覆盖正在使用的文件。
 
 ```text
 Release 发现
@@ -363,7 +363,7 @@ Release 发现
 
 公共包版本不跟随 ai-switch 应用版本。首期 runtime 与 devkit 使用相同发布版本，devkit 明确依赖对应 runtime 范围；协议/API 版本独立协商。
 
-同仓库采用 `aplg-runtime-vX.Y.Z` tag，不会命中现有应用的 `v*.*.*` workflow：
+同仓库采用 `tauri-plugin-runtime-vX.Y.Z` tag，不会命中现有应用的 `v*.*.*` workflow：
 
 1. 校验 tag、两个包版本和依赖范围一致，使用锁文件安装依赖。
 2. 执行类型检查、单元测试、协议测试、Node 子集测试及构建。
@@ -375,33 +375,98 @@ Release 发现
 
 首次公开发布前需要维护者创建/确认 npm scope 与 package、配置 trusted publisher 的仓库/workflow 身份和受保护发布环境。未完成配置时 CI 失败关闭，不降级到不受控账号或临时密钥发布。
 
-### 12.2 `.aplg` 插件
+### 12.2 `.aplg` 插件：公开 PR 驱动的 plugin-store
 
-插件可以独立仓库维护；官方插件初期也可在 monorepo。独立仓库使用 `vX.Y.Z`，本仓库内插件使用 `aplg-plugin-<id>-vX.Y.Z`，只触发插件 workflow。可复用 workflow 的调用方固定版本/提交，不跟随可变 `main`。
+#### 12.2.1 仓库角色
+
+官方仓库为 [ai-switch/plugin-store](https://github.com/ai-switch/plugin-store)，GitHub 仓库数字 ID 为 `1368481641`。本轮已使用 `gh` 创建为公开仓库，默认分支 `main`，允许 Fork。
+
+任何人都可以提交插件登记或新版本 PR；这不代表任何人可以直接发布。源码保留在作者自己的公开 GitHub 仓库，plugin-store 存放登记、固定版本发布申请、受控构建/签名逻辑和索引。它通过自己的 GitHub Releases 分发 `.aplg`，不是只收录外部下载链接，也不接收提交到 Git 的插件二进制。
 
 ```text
-版本 tag
-  → manifest/版本/权限与依赖校验
-  → 类型、单元、插件能力契约测试
-  → 构建静态前端
-  → 有原生 profile 才启用 Rust target matrix
-  → 打包 .aplg 并运行归档验收
-  → 生成 release.json、SHA-256 和发布者签名
-  → 上传 Draft GitHub Release 的所有必需资产
-  → 检查资产集合完整后发布 Release
+插件作者的公开源码仓库
+  aplg.json + JS/TS/资源 + 锁文件 + 许可证
+                │ 固定完整 commit
+                ▼
+ai-switch/plugin-store 的发布申请 PR
+  entry.json + versions/<version>.json
+                │ 校验、身份与源码审查、维护者批准
+                ▼
+受控模板构建 → 产物验收 → 独立签名/发布 job
+                │
+                ▼
+plugin-store 的 GitHub Release + 可校验插件索引
 ```
 
-纯 JS 插件流水线不安装 Rust、不编译 ai-switch，也不要求用户拥有 ai-switch 源码。原生矩阵只发布明确声明且测试过的 target；缺少任何承诺目标时不发布部分成功的稳定版本。
+普通插件作者不需要配置商店发布密钥，也不需要在自己的仓库设置签名或 Release 凭据。两种 npm 包和通用协议不硬编码该仓库；“官方源是 plugin-store”属于 ai-switch 适配器的产品策略，不限制其他宿主选择自己的分发服务。
 
-Release 至少包含 `.aplg`、`release.json`、`release.json.sig` 和可读更新说明。`release.json` 包含插件 ID、版本、仓库数字 ID、源码提交、发布者 key ID、API/能力要求，以及每个资产的文件名、target、大小和 SHA-256；签名覆盖该文件的精确 UTF-8 字节，避免重新序列化导致歧义。归档摘要由已签名清单关联，不在归档中放自引用哈希。
+#### 12.2.2 PR 登记契约
 
-发布者使用专用 Ed25519 密钥，由受保护的 CI 发布环境持有；不复用 ai-switch 应用更新私钥。宿主的可信公钥来自已批准目录或管理员明确核验的首次绑定，不能下载同一个 Release 中的公钥后就视为可信。哈希解决完整性，签名和固定的发布者/仓库身份解决来源；provenance 可补充审计，但不证明插件没有恶意行为。
+使用以下追加式结构，字段说明已同步到远程仓库的 `plugins/README.md`：
 
-密钥轮换需旧可信密钥背书或管理员再次确认。GitHub Release 的 URL 或 asset 内容即使被替换，摘要与签名不一致也必须拒绝。仓库转移、发布者变更不自动继承信任。
+```text
+plugins/<plugin-id>/entry.json
+plugins/<plugin-id>/versions/<version>.json
+```
 
-构建 job 不持有发布私钥，只拥有必要的读取权限；签名/发布 job 使用受保护 tag 和 environment，在校验产物后才取得凭据。第三方 PR 不获得发布凭据，workflow/action 引用固定可信版本或提交；不能在带发布权限的 job 中执行未审阅的 PR 代码。
+- `entry.json` 包含 `schemaVersion: 1`、`id`、`name`、GitHub 用户名数组 `maintainers`、`repository`（`owner/repo`）、`repositoryId` 和 `license`。维护者列表只是一项待核验声明，不是授权凭据。
+- 每份版本记录包含 `schemaVersion: 1`、`pluginId`、`version`、`source.repository`、`source.repositoryId`、完整 40 位 `source.commit`、仓库内相对根路径 `source.path`、原始 `aplg.json` 精确字节的 `source.manifestSha256`、`build.profile`、`targets` 和非空字符串 `notes`。
+- 每份版本记录完整快照源码仓库信息，不能只引用可被更新的当前登记记录。校验仓库数字 ID、插件 ID、文件名版本、源码 manifest 与权限声明一致。
+- 首期 profile 为 `web-v1`，目标为 `["universal"]`，使用配套 devkit 定义的受控 Web 构建模板；不接受任意 shell 命令、外部 workflow 路径或上传凭据。后续 `native-stdio-v1` profile 另行审查目标矩阵，当前不能以 `web-v1` 夹带原生代码绕过审核。
+- 首次登记核验源码/资源发布权限、ID 归属和维护者身份。已有 ID 的更新需现有维护者授权；源码转移、维护者变更和接管申请单独审查，不能在版本 PR 中悄悄替换。
+- 版本记录一经发布不可原地覆盖；修复新增 SemVer。存在问题的版本通过审核后的撤回状态停止推荐，不替换同版本资产或抹除审计来源。
 
-第一版提供“输入 GitHub 仓库/Release + 已安装列表”，不建设中心化应用商店。标准安装和自动更新只接受该发布链路；本地目录/未签名 `.aplg` 仅供显式开发模式，不能静默进入正式信任库，Web 公开部署默认关闭开发模式。
+这些元数据是发布申请，不取代 `.aplg` 内的 `aplg.json`。自动化实施时为登记及版本记录增加独立 JSON Schema，不能把运行时 manifest schema 当作商店记录 schema。
+
+#### 12.2.3 审核、构建与发布隔离
+
+```text
+任何人的 Fork PR
+  → 无发布凭据的格式、身份、来源和静态清单检查
+  → 维护者审查固定源码及能力/权限变化
+  → 通过必需检查和审核后合并 main
+  → 从已审核 main 提交解析新增版本申请
+  → 在隔离构建 job 中获取固定源码 commit 并构建
+  → 验收 manifest、归档、能力、版本和目标产物
+  → 独立签名/发布 job 上传 Draft Release
+  → 必需资产完整后发布 Release
+  → 生成并发布新的签名索引快照
+```
+
+PR 检查运行在 `pull_request` 的只读上下文，不在带权限的 `pull_request_target` 中 checkout/执行 PR 代码。静态来源读取仅允许经校验的 GitHub 仓库、固定提交和相对路径，不接受任意网络 URL。CI 读取 PR 中的版本字段时将其当作数据，不插入 shell 代码。workflow/action 固定可信提交或明确受保护版本，工具链与打包器版本由维护者配置，投稿元数据不能自行替换。
+
+合并不是把第三方源码变成可信代码。构建 job 使用临时 GitHub-hosted runner、最低权限 token、`persist-credentials: false`，没有商店写权限、OIDC 签名权限或密钥；不复用可能被 PR 污染的高权限缓存。签名/发布 job 只运行维护者控制的代码和受控打包验证器，不执行插件的生命周期脚本、npm install、原生程序或任意解包后代码。
+
+发布 job 只消费对应已审核 main SHA、workflow 和 run ID 的构建结果，不能从某个同名 artifact 或任意 PR workflow_run 自动获得发布资格。`web-v1` 产物内 `aplg.json` 必须与审核时的源码清单摘要一致，防止构建脚本悄悄扩大权限。归档路径和大小限制在签名前再次验证。
+
+发布 workflow、签名策略、维护者配置需要额外 CODEOWNERS/规则集审批；发布 environment 设置审批与最小权限。在实施自动化时配置这些强制门禁，不能仅依赖贡献文档中的文字。GitHub 的提交作者字段、PR author 或版本文件里的 `maintainers` 数组都不能单独证明发布授权。
+
+同一 PR 可以申请多个插件版本，但各插件使用独立并发锁与发布事务，局部失败不得把未验证版本写入索引。纯 JS profile 不安装 Rust、不编译 ai-switch。以后原生 profile 只发布声明且通过验证的 target；任一承诺目标失败就不发布该插件版本的稳定 Release。
+
+#### 12.2.4 Release、签名与索引
+
+发布 job 在已批准的商店提交上创建 `plugin-<id>-v<version>` tag，不依赖用户手工打商店 tag，也不会触发应用仓库的版本流程。Release 至少包含 `.aplg`、`release.json`、`release.json.sig` 和可读说明；同版本不同摘要必须拒绝覆盖。重跑只允许核对完全一致的既有发布结果，不能覆盖旧资产。
+
+`release.json` 分开记录：
+
+- 插件身份、版本、API/能力要求和审批过的源 manifest 摘要。
+- `source`：实际源码仓库名称/数字 ID、commit 和插件根路径。
+- `distribution`：`ai-switch/plugin-store`、仓库 ID `1368481641`、商店提交、发布 tag、workflow 和 run ID。
+- 商店签名 key ID，以及每个资产的文件名、target、大小和 SHA-256。
+
+商店使用独立 Ed25519 密钥签署 `release.json` 精确 UTF-8 字节，资产摘要由已签名清单关联，不在归档中放自引用哈希。密钥只在受保护的签名/发布 environment 中可用，不复用应用更新私钥，不交给投稿者或源码构建 job。商店签名表示受控来源、审核链与完整性，不证明代码无恶意；原生执行仍需宿主单独授信。
+
+ai-switch 固定官方分发仓库身份及受信公钥。源码作者身份单独从已审查登记记录获取，不能误把所有插件都解释为由同一个源码作者维护。公钥的首次配置来自明确批准的官方配置，不能下载同一 Release 附带的公钥后自行建立信任；密钥轮换需旧可信密钥背书或管理员确认。仓库转移和发布者变更也不能静默继承信任。
+
+在插件 Release 完整可用之后生成带单调递增序号、生成时间和有效期的签名索引，包含插件、版本、权限摘要、分发资产指针和撤回状态。索引快照使用独立 `index-<sequence>` Release；客户端按索引命名空间发现和验签，不能把 GitHub 全仓库的 `releases/latest` 当作所有插件或索引的最新版本。记录已接受的序号，拒绝索引回退；索引过期时提示更新发现不可用，不在失去可信元数据后静默安装。更新索引失败可重试，不能撤掉已完成插件 Release 或宣称尚未发布版本可安装。
+
+第一版提供轻量官方列表、已安装列表和 PR 发布入口，不建设独立在线商店、付费系统或评分后台。本地目录/未签名 `.aplg` 仅用于显式开发模式，不进入正式信任库，Web 公开部署默认关闭开发模式。
+
+#### 12.2.5 当前已建立与尚未实施的部分
+
+已建立：公开仓库、MIT LICENSE、README、CONTRIBUTING、登记格式说明和 `.github/PULL_REQUEST_TEMPLATE.md`。初始化文档提交为 `b39cfbb`，当前可以正常 Fork 和提交 PR。
+
+尚未实施：登记 schema/自动校验、构建 profile、身份自动核验、强制审核规则、CODEOWNERS/发布 environment、签名密钥配置、插件/索引 Release workflow。当前 PR 合并不会自动构建或发布；仓库公开不意味着已经启用上述强制安全门禁。它们属于第 15 节第三阶段的独立交付。
 
 ### 12.3 ai-switch 应用
 
@@ -411,21 +476,39 @@ Release 至少包含 `.aplg`、`release.json`、`release.json.sig` 和可读更�
 
 ## 13. 仓库落点与接入范围
 
-下列目录是后续实施建议，本轮只创建本设计文档：
+下列 ai-switch 内目录是后续实施建议，本轮只修订本设计文档；独立的 plugin-store 已创建，但其中只有说明、登记契约、PR 模板和许可证：
 
 ```text
-packages/aplg-runtime/                两侧运行时、Node shim、协议/schema
-packages/aplg-devkit/                 CLI、Vite 适配、测试工具、workflow 模板
-examples/aplg-plain-host/             不依赖 ai-switch 的外部使用样例
-fixtures/aplg/                       兼容性、安全和归档夹具
-src-tauri/crates/aplg-host/           无 Tauri 依赖的通用 Rust 宿主
-src/plugins/                        ai-switch UI、Transport 适配、内置插件描述
-src-tauri/src/plugins/               ai-switch 身份/存储/业务 Provider 适配
-.github/workflows/aplg-runtime.yml   公共包流水线
-.github/workflows/aplg-plugin.yml    官方插件流水线
+packages/tauri-plugin-runtime/               两侧运行时、Node shim、协议/schema
+packages/tauri-plugin-devkit/                CLI、Vite 适配、测试工具、模板
+examples/aplg-plain-host/                    无 ai-switch 依赖的外部使用样例
+fixtures/aplg/                              兼容性、安全和归档夹具
+src-tauri/crates/aplg-host/                  无 Tauri 依赖的通用 Rust 宿主
+src/plugins/                               ai-switch UI、Transport 与内置项
+src-tauri/src/plugins/                      ai-switch 身份/存储/业务 Provider
+.github/workflows/tauri-plugin-runtime.yml  公共 npm 包流水线
 ```
 
-新增 pnpm workspace、包清单、锁文件和 Cargo 依赖属于实施阶段，不在设计阶段提前改动。源码先在现有仓库维护，公共包通过依赖边界和独立发布保持可提取性；不为追求“通用”立即建立多个独立仓库。
+独立仓库的落点如下；除已注明的初始文档外均为后续实施目录，不在应用仓库再维护一份插件发布 workflow：
+
+```text
+ai-switch/plugin-store/
+  README.md                                已建立
+  CONTRIBUTING.md                          已建立
+  LICENSE                                  已建立
+  plugins/README.md                        已建立，登记契约
+  .github/PULL_REQUEST_TEMPLATE.md         已建立
+  plugins/<id>/entry.json                  插件登记记录
+  plugins/<id>/versions/<version>.json     版本发布申请
+  schemas/store-entry.schema.json          登记 schema
+  schemas/store-version.schema.json        版本申请 schema
+  scripts/                                受控校验、构建分派、发布、索引逻辑
+  .github/workflows/validate-pr.yml        PR 静态校验
+  .github/workflows/release-plugin.yml     审核后构建与隔离签名发布
+  .github/workflows/release-index.yml      签名索引生成与重试
+```
+
+新增 pnpm workspace、包清单、锁文件和 Cargo 依赖属于实施阶段，不在设计阶段提前改动。runtime/devkit 源码先在现有应用仓库维护，通过依赖边界和独立发布保持可提取性；plugin-store 按用户要求独立建仓，只管理登记、发布申请、索引与分发流程。具体插件源码留在各自公开源码仓库，不把商店变成插件源码 monorepo。
 
 ai-switch 的最小接入点：
 
@@ -448,14 +531,14 @@ ai-switch 的最小接入点：
 | 无桌面依赖 | 公共 crate 和 standalone-server 在关闭 desktop 特性时通过检查与测试 |
 | 权限与隔离 | 越界路径、symlink/junction、伪造身份、跨实例事件、直接 IPC/HTTP、令牌窃取、未授权网络及低权限 token 全部被拒绝 |
 | 资源与中断 | 大文件分块、总量/并发限制、取消、断网、关闭页面、授权撤销不会泄漏句柄或自动重复非幂等写入 |
-| 发布与安装 | 纯 JS CI 不依赖 Rust；Release 含完整 `.aplg` 与签名资产；篡改、重放冲突包、路径穿越和不完整发布不能被安装 |
+| 发布与安装 | 任何人可通过 PR 申请；发布身份与权限不可自报绕过；PR/构建 job 无发布凭据；纯 JS CI 不依赖 Rust；只有审核后完整 `.aplg` 与签名 Release 才进入索引，篡改、回退和不完整发布被拒绝 |
 | 更新恢复 | 并发更新、进程占用、磁盘不足、启动失败及崩溃恢复保持旧版可用，明确受管数据与外部副作用的回滚差异 |
 | 原生 profile | 在后续交付中验证目标匹配、无主进程内加载、崩溃隔离、进程树清理和可信执行提示 |
 | 既有功能 | 插件关闭/未安装时，SaaS、生图、账号管理与双模式传输行为不变 |
 
 所有未来 AI Rust 检查复用本工作树的 `src-tauri/target-codex/`：在 `src-tauri` 工作目录设置 `CARGO_TARGET_DIR=target-codex`。公共 crate、样例和原生测试也复用该目录，不创建根 `target`、crate 自己的 `target` 或第三个临时 target。只有本地 dev 使用 `src-tauri/target/`。
 
-本轮未实施功能，因此不运行应用测试或 Cargo 构建；仅检查设计文档格式、示例 JSON、内部一致性及 Git 改动范围。
+本轮未实施 runtime 或发布自动化，因此不运行应用测试或 Cargo 构建；检查设计文档格式、示例 JSON、内部一致性、Git 改动范围，以及远程仓库可见性、文档、PR 入口和实际 workflow/Release 状态。
 
 ## 15. 分阶段交付与实施边界
 
@@ -463,10 +546,10 @@ ai-switch 的最小接入点：
 
 1. **通用契约与 npm 可复用性**：manifest/protocol、runtime 角色入口、devkit、无 ai-switch 的模拟宿主和纯 UI 插件；从实际 tarball 验证外部接入。
 2. **Rust 能力与双模式安全接入**：可信会话、权限、VFS、Node 异步子集、隔离资产服务及 ai-switch 两种传输；用同一文件插件完成两端验收。
-3. **正式发布和插件管理闭环**：GitHub Release、npm trusted publishing、签名信任、安全安装、更新恢复、管理 UI；未完成安全与发布验收前不开放生产第三方安装。
+3. **正式发布和插件管理闭环**：独立 plugin-store 的公开 PR 登记、身份审核、隔离构建、签名 Release 与索引，npm trusted publishing、安全安装、更新恢复、管理 UI；未完成安全与发布验收前不开放生产第三方安装。
 4. **原生扩展 profile**：独立 Rust 进程、RPC、平台矩阵与可信执行策略，独立验收，不阻塞简单插件生态。
 
-不列入上述交付：旧 MenuGit 二进制兼容、完整 Node、同步 I/O、WASM、持久后台 JS、中心化市场、SaaS 多租户插件安装、核心账务/代理热路径插件化。以后出现明确需求时新增专门设计，不以兼容开关偷偷加入公共核心。
+不列入上述交付：旧 MenuGit 二进制兼容、完整 Node、同步 I/O、WASM、持久后台 JS、独立在线商店/付费分发/评分系统、SaaS 多租户插件安装、核心账务/代理热路径插件化。以后出现明确需求时新增专门设计，不以兼容开关偷偷加入公共核心。
 
 ## 16. 结论
 
