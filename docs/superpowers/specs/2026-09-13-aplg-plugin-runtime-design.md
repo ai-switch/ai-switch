@@ -1,7 +1,7 @@
 # APLG 通用插件运行时与 ai-switch 双模式接入设计
 
 - 日期：2026-09-13
-- 状态：总体方向、npm 包名和公开 PR 发布入口已确认；本文同步 `ai-switch/plugin-store` 的职责与信任边界，等待书面规格审阅。已创建远程仓库及贡献文档，runtime、devkit 和自动发布流水线尚未实施或发布。
+- 状态：总体方向、npm 包名和公开 PR 发布入口已确认；本文同步 `ai-switch/plugin-store` 的职责与信任边界，并已拆分 runtime/devkit 两份待执行计划。已创建远程仓库及贡献文档，runtime、devkit 和自动发布流水线尚未实施或发布。
 - 工作树：`D:\Repos\worktree\ai-switch-plugin-design`
 - 分支：`docs/plugin-architecture`
 - ai-switch 调研基线：`a8387b5`。
@@ -552,7 +552,16 @@ ai-switch 的最小接入点：
 
 ## 15. 分阶段交付与实施边界
 
-本规格是架构总纲，不作为一个巨大任务一次实现。书面审阅后，分别为以下独立交付编写详细实施计划：
+本规格是架构总纲，不作为一个巨大任务一次实现。2026-09-14 已按用户要求完成前两份公共 npm 包的独立实施计划，均为待实施状态：
+
+- [runtime 实施计划](../plans/2026-09-14-tauri-plugin-runtime.md)：R1–R8，唯一协议/schema、宿主与插件入口、生命周期、Node 客户端及外部 tarball 验收。
+- [devkit 实施计划](../plans/2026-09-14-tauri-plugin-devkit.md)：D1–D9，CLI/校验、安全归档、Vite alias/bootstrap、模板/测试宿主、示例联调和两 npm 包协调 CI。
+
+依赖顺序是 runtime R1/R2 冻结公共契约 → devkit D1/D2 可启动；Node alias/bootstrap 依赖 runtime 相应入口；最终通过两个真实 tarball 联调。schema 不复制，runtime 不依赖 devkit。写出计划不表示已经实现、发布或完成真实 Rust 双模式验收。
+
+为明确类型与构建一致性，devkit 增加 types-only `/node-types` 子入口，重导出 runtime 子集类型；不引入另一份全量 Node API。公共包工具链固定在已验证的 Node `^22.12.0 || ^24.0.0 || >=26.0.0` 范围，应用自身工具链不随之升级。多入口 runtime 必须共享一个连接单例，不能按入口独立打包多份状态。
+
+以下分期仍用于划分整个系统的交付边界：
 
 1. **通用契约与 npm 可复用性**：manifest/protocol、runtime 角色入口、devkit、无 ai-switch 的模拟宿主和纯 UI 插件；从实际 tarball 验证外部接入。
 2. **Rust 能力与双模式安全接入**：可信会话、权限、VFS、Node 异步子集、隔离资产服务及 ai-switch 两种传输；用同一文件插件完成两端验收。
