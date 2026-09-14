@@ -12,7 +12,7 @@
 
 **Related plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-devkit.md`，其中 D1 消费 R1/R2，D3/D4 消费 R4/R5/R6，最终联调需要 R8。
 
-**状态：** 待实施。本文代码是目标接口、测试和关键实现片段，未写入产品目录，也未执行 npm 发布。
+**状态：** R1 已实施并完成本地验证，R2–R8 待实施；未执行 npm 发布。后续任务中的代码仍是目标接口/测试片段。
 
 ## Global Constraints
 
@@ -263,7 +263,7 @@ R2 创建 `tests/fixtures/session.ts`：`makeSession(overrides?: Partial<Session
 
 **Interfaces:** 消费总规格的 `.aplg` 契约；产出第 3.1 节的 manifest/路径导出和生成 schema 的检查命令。devkit D1/D2 依赖这些导出。
 
-- [ ] **Step 1：建立最小测试环境并写失败测试。** 使用包内 `vitest.config.ts`（node 环境，`include:["tests/**/*.test.ts"]`，排除 `tests/browser/**`），不继承根 React 配置。
+- [x] **Step 1：建立最小测试环境并写失败测试。** 使用包内 `vitest.config.ts`（node 环境，`include:["tests/**/*.test.ts"]`，排除 `tests/browser/**`），不继承根 React 配置。
 
 ```ts
 import { expect, test } from "vitest";
@@ -286,8 +286,8 @@ test("manifest metadata cannot masquerade as a filesystem path", () => {
 });
 ```
 
-- [ ] **Step 2：运行 RED。** `pnpm --dir packages/tauri-plugin-runtime exec vitest run tests/manifest.test.ts tests/path-policy.test.ts`；确认失败指向缺失 schema/validator/path 实现。
-- [ ] **Step 3：生成并实现最小协议导出。** draft-07 schema 所有对象默认 `additionalProperties:false`，根仅允许第 3.1 节字段；ID 长度 3–160、格式 `^[a-z0-9]+(?:[.-][a-z0-9]+)+$`，SemVer 和 engines range 使用 semver 校验，view ID 不重复，`requires` 与 `optional` 不能重名。`entry` 必须是通过路径策略的 `dist/` 下 `.html` 文件。
+- [x] **Step 2：运行 RED。** `pnpm --dir packages/tauri-plugin-runtime exec vitest run tests/manifest.test.ts tests/path-policy.test.ts`；确认失败指向缺失 schema/validator/path 实现。
+- [x] **Step 3：生成并实现最小协议导出。** draft-07 schema 所有对象默认 `additionalProperties:false`，根仅允许第 3.1 节字段；ID 长度 3–160、格式 `^[a-z0-9]+(?:[.-][a-z0-9]+)+$`，SemVer 和 engines range 使用 semver 校验，view ID 不重复，`requires` 与 `optional` 不能重名。`entry` 必须是通过路径策略的 `dist/` 下 `.html` 文件。
 
 网络条目只接受绝对 HTTP/HTTPS origin（不能有凭据、路径、query/hash、通配符）及大写 HTTP 方法数组；它是权限申请而非默认授权。`extensions` 的 key 必须是含命名空间的名称，值须为 JSON；禁止原型污染键。原生开关保留 boolean，devkit 的 web-v1 再拒绝 true。
 
@@ -323,8 +323,8 @@ export function parseManifest(value: unknown): Manifest {
 ```
 
 `verify:tarball` 到 R8 才新增到 package scripts，不保留指向不存在文件的命令。esbuild 生成 JS 后以独立 `tsconfig.types.json` 的 `tsc --emitDeclarationOnly` 生成 dist 声明；主 tsconfig 的 noEmit 不得阻止声明输出；R1 文件清单增加 `tsconfig.types.json`，R6 添加独立类型测试配置。类型测试使用 `tsc --noEmit` 的专门 fixtures tsconfig，不假定普通 vitest 会执行 `.test-d.ts`。
-- [ ] **Step 4：GREEN 与包边界检查。** 运行上述测试、`pnpm --dir packages/tauri-plugin-runtime run typecheck`、`run check:generated`、`run build`；主应用 `pnpm typecheck` / `pnpm test:run` 验证排除规则没有误收集新包。
-- [ ] **Step 5：只提交本任务文件。**
+- [x] **Step 4：GREEN 与包边界检查。** 运行上述测试、`pnpm --dir packages/tauri-plugin-runtime run typecheck`、`run check:generated`、`run build`；主应用 `pnpm typecheck` / `pnpm test:run` 验证排除规则没有误收集新包。
+- [x] **Step 5：只提交本任务文件。**
 
 ```powershell
 git add -- pnpm-workspace.yaml package.json pnpm-lock.yaml vitest.config.ts packages/tauri-plugin-runtime
@@ -751,3 +751,15 @@ git commit -m "test(runtime): 验收独立安装与无框架宿主接入"
 - R6/R7 交付 `/node/*`，D3 alias 只重定向包名；不把 Rust capability 实现复制到 devkit。
 - R8 tarball 必须独立可安装。只有 runtime 包通过自身验收后，才能把 devkit 的端到端失败归因于工具链而不是使用源码 alias 遮掩包导出问题。
 - 实施过程中更改上述公共接口，先修订两份计划和共同夹具，再继续下一任务；不得在实现者之间靠口头约定不同名字。
+
+## 执行记录（2026-09-14）
+
+### R1
+
+- 先写 manifest、路径与安全 JSON 反例测试，确认缺失实现时失败，再实现并通过 61 项测试。
+- 使用 JSON Schema 生成 TypeScript 和 Ajv standalone ESM；生成物校验不依赖 Git tracking，可检测文件被改动。
+- `typecheck`、`check:generated`、`build`、无 window 的 SSR import、冻结依赖安装通过。
+- 应用 `pnpm typecheck` 通过；`pnpm test:run` 为 74 文件 / 803 测试通过。首次 120 秒调用超时后检查了残留进程，再以更长限时完整复验。
+- 根直接依赖声明和版本未变；pnpm 的 workspace 锁文件补充了 Vite 5 的可选 lightningcss peer snapshot，已单独核对并通过应用回归。
+- 只安装本批实际需要的工具和 semver；Node shim/Playwright 依赖在对应后续任务添加，避免未使用依赖提前进入包。
+- 当前只导出根版本/类型及 `/protocol`；没有占位的 host/plugin/fs 实现，也未修改 Rust 或执行发布。

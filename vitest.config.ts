@@ -7,6 +7,8 @@ export default defineConfig({
     environment: "jsdom",
     exclude: [
       ...configDefaults.exclude,
+      "packages/**",
+      "examples/**",
       "**/.codex-run/**",
       "**/.worktrees/**",
       // Agent worktrees live here and hold a full checkout, so without this

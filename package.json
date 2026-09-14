@@ -19,7 +19,9 @@
     "server:build": "cd src-tauri && cargo build --no-default-features --features standalone-server --bin ai-switch-server",
     "server:build:release": "cd src-tauri && cargo build --release --no-default-features --features standalone-server --bin ai-switch-server",
     "server:check": "cd src-tauri && cargo check --no-default-features --features standalone-server --bin ai-switch-server",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "aplg:runtime:test": "pnpm --dir packages/tauri-plugin-runtime test",
+    "aplg:runtime:build": "pnpm --dir packages/tauri-plugin-runtime run build"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.51.1",
