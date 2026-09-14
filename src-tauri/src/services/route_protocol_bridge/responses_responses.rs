@@ -20,6 +20,16 @@ pub(super) fn responses_request_to_responses(body: &[u8]) -> Result<Vec<u8>, Str
         object.insert("tools".to_string(), Value::Array(tools));
     }
 
+    // Repair `function_call_output` (and sibling custom/tool-search output) items
+    // whose `call_id` was dropped on the wire — typical after a model switch
+    // replays history into a strict Responses upstream that rejects the request
+    // with "... function_call_output ... is missing call_id". Pairing each output
+    // with the preceding `function_call` by order produces a call_id that matches
+    // the assistant `tool_calls` id the upstream expects.
+    if let Some(input) = object.get_mut("input") {
+        repair_missing_output_call_ids(input);
+    }
+
     if object.get("store").and_then(Value::as_bool) == Some(false) {
         drop_non_replayable_reasoning(&mut object);
     }
@@ -97,6 +107,71 @@ fn flatten_native_responses_tools(
         flattened.push(function);
     }
     Ok(flattened)
+}
+
+fn repair_missing_output_call_ids(input: &mut Value) -> usize {
+    let mut pending_call_ids = Vec::new();
+    let mut repaired = 0usize;
+    match input {
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                repair_input_item_call_id(item, &mut pending_call_ids, &mut repaired);
+            }
+        }
+        _ => repair_input_item_call_id(input, &mut pending_call_ids, &mut repaired),
+    }
+    repaired
+}
+
+fn repair_input_item_call_id(
+    item: &mut Value,
+    pending_call_ids: &mut Vec<String>,
+    repaired: &mut usize,
+) {
+    let Some(object) = item.as_object_mut() else {
+        return;
+    };
+    let item_type = object.get("type").and_then(Value::as_str);
+    match item_type {
+        Some("function_call") | Some("custom_tool_call") | Some("tool_search_call") => {
+            let id = object
+                .get("call_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_default();
+            pending_call_ids.push(id);
+        }
+        Some("message") | Some("agent_message") => {
+            pending_call_ids.clear();
+        }
+        Some("function_call_output")
+        | Some("custom_tool_call_output")
+        | Some("tool_search_output") => {
+            if let Some(call_id) = object
+                .get("call_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if let Some(index) = pending_call_ids
+                    .iter()
+                    .position(|pending| pending == call_id)
+                {
+                    pending_call_ids.remove(index);
+                }
+            } else if pending_call_ids.len() == 1 {
+                if let Some(call_id) = pending_call_ids.pop() {
+                    if !call_id.is_empty() {
+                        object.insert("call_id".to_string(), Value::String(call_id));
+                        *repaired += 1;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 pub(super) fn responses_response_to_responses(
@@ -298,5 +373,59 @@ mod tests {
         }));
 
         assert_eq!(converted["input"], json!([reasoning]));
+    }
+
+    /// Model switch into a Responses upstream can replay a
+    /// `function_call_output` whose `call_id` was dropped; repair it from the
+    /// preceding `function_call` so the upstream's
+    /// "... function_call_output ... is missing call_id" check passes.
+    #[test]
+    fn repairs_function_call_output_missing_call_id_from_paired_function_call() {
+        let converted = converted_request(json!({
+            "model": "5.6",
+            "store": false,
+            "input": [
+                {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "output": "42"}
+            ]
+        }));
+        assert_eq!(
+            converted["input"][1]["call_id"], "call_1",
+            "converted={converted}"
+        );
+        assert_eq!(converted["input"][1]["output"], "42");
+    }
+
+    #[test]
+    fn matches_missing_output_to_the_only_unmatched_call_after_explicit_out_of_order_output() {
+        let converted = converted_request(json!({
+            "model": "gpt-5",
+            "input": [
+                {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call", "call_id": "call_2", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_2", "output": "result-2"},
+                {"type": "function_call_output", "output": "result-1"}
+            ]
+        }));
+        assert_eq!(
+            converted["input"][3]["call_id"], "call_1",
+            "converted={converted}"
+        );
+    }
+
+    #[test]
+    fn leaves_missing_output_unmodified_when_multiple_calls_remain_unmatched() {
+        let converted = converted_request(json!({
+            "model": "gpt-5",
+            "input": [
+                {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call", "call_id": "call_2", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "output": "ambiguous"}
+            ]
+        }));
+        assert!(
+            converted["input"][2].get("call_id").is_none(),
+            "converted={converted}"
+        );
     }
 }

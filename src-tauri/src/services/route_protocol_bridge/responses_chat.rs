@@ -1234,6 +1234,10 @@ fn convert_input_items(
 ) -> Result<Vec<Value>, String> {
     let mut messages = Vec::new();
     let mut pending_tool_calls = Vec::new();
+    // IDs of tool calls buffered for the current assistant turn. Outputs with
+    // an explicit ID remove that exact entry; a missing ID is repaired only
+    // when one unambiguous candidate remains.
+    let mut pending_call_ids = Vec::new();
     let mut pending_reasoning = None;
     let mut last_assistant_index = None;
 
@@ -1243,6 +1247,7 @@ fn convert_input_items(
             tool_namespaces,
             &mut messages,
             &mut pending_tool_calls,
+            &mut pending_call_ids,
             &mut pending_reasoning,
             &mut last_assistant_index,
         )?;
@@ -1367,6 +1372,7 @@ fn convert_input_item(
     tool_namespaces: &ResponsesToolNamespaces,
     messages: &mut Vec<Value>,
     pending_tool_calls: &mut Vec<Value>,
+    pending_call_ids: &mut Vec<String>,
     pending_reasoning: &mut Option<String>,
     last_assistant_index: &mut Option<usize>,
 ) -> Result<(), String> {
@@ -1376,7 +1382,11 @@ fn convert_input_item(
     match object.get("type").and_then(Value::as_str) {
         Some("function_call") => {
             append_unique_pending_reasoning(pending_reasoning, reasoning_text(item));
-            pending_tool_calls.push(function_call_to_chat(object, tool_namespaces)?);
+            let call = function_call_to_chat(object, tool_namespaces)?;
+            if let Some(id) = call.get("id").and_then(Value::as_str) {
+                pending_call_ids.push(id.to_string());
+            }
+            pending_tool_calls.push(call);
         }
         Some("function_call_output") => {
             flush_pending_tool_calls(
@@ -1385,12 +1395,21 @@ fn convert_input_item(
                 pending_reasoning,
                 last_assistant_index,
             );
-            messages.push(tool_result_message(object, "function_call_output")?);
+            let call_id = tool_result_call_id(object, pending_call_ids, "function_call_output")?;
+            messages.push(tool_result_message(
+                object,
+                "function_call_output",
+                &call_id,
+            )?);
             *last_assistant_index = None;
         }
         Some("custom_tool_call") | Some("tool_search_call") => {
             append_unique_pending_reasoning(pending_reasoning, reasoning_text(item));
-            pending_tool_calls.push(synthetic_tool_call(object)?);
+            let call = synthetic_tool_call(object)?;
+            if let Some(id) = call.get("id").and_then(Value::as_str) {
+                pending_call_ids.push(id.to_string());
+            }
+            pending_tool_calls.push(call);
         }
         Some("custom_tool_call_output") | Some("tool_search_output") => {
             flush_pending_tool_calls(
@@ -1399,13 +1418,15 @@ fn convert_input_item(
                 pending_reasoning,
                 last_assistant_index,
             );
-            messages.push(tool_result_message(object, "tool_output")?);
+            let call_id = tool_result_call_id(object, pending_call_ids, "tool_output")?;
+            messages.push(tool_result_message(object, "tool_output", &call_id)?);
             *last_assistant_index = None;
         }
         Some("reasoning") => {
             append_pending_reasoning(pending_reasoning, reasoning_text(item));
         }
         Some("input_text") | Some("input_image") | Some("input_file") | Some("input_audio") => {
+            pending_call_ids.clear();
             flush_pending_tool_calls(
                 messages,
                 pending_tool_calls,
@@ -1425,6 +1446,7 @@ fn convert_input_item(
             );
         }
         Some("message") | None if object.contains_key("role") || object.contains_key("content") => {
+            pending_call_ids.clear();
             flush_pending_tool_calls(
                 messages,
                 pending_tool_calls,
@@ -1473,6 +1495,7 @@ fn convert_input_item(
         }
         // Carries prose, so it is restated rather than dropped.
         Some("agent_message") => {
+            pending_call_ids.clear();
             flush_pending_tool_calls(
                 messages,
                 pending_tool_calls,
@@ -1707,8 +1730,38 @@ fn synthetic_tool_call(object: &Map<String, Value>) -> Result<Value, String> {
     }))
 }
 
-fn tool_result_message(object: &Map<String, Value>, label: &str) -> Result<Value, String> {
-    let call_id = required_string(object, "call_id", label)?;
+fn tool_result_call_id(
+    object: &Map<String, Value>,
+    pending_call_ids: &mut Vec<String>,
+    label: &str,
+) -> Result<String, String> {
+    if let Some(call_id) = object
+        .get("call_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(index) = pending_call_ids
+            .iter()
+            .position(|pending| pending == call_id)
+        {
+            pending_call_ids.remove(index);
+        }
+        return Ok(call_id.to_string());
+    }
+
+    if pending_call_ids.len() == 1 {
+        return Ok(pending_call_ids.pop().expect("length checked"));
+    }
+
+    Err(format!("Responses {label} is missing call_id"))
+}
+
+fn tool_result_message(
+    object: &Map<String, Value>,
+    _label: &str,
+    call_id: &str,
+) -> Result<Value, String> {
     let output = object
         .get("output")
         .or_else(|| object.get("result"))
@@ -2209,5 +2262,87 @@ mod tests {
         .unwrap();
 
         assert_eq!(converted["stream_options"]["include_usage"], true);
+    }
+
+    /// Switching models mid-conversation (e.g. gpt6 -> glm-5.3) can replay a
+    /// `function_call_output` whose `call_id` was dropped. The bridge must recover
+    /// it from the preceding `function_call` so the chat `tool_call_id` still
+    /// matches the assistant `tool_calls` id, instead of failing the whole
+    /// request with "Responses function_call_output is missing call_id".
+    #[test]
+    fn recovers_call_id_from_function_call_when_output_lacks_it() {
+        let body = serde_json::json!({
+            "model": "glm-5.3",
+            "input": [
+                {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{\"q\":\"x\"}"},
+                {"type": "function_call_output", "output": "42"}
+            ]
+        });
+
+        let converted: Value = serde_json::from_slice(
+            &responses_request_to_chat(&serde_json::to_vec(&body).unwrap()).unwrap(),
+        )
+        .unwrap();
+
+        let messages = converted["messages"].as_array().expect("messages");
+        let assistant = messages
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("assistant message");
+        assert_eq!(assistant["tool_calls"][0]["id"], "call_1");
+        let tool = messages
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .expect("tool message");
+        assert_eq!(
+            tool["tool_call_id"], "call_1",
+            "recovered call_id must match the assistant tool_calls id: {converted}"
+        );
+        assert_eq!(tool["content"], "42");
+    }
+
+    #[test]
+    fn matches_missing_output_to_the_only_unmatched_call_after_explicit_out_of_order_output() {
+        let body = serde_json::json!({
+            "model": "glm-5.3",
+            "input": [
+                {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call", "call_id": "call_2", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_2", "output": "result-2"},
+                {"type": "function_call_output", "output": "result-1"}
+            ]
+        });
+
+        let converted: Value = serde_json::from_slice(
+            &responses_request_to_chat(&serde_json::to_vec(&body).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let tools = converted["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .collect::<Vec<_>>();
+        assert_eq!(tools[0]["tool_call_id"], "call_2");
+        assert_eq!(tools[1]["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn does_not_guess_missing_output_when_multiple_calls_remain_unmatched() {
+        let body = serde_json::json!({
+            "model": "glm-5.3",
+            "input": [
+                {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call", "call_id": "call_2", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "output": "ambiguous"}
+            ]
+        });
+
+        let error = responses_request_to_chat(&serde_json::to_vec(&body).unwrap())
+            .expect_err("ambiguous missing call_id must not be guessed");
+        assert!(
+            error.contains("function_call_output is missing call_id"),
+            "{error}"
+        );
     }
 }
