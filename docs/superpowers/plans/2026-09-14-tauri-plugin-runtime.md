@@ -12,7 +12,7 @@
 
 **Related plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-devkit.md`，其中 D1 消费 R1/R2，D3/D4 消费 R4/R5/R6，最终联调需要 R8。
 
-**状态：** R1–R7 已实施并完成本地验证，R8 待实施；未执行 npm 发布。后续任务中的代码仍是目标接口/测试片段。
+**状态：** R1–R8 代码已实施；Windows Node 22.22.2 的独立 tarball、Chromium/WebKit 与主应用回归通过。R8 的 Linux 实测因本机 WSL VHD 缺失仍待补验，不标记跨平台全通过；npm 未发布，devkit 与真实宿主仍另行实施。
 
 ## Global Constraints
 
@@ -691,7 +691,7 @@ git commit -m "feat(runtime): 实现 Node 异步文件客户端与有界传输"
 
 **Interfaces:** 外部使用只允许 npm 子入口，不使用 `src/`、仓库 alias、workspace symlink 或 devkit 的测试实现。runtime 的最终 exports 为 `/host`、`/plugin`、`/protocol`、`/node/fs/promises`、`/node/fs`、`/node/path`、`/node/buffer`、`/node/events`、`/package.json`；根 `.` 只导出版本信息与公共类型，不能把全部宿主和 Node 能力聚合导致插件误引入。
 
-- [ ] **Step 1：写真实 tarball 安装验收。** `verify-tarball.mjs` 创建 `os.tmpdir()` 下独立消费者目录，安装本地 `.tgz`，执行下面的 Node 脚本和浏览器构建；在 finally 验证路径属于自己创建的临时目录后清理。外部项目无 workspace 和根 node_modules 回退。
+- [x] **Step 1：写真实 tarball 安装验收。** `verify-tarball.mjs` 创建 `os.tmpdir()` 下独立消费者目录，安装本地 `.tgz`，执行下面的 Node 脚本和浏览器构建；在 finally 验证路径属于自己创建的临时目录后清理。外部项目无 workspace 和根 node_modules 回退。
 
 ```js
 import assert from "node:assert/strict";
@@ -705,12 +705,12 @@ assert.equal(path.resolve("notes.txt"), "/data/notes.txt");
 assert.equal(validateManifest({ manifestVersion: 99 }).ok, false);
 ```
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-runtime run verify:tarball`；验证失败在缺失 exports/声明/依赖隔离，而非 npm 网络错误。
-- [ ] **Step 3：完成构建、声明和独立示例。** package `files` 仅为 dist、README、LICENSE、THIRD_PARTY_NOTICES，`publishConfig.access:public`、无 postinstall。esbuild 单次多入口构建浏览器 ESM 并共享 chunks，不自动注入 Node 全局；生成声明保留相同子入口路径。package-boundaries 脚本检查产物 imports 与依赖图，拒绝 `@tauri-apps`、React/Vue、ai-switch `/src`、真实 `node:fs` / `node:child_process`、source-root 绝对路径和密钥文件进入 runtime 包。
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-runtime run verify:tarball`；验证失败在缺失 exports/声明/依赖隔离，而非 npm 网络错误。
+- [x] **Step 3：完成构建、声明和独立示例。** package `files` 仅为 dist、README、LICENSE、THIRD_PARTY_NOTICES，`publishConfig.access:public`、无 postinstall。esbuild 单次多入口构建浏览器 ESM 并共享 chunks，不自动注入 Node 全局；生成声明保留相同子入口路径。package-boundaries 脚本检查产物 imports 与依赖图，拒绝 `@tauri-apps`、React/Vue、ai-switch `/src`、真实 `node:fs` / `node:child_process`、source-root 绝对路径和密钥文件进入 runtime 包。
 
 演示宿主提供只在内存的 `aplg.storage`、一个仅在 requires 声明 storage 且不申请系统文件/网络权限的插件和明确“模拟宿主，仅内存数据”的标识；真实 `aplg.fs` 不可用，不伪造磁盘能力。静态页面通过 R5 的 transport 接入，验证 iframe mount、存储、清理。示例 package 使用独立 Vite 8，不升级主应用 Vite 5。
 
-- [ ] **Step 4：执行完整验收。**
+- [ ] **Step 4：执行完整验收。** Windows 本地验收已通过，Linux 仍待实测（见 R8 执行记录），此项保留未勾选。
 
 ```powershell
 pnpm --dir packages/tauri-plugin-runtime run check:generated
@@ -725,7 +725,7 @@ pnpm test:run
 
 浏览器 fixture 通过 Playwright webServer 启动并在测试结束自动关闭；等待监听就绪而非固定 sleep。测试 Windows/Linux 至少两种 Node 承载与 Chromium/WebKit 浏览器；浏览器缺失先安装，不跳过后声称双模式全通过。产出 tarball 仅用于本地/CI 检查，不运行 `pnpm publish`。记录检查得到的大小与依赖，不预报“零依赖”或具体体积。
 
-- [ ] **Step 5：提交。**
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-runtime examples/aplg-plain-host scripts/aplg pnpm-lock.yaml
@@ -834,3 +834,18 @@ git commit -m "test(runtime): 验收独立安装与无框架宿主接入"
 - 新增 73 项单元测试（含宿主文件 guard）和 7 项实际 ESM iframe 文件测试；runtime 合计 24 文件 / 306 单元测试，Chromium 50 项全部通过。
 - typecheck、source/public type tests、生成物一致性、build、冻结安装和构建 package 的 fs/promises 单例 SSR smoke 通过。应用 typecheck 与 74 文件 / 803 项回归通过。R7 无新增依赖或锁文件改动。
 - 未修改 Rust、未运行 Cargo、未实现真实 OS 权限/符号链接策略；R8 独立 tarball、devkit、plugin-store 自动发布仍未完成。不推送、打 tag 或 npm 发布，测试服务已结束。
+
+### R8（2026-09-15）
+
+- 按 TDD 先验证缺失的 tarball 命令、包边界/纯宿主实现及旧 dist chunk 残留，再补实现。新增 53 项边界/构建依赖图测试、5 项内存 Transport 测试，runtime 合计 **26 文件 / 364 项单元测试**通过。
+- 构建前验证 package-local dist 的绝对路径、目录类型和非符号链接，再清理重建；保留单次多入口 ESM splitting。esbuild metafile 检查打包前输入，AST 检查产物 JS/声明导入，安装后递归检查生产依赖和 packed file allowlist；阻止 Tauri/框架/应用源码、真实 Node builtin、workspace/file 依赖、安装钩子、未解析导入、旧 chunk、source map 和常见密钥文件。
+- 构建图检查发现 fs/client 的 Buffer 仅用于类型却采用 value import，改为 import type；不改变运行时行为。fresh-checkout 验证证明示例单元测试依赖 public dist，因此 test 脚本先 build 再运行，不增加源码 alias 绕过外部边界。
+- verify:tarball 实际 npm pack 后在仓库外 os.tmpdir 创建新消费者，用 npm 安装真实 .tgz（禁用生命周期脚本），比对安装后所有文件/字节。九个公共 ESM 入口、package.json、内部路径不可见、SSR 无 DOM 访问、fs 单例、无 Node 全局的 Bundler/NodeNext 公开类型和外部 Vite 8 构建均通过。
+- 外部消费者不复制 workspace/node_modules/dist，不使用 devkit；最终 tarball 测得 **122,416 bytes 压缩、1,005,975 bytes 解包，77 文件 / 16 JS**。文档变化会微调字节数，以 verify:tarball 当次输出为准。四个直接依赖 buffer/events/path-browserify/semver，加上传递的 base64-js/ieee754，共六个已安装生产包，不宣称零依赖。
+- examples/aplg-plain-host 提供无框架宿主和内存便笺插件，所有 runtime 引用均为公共子入口。仅声明 storage，无文件/网络/native 权限；界面明确「模拟宿主，仅内存数据」，无 aplg.fs Provider。全零 packageSha256 是注明的模拟身份，不是验签。
+- 按 Vite manifest 的各页依赖图分离 loopback 宿主/插件资产来源；CORS 仅在插件资产端，CSP 不含 unsafe-inline/unsafe-eval 且 connect-src none。真实 opaque iframe 验证存储、XSS 文本处理、关闭/重挂载资源清理、host DOM/localStorage 禁止、响应头及 375px 布局；外部 tarball **4 场景 × Chromium/WebKit = 8 项**通过，桌面/移动页面人工截图检查通过。
+- 原有浏览器套件扩为双项目，**50 场景 × Chromium/WebKit = 100 项**通过。初次外部 Chromium 生命周期场景曾出现保存未反映到计数的单次失败；加入失败现场日志和保存结果阶段断言后多轮外部安装均通过，另外原始无中间断言序列 50 次串行 + 80 次双 worker 新上下文复跑均未复现。未声称已定位/修复一个 runtime 竞态；保留诊断并继续观察。
+- 独立 Node 测试 **12 项**验证清理旧产物、静态资产/CSP 隔离、成功/失败/超时/中断、子进程后代退出及临时目录所有权篡改。清理在 finally 内检查 realpath、父目录、文件身份和所有权 marker；POSIX 使用新建的自有 process group，但这里只验证了信号路由单元测试，不当作 Linux 实测。
+- 本机 WebKit 26.6 已安装并运行成功；Ubuntu 与 podman-machine-default 两个 WSL 均报 MountDisk/ERROR_FILE_NOT_FOUND（各自 ext4.vhdx 不存在），因此 **Linux 验收未完成**。没有修复用户 WSL、新建 VM 或为此推送/触发远程 CI；Windows/Ubuntu Node 22/24 矩阵由 devkit D9 协调 workflow 继续补齐。
+- typecheck、源/公共出口 type tests、生成物校验、build、冻结依赖安装及示例 typecheck 通过；主应用 typecheck 与 **74 文件 / 803 项回归**通过。根应用依赖未升级，无 Cargo/Rust 改动。
+- runtime README、示例中文指南、三方许可说明和总体设计状态已同步。本任务本地提交，不推送、打 tag、发布 npm 或改远端 plugin-store/plugin-example；npm scope 权限、devkit、真实 Tauri/Web/Rust 提供方、安装验签与商店自动发布仍未交付。

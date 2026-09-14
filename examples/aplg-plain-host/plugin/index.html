@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>内存便笺 · 隔离插件</title>
+    <script type="module" src="/plugin/main.ts"></script>
+  </head>
+  <body class="plugin">
+    <main>
+      <div class="subheading"><h1>内存便笺</h1><span id="connection" role="status">等待宿主连接</span></div>
+      <p class="muted">只存于这一次视图会话，关闭即清空。</p>
+      <label for="note">便笺内容</label>
+      <textarea id="note" rows="2" maxlength="2048" placeholder="输入一段文字，试试保存和读取。" disabled></textarea>
+      <div class="actions">
+        <button id="save" type="button" disabled>保存到内存</button>
+        <button id="read" class="secondary" type="button" disabled>读取</button>
+        <button id="remove" class="secondary" type="button" disabled>清除</button>
+      </div>
+      <p id="result" role="status">尚未保存</p>
+      <p class="capability">文件系统：<span id="fs-capability">等待协商</span></p>
+      <p class="capability">所有调用经由 <code>@ai-switch/tauri-plugin-runtime/plugin</code></p>
+    </main>
+  </body>
+</html>

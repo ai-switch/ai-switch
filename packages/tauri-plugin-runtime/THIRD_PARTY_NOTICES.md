@@ -1,7 +1,12 @@
 # Third-party notices
 
 The built ESM output includes code from the following packages under their listed licenses.
-The JSON Schema compiler remains a development-only dependency.
+The JSON Schema compiler remains a development-only dependency. Its generated
+standalone validators include the runtime helpers listed below; compiler code is
+not installed or executed in the browser. Build/test tools (TypeScript, Vite,
+esbuild, Vitest and Playwright) and the plain-host example are not shipped.
+These notices are included in every npm tarball; bundling and ESM splitting do
+not remove the obligations of the original licenses.
 
 ## node-semver 7.8.5
 

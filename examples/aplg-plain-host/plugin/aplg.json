@@ -1,0 +1,15 @@
+{
+  "manifestVersion": 1,
+  "id": "io.github.ai-switch.memory-notes",
+  "name": "内存便笺",
+  "version": "0.1.0",
+  "description": "APLG 公共 npm 入口示例；数据仅存于当前视图内存。",
+  "license": "MIT",
+  "engines": { "aplg": "^1.0.0" },
+  "entry": "dist/plugin/index.html",
+  "activation": "view",
+  "requires": { "aplg.storage": "^1.0.0" },
+  "optional": {},
+  "permissions": { "filesystem": [], "network": [], "native": false },
+  "contributes": { "views": [{ "id": "notes", "title": "内存便笺" }] }
+}

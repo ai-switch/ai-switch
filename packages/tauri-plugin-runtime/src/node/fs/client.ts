@@ -1,4 +1,4 @@
-import { Buffer } from "../buffer.js";
+import type { Buffer } from "../buffer.js";
 import { AplgError } from "../../protocol/errors.js";
 import { createBackend } from "./backend.js";
 import { createLifecycle } from "./lifecycle.js";

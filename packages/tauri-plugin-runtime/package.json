@@ -61,11 +61,13 @@
     "generate": "node scripts/generate-protocol.mjs",
     "check:generated": "node scripts/check-generated.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run",
+    "test": "node scripts/build.mjs && vitest run",
     "build": "node scripts/build.mjs",
     "test:browser": "playwright test",
     "test:types": "tsc --noEmit -p tsconfig.type-tests.json",
-    "test:types:public": "tsc --noEmit -p tsconfig.public-type-tests.json"
+    "test:types:public": "tsc --noEmit -p tsconfig.public-type-tests.json",
+    "verify:tarball": "node scripts/verify-tarball.mjs",
+    "test:package": "node --test tests/package/*.test.mjs"
   },
   "dependencies": {
     "buffer": "6.0.3",
