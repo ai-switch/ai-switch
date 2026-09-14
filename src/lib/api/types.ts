@@ -1386,3 +1386,28 @@ export type SkillPackageDetail = {
   skills: SkillItem[];
   members: SkillPackageMember[];
 };
+
+export type CodexOAuthMethod = "browser" | "device_code";
+export type CodexOAuthPhase =
+  | "starting"
+  | "waiting"
+  | "importing"
+  | "succeeded"
+  | "cancelled"
+  | "failed"
+  | "expired";
+export interface ImportedCodexAccount {
+  id: string;
+  display_name: string;
+  email: string | null;
+}
+export interface CodexOAuthStatus {
+  session_id: string;
+  method: CodexOAuthMethod;
+  status: CodexOAuthPhase;
+  authorization_url: string | null;
+  user_code: string | null;
+  expires_at: string;
+  account: ImportedCodexAccount | null;
+  error: ApiError | null;
+}

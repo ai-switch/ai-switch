@@ -3500,168 +3500,612 @@ summary:focus-visible {
 /* -------------------------------------------------------------------------- */
 /* Dark theme                                                                  */
 /* -------------------------------------------------------------------------- */
-/* The app shell is styled with light "stone" utilities throughout. Rather than
-   adding `dark:` variants to every screen, `html.dark` (toggled by
-   src/lib/theme.ts) remaps the most common surfaces, borders, and text tones.
-   The Vibe screen manages its own themes/skins and is untouched. */
-.dark {
+/* Match whole utilities (including opacity and interaction variants), never
+   substrings such as class*="bg-white" which also match hover-only utilities.
+   Vibe and SaaS own their palettes. Exclude both roots AND descendants, while
+   still covering global dialogs mounted outside AppLayout. */
+html.dark {
   color-scheme: dark;
   color: #e7e5e4;
+  background: #191614;
 }
 
-.dark body {
+html.dark body {
   background:
     radial-gradient(circle at 18% 0%, rgba(255, 255, 255, 0.05), transparent 34rem),
     linear-gradient(135deg, #1c1917 0%, #171412 48%, #131110 100%);
 }
 
-/* Surfaces. */
-.dark .bg-white,
-.dark .bg-white\/82,
-.dark .bg-white\/80,
-.dark .bg-white\/70 {
+/* Neutral surfaces. Low-opacity white highlights on solid buttons stay white. */
+
+html.dark :is(.bg-white):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
   background-color: #221f1c;
 }
 
-.dark .bg-white\/60,
-.dark .bg-white\/56,
-.dark .bg-white\/50 {
-  background-color: rgba(34, 31, 28, 0.72);
+html.dark :is([class~="bg-white/50"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(34, 31, 28, 0.5);
 }
 
-.dark .bg-stone-50,
-.dark .bg-stone-50\/70 {
+html.dark :is([class~="bg-white/55"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(34, 31, 28, 0.55);
+}
+
+html.dark :is([class~="bg-white/56"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(34, 31, 28, 0.56);
+}
+
+html.dark :is([class~="bg-white/65"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(34, 31, 28, 0.65);
+}
+
+html.dark :is([class~="bg-white/70"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(34, 31, 28, 0.7);
+}
+
+html.dark :is([class~="bg-white/80"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(34, 31, 28, 0.8);
+}
+
+html.dark :is([class~="bg-white/82"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(34, 31, 28, 0.82);
+}
+
+html.dark :is([class~="bg-white/84"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(34, 31, 28, 0.84);
+}
+
+html.dark :is([class~="bg-white/86"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(34, 31, 28, 0.86);
+}
+
+html.dark :is([class~="bg-white/88"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(34, 31, 28, 0.88);
+}
+
+html.dark :is([class~="bg-white/90"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(34, 31, 28, 0.9);
+}
+
+html.dark :is([class~="bg-white/95"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(34, 31, 28, 0.95);
+}
+
+html.dark :is(.bg-stone-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
   background-color: #292523;
 }
 
-.dark .bg-stone-100 {
+html.dark :is(.bg-stone-100, .bg-slate-100):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
   background-color: #191614;
 }
 
-.dark .bg-stone-200 {
+html.dark :is(.bg-stone-200):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
   background-color: #34302c;
 }
 
-.dark .bg-stone-900 {
-  background-color: #0f0d0c;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14);
+html.dark :is(.bg-stone-300):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #57534e;
 }
 
-.dark .bg-stone-950 {
+html.dark :is(.bg-stone-800):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #211d1a;
+}
+
+html.dark :is(.bg-stone-900, .bg-slate-900):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #141110;
+}
+
+html.dark :is(.bg-stone-950):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
   background-color: #0c0a09;
 }
 
-/* Borders and rings. */
-.dark .border-stone-100 {
-  border-color: #2b2724;
+html.dark :is([class~="bg-stone-50/50"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(41, 37, 35, 0.5);
 }
 
-.dark .border-stone-200 {
-  border-color: #38332f;
+html.dark :is([class~="bg-stone-50/60"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(41, 37, 35, 0.6);
 }
 
-.dark .border-stone-300,
-.dark .border-stone-400 {
-  border-color: #4a453f;
+html.dark :is([class~="bg-stone-50/70"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(41, 37, 35, 0.7);
 }
 
-.dark .border-white\/70,
-.dark .border-white\/80 {
-  border-color: rgba(255, 255, 255, 0.1);
+html.dark :is([class~="bg-stone-50/80"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(41, 37, 35, 0.8);
 }
 
-.dark .ring-stone-200,
-.dark .ring-stone-300 {
-  --tw-ring-color: #3d3833;
+html.dark :is([class~="bg-stone-100/75"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(25, 22, 20, 0.75);
 }
 
-/* Text tones. */
-.dark .text-stone-950,
-.dark .text-stone-900 {
-  color: #f2f0ee;
+html.dark :is([class~="bg-stone-100/90"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(25, 22, 20, 0.9);
 }
 
-.dark .text-stone-800 {
-  color: #dedbd8;
+html.dark :is([class~="hover:bg-white"]:hover, [class~="hover:bg-white/60"]:hover, [class~="hover:bg-white/70"]:hover, [class~="hover:bg-stone-50"]:hover, [class~="hover:bg-stone-100"]:hover, [class~="hover:bg-slate-50"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #34302c;
 }
 
-.dark .text-stone-700 {
-  color: #cbc7c3;
+html.dark :is([class~="hover:bg-stone-200"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #443d37;
 }
 
-.dark .text-stone-600 {
+html.dark :is([class~="hover:bg-stone-300/70"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(87, 83, 78, 0.7);
+}
+
+html.dark :is([class~="hover:bg-stone-700"]:hover, [class~="hover:bg-stone-800"]:hover, [class~="hover:bg-slate-800"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #302b27;
+}
+
+html.dark :is([class~="disabled:bg-stone-100"]:disabled):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #292523;
+}
+
+html.dark :is([class~="disabled:bg-stone-400"]:disabled):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #57534e;
+}
+
+/* Text: muted 11–13px labels still need readable contrast. */
+
+html.dark :is(.text-stone-400):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
   color: #a8a29e;
 }
 
-.dark .text-stone-500 {
-  color: #8f8a84;
+html.dark :is(.text-stone-500):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #b1aaa4;
 }
 
-.dark .text-stone-400 {
-  color: #736d66;
+html.dark :is(.text-stone-600):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #c4beb9;
 }
 
-/* Hover states. */
-.dark .hover\:bg-white:hover,
-.dark .hover\:bg-white\/60:hover,
-.dark .hover\:bg-white\/70:hover,
-.dark .hover\:bg-stone-50:hover,
-.dark .hover\:bg-stone-100:hover {
-  background-color: #2c2825;
+html.dark :is([class~="hover:text-stone-600"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #c4beb9;
 }
 
-.dark .hover\:bg-stone-800:hover {
-  background-color: #1d1a17;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18);
+html.dark :is(.text-stone-700, .text-slate-700):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #d6d1cc;
 }
 
-.dark .hover\:border-stone-300:hover,
-.dark .hover\:border-stone-400:hover {
-  border-color: #55504a;
+html.dark :is([class~="hover:text-stone-700"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #d6d1cc;
 }
 
-.dark .hover\:text-stone-950:hover,
-.dark .hover\:text-stone-900:hover {
+html.dark :is(.text-stone-800):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #e7e5e4;
+}
+
+html.dark :is([class~="hover:text-stone-800"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #e7e5e4;
+}
+
+html.dark :is(.text-stone-900, .text-stone-950, .text-slate-900):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
   color: #f2f0ee;
 }
 
-.dark .hover\:text-stone-700:hover {
-  color: #cbc7c3;
+html.dark :is([class~="hover:text-stone-900"]:hover, [class~="hover:text-stone-950"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #f2f0ee;
 }
 
-/* Sidebar: swap the light gradient and decorative overlay for a dark one. */
-.dark .app-sidebar {
-  background: linear-gradient(
-    135deg,
-    rgba(28, 25, 23, 0.94),
-    rgba(23, 21, 19, 0.9) 48%,
-    rgba(25, 22, 19, 0.88)
-  );
+html.dark :is([class~="disabled:text-stone-500"]:disabled, [class~="disabled:text-stone-600"]:disabled):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #a8a29e;
 }
 
-.dark .app-sidebar > .pointer-events-none.absolute.inset-0 {
+html.dark [class~="placeholder:text-stone-400"]:not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *)::placeholder {
+  color: #a8a29e;
+}
+
+/* Borders, dividers and rings use UnoCSS variables, not Tailwind --tw-*. */
+
+html.dark :is(.border-stone-100):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #332e29;
+}
+
+html.dark :is(.border-stone-200, .border-slate-200):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #49423c;
+}
+
+html.dark :is(.border-stone-300, .border-stone-400):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #62594f;
+}
+
+html.dark :is([class~="border-stone-200/70"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: rgba(73, 66, 60, 0.7);
+}
+
+html.dark :is([class~="border-stone-200/80"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: rgba(73, 66, 60, 0.8);
+}
+
+html.dark :is([class~="border-stone-300/80"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: rgba(98, 89, 79, 0.8);
+}
+
+html.dark :is([class~="border-white/70"], [class~="border-white/80"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+html.dark :is([class~="hover:border-stone-300"]:hover, [class~="hover:border-stone-400"]:hover, [class~="hover:border-slate-300"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #8f8174;
+}
+
+html.dark :is(.divide-stone-100, .divide-stone-200):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) > :not([hidden]) ~ :not([hidden]) {
+  border-color: #49423c;
+}
+
+html.dark :is(.ring-stone-200, .ring-stone-300, [class~="ring-stone-300/70"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  --un-ring-color: #62594f;
+}
+
+html.dark :is([class~="hover:ring-stone-300"]:hover, [class~="focus:ring-stone-100"]:focus, [class~="focus:ring-stone-300"]:focus):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  --un-ring-color: #62594f;
+}
+
+/* Status palettes retain their meaning without bright light-mode fills. */
+
+html.dark :is(.bg-red-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #3a1f20;
+}
+
+html.dark :is([class~="hover:bg-red-50"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #3a1f20;
+}
+
+html.dark :is(.bg-red-100):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #4a2527;
+}
+
+html.dark :is([class~="hover:bg-red-100"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #4a2527;
+}
+
+html.dark :is(.border-red-200, .border-red-300):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #713236;
+}
+
+html.dark :is([class~="hover:border-red-300"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #713236;
+}
+
+html.dark :is(.text-red-600, .text-red-700):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #fca5a5;
+}
+
+html.dark :is([class~="hover:text-red-600"]:hover, [class~="hover:text-red-700"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #fca5a5;
+}
+
+html.dark :is(.text-red-800, .text-red-900, .text-red-950):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #fecaca;
+}
+
+html.dark :is(.ring-red-200):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  --un-ring-color: #713236;
+}
+
+html.dark :is(.bg-amber-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #3a2b16;
+}
+
+html.dark :is([class~="hover:bg-amber-50"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #3a2b16;
+}
+
+html.dark :is([class~="hover:bg-amber-100"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #4b3519;
+}
+
+html.dark :is(.border-amber-100, .border-amber-200, .border-amber-300):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #765321;
+}
+
+html.dark :is([class~="hover:border-amber-300"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #765321;
+}
+
+html.dark :is(.text-amber-600, .text-amber-700):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #fcd34d;
+}
+
+html.dark :is(.text-amber-800, .text-amber-900, .text-amber-950):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #fde68a;
+}
+
+html.dark :is(.ring-amber-200, .ring-amber-300):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  --un-ring-color: #765321;
+}
+
+html.dark :is(.bg-blue-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #172f46;
+}
+
+html.dark :is([class~="hover:bg-blue-100"]:hover, [class~="focus-visible:bg-blue-100"]:focus-visible):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #1d3b58;
+}
+
+html.dark :is(.border-blue-100, .border-blue-200):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #2d5b85;
+}
+
+html.dark :is(.text-blue-700):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #93c5fd;
+}
+
+html.dark :is([class~="hover:text-blue-600"]:hover, [class~="hover:text-blue-700"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #93c5fd;
+}
+
+html.dark :is(.text-blue-800, .text-blue-900):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #bfdbfe;
+}
+
+html.dark :is([class~="hover:text-blue-900"]:hover, [class~="focus-visible:text-blue-800"]:focus-visible):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #bfdbfe;
+}
+
+html.dark :is(.ring-blue-200):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  --un-ring-color: #2d5b85;
+}
+
+html.dark :is([class~="focus:ring-blue-100"]:focus, [class~="focus:ring-blue-200"]:focus):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  --un-ring-color: #2d5b85;
+}
+
+html.dark :is(.bg-emerald-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #17352c;
+}
+
+html.dark :is([class~="hover:bg-emerald-50"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #17352c;
+}
+
+html.dark :is(.bg-emerald-100):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #1d4738;
+}
+
+html.dark :is([class~="hover:bg-emerald-100"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #1d4738;
+}
+
+html.dark :is(.border-emerald-100, .border-emerald-200, .border-emerald-300):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #27634f;
+}
+
+html.dark :is([class~="hover:border-emerald-200"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #27634f;
+}
+
+html.dark :is(.text-emerald-600, .text-emerald-700):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #6ee7b7;
+}
+
+html.dark :is(.text-emerald-800, .text-emerald-900, .text-emerald-950):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #a7f3d0;
+}
+
+html.dark :is(.ring-emerald-200):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  --un-ring-color: #27634f;
+}
+
+html.dark :is(.bg-orange-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #3b271a;
+}
+
+html.dark :is([class~="hover:bg-orange-50"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #3b271a;
+}
+
+html.dark :is(.bg-orange-100):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #4b3220;
+}
+
+html.dark :is([class~="hover:bg-orange-100"]:hover, [class~="hover:bg-orange-200"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #4b3220;
+}
+
+html.dark :is(.border-orange-100, .border-orange-200):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #785031;
+}
+
+html.dark :is(.text-orange-700):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #fdba74;
+}
+
+html.dark :is(.text-orange-800):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #fed7aa;
+}
+
+html.dark :is(.bg-sky-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #152f40;
+}
+
+html.dark :is(.border-sky-100, .border-sky-200):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #305c78;
+}
+
+html.dark :is(.text-sky-700):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #7dd3fc;
+}
+
+html.dark :is(.text-sky-800, .text-sky-900, .text-sky-950):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #bae6fd;
+}
+
+html.dark :is([class~="hover:text-sky-800"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #bae6fd;
+}
+
+html.dark :is(.ring-sky-200):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  --un-ring-color: #305c78;
+}
+
+html.dark :is(.bg-teal-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #183430;
+}
+
+html.dark :is([class~="hover:bg-teal-50"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #183430;
+}
+
+html.dark :is(.text-teal-700):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #5eead4;
+}
+
+html.dark :is(.text-teal-800):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #99f6e4;
+}
+
+html.dark :is(.bg-violet-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #2d2342;
+}
+
+html.dark :is([class~="hover:bg-violet-50"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #2d2342;
+}
+
+html.dark :is(.bg-violet-100):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #3d2e57;
+}
+
+html.dark :is(.border-violet-200, .border-violet-300):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #625081;
+}
+
+html.dark :is(.text-violet-700):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #c4b5fd;
+}
+
+html.dark :is(.text-violet-800, .text-violet-900):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #ddd6fe;
+}
+
+html.dark :is(.bg-indigo-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #242a43;
+}
+
+html.dark :is(.text-indigo-600):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #a5b4fc;
+}
+
+html.dark :is(.text-indigo-800):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #c7d2fe;
+}
+
+html.dark :is(.bg-cyan-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #15333b;
+}
+
+html.dark :is(.text-cyan-800):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #a5f3fc;
+}
+
+html.dark :is(.bg-rose-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #3c212b;
+}
+
+html.dark :is(.bg-rose-100):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: #4e2937;
+}
+
+html.dark :is(.text-rose-600, .text-rose-700):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #fda4af;
+}
+
+html.dark :is(.text-rose-900):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: #fecdd3;
+}
+
+html.dark :is(.ring-rose-200):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  --un-ring-color: #7c4157;
+}
+
+html.dark :is([class~="bg-amber-50/80"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(58, 43, 22, 0.8);
+}
+
+html.dark :is([class~="bg-amber-100/80"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(75, 53, 25, 0.8);
+}
+
+html.dark :is([class~="bg-blue-50/60"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(23, 47, 70, 0.6);
+}
+
+html.dark :is([class~="bg-blue-50/70"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(23, 47, 70, 0.7);
+}
+
+html.dark :is([class~="hover:bg-emerald-50/70"]:hover):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(23, 53, 44, 0.7);
+}
+
+html.dark :is([class~="bg-orange-50/50"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(59, 39, 26, 0.5);
+}
+
+html.dark :is([class~="bg-sky-50/60"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  background-color: rgba(21, 47, 64, 0.6);
+}
+
+html.dark :is([class~="text-sky-800/80"]):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  color: rgba(186, 230, 253, 0.8);
+}
+
+/* Utility gradients need their stops themed as well as the solid fill. */
+
+html.dark :is(.from-amber-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  --un-gradient-from: #3a2b16 var(--un-gradient-from-position);
+}
+
+html.dark :is(.from-sky-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  --un-gradient-from: #152f40 var(--un-gradient-from-position);
+}
+
+html.dark :is(.to-emerald-50):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  --un-gradient-to: #17352c var(--un-gradient-to-position);
+}
+
+html.dark :is(.to-white):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  --un-gradient-to: #221f1c var(--un-gradient-to-position);
+}
+
+html.dark :is(.via-white):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  --un-gradient-stops: var(--un-gradient-from), #221f1c var(--un-gradient-via-position), var(--un-gradient-to);
+}
+
+/* Sidebar decorative gradients are intentionally separate from content cards. */
+html.dark .app-sidebar {
+  background: linear-gradient(135deg, rgba(28, 25, 23, 0.94), rgba(23, 21, 19, 0.9) 48%, rgba(25, 22, 19, 0.88));
+}
+html.dark .app-sidebar > .pointer-events-none.absolute.inset-0 {
   background:
     radial-gradient(circle at 20% 15%, rgba(16, 185, 129, 0.1), transparent 34%),
     radial-gradient(circle at 88% 8%, rgba(245, 158, 11, 0.08), transparent 30%),
     linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
 }
 
-/* Form controls: styles.css hardcodes light borders/backgrounds outside of
-   utilities, so mirror those rules for dark. */
-.dark :where(input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
-  border-color: #3d3833;
+/* Native field defaults must not override status/validation borders. */
+html.dark input:not([type="checkbox"]):not([type="radio"]):not([class*="border-"]):not(:focus):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *),
+html.dark select:not([class*="border-"]):not(:focus):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *),
+html.dark textarea:not([class*="border-"]):not(:focus):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #49423c;
+}
+html.dark .accounts-screen input:not([type="checkbox"]):not([type="radio"]):not([class*="border"]),
+html.dark .accounts-screen select:not([class*="border"]),
+html.dark .accounts-screen textarea:not([class*="border"]) {
+  border-color: #49423c;
+  background: #221f1c;
 }
 
-.dark input:not([type="checkbox"]):not([type="radio"])[class*="border-stone-200"],
-.dark select[class*="border-stone-200"],
-.dark textarea[class*="border-stone-200"] {
-  border-color: #3d3833;
-}
+/* Usage charts use currentColor for axes/grid only; data-series hues stay stable. */
+html.dark svg .text-stone-200:not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) { color: #49423c; }
+html.dark svg .text-stone-300:not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) { color: #62594f; }
 
-.dark .accounts-screen input:not([type="checkbox"]):not([type="radio"]):not([class*="border"]),
-.dark .accounts-screen select:not([class*="border"]),
-.dark .accounts-screen textarea:not([class*="border"]) {
-  border-color: #3d3833;
-  background: #262220;
+/* Focus borders must win over the base border, not inherit its dark gray. */
+html.dark :is([class~="focus:border-blue-400"]:focus, [class~="focus:border-blue-500"]:focus):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #60a5fa;
 }
-
+html.dark :is([class~="focus:border-stone-400"]:focus, [class~="focus:border-stone-500"]:focus):not([data-vibe-theme]):not([data-vibe-theme] *):not(.saas-root):not(.saas-root *) {
+  border-color: #a8a29e;
+}

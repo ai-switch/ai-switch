@@ -372,7 +372,7 @@ export type ResolvedVibeSkinBlocks = {
 export const DEFAULT_VIBE_SKIN_BLOCKS: ResolvedVibeSkinBlocks = {
   titlebar: {
     title: "AI Switch 终端",
-    subtitle: "QQ2007 蓝色经典",
+    subtitle: "XP 蓝色经典",
     badge: "皮肤模式",
   },
   profile: {
@@ -383,10 +383,10 @@ export const DEFAULT_VIBE_SKIN_BLOCKS: ResolvedVibeSkinBlocks = {
   },
   showcase: {
     enabled: true,
-    title: "QQ秀展示",
-    subtitle: "Codex 2007 Blue",
+    title: "XP秀展示",
+    subtitle: "Codex XP Blue",
     body: "右侧展示区可由皮肤定义图片、舞台和说明。",
-    badge: "我的QQ秀",
+    badge: "我的XP秀",
     footer: "自定义展示区",
   },
   statusbar: {

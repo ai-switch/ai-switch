@@ -1,6 +1,6 @@
 {
   "id": "codex-2007-blue",
-  "name": "Codex 2007 Blue",
+  "name": "Codex XP Blue",
   "author": "AI Switch",
   "version": "2.0.0",
   "ui": {
@@ -237,8 +237,8 @@
   },
   "blocks": {
     "titlebar": {
-      "title": "Codex 2007 - 优化 KV 读写成本",
-      "subtitle": "QQ2007 蓝色经典",
+      "title": "Codex XP - 优化 KV 读写成本",
+      "subtitle": "XP 蓝色经典",
       "badge": "在线"
     },
     "profile": {
@@ -250,14 +250,14 @@
     "showcase": {
       "enabled": true,
       "title": "Codex 小蓝",
-      "subtitle": "QQ2007 Blue",
+      "subtitle": "XP Blue",
       "body": "今天也在陪你写代码。",
       "badge": "Codex 好友",
       "footer": "双击发送消息"
     },
     "statusbar": {
       "left": "Codex 已连接",
-      "right": "QQ2007 皮肤模式"
+      "right": "XP 皮肤模式"
     },
     "taskbar": {
       "enabled": true,
@@ -313,13 +313,13 @@
   },
   "decorations": {
     "variant": "codex-2007",
-    "titlebarMark": "Q",
+    "titlebarMark": "XP",
     "showcaseTemplate": "qq-mascot",
     "rightCards": [
       {
         "template": "qq-person",
         "title": "我的好友 (2/8)",
-        "badge": "QQ秀",
+        "badge": "XP秀",
         "items": [
           {
             "label": "小希",
@@ -332,10 +332,10 @@
   },
   "showcase": {
     "enabled": true,
-    "title": "Codex 2007",
+    "title": "Codex XP",
     "subtitle": "Blue chrome skin",
     "body": "Region-based skinning keeps terminal output clear while the shell, panels, and showcase stay expressive.",
     "badge": "Vibe Skin",
-    "footer": "QQ2007-inspired layout"
+    "footer": "XP-inspired layout"
   }
 }

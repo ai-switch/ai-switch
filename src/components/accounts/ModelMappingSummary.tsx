@@ -218,7 +218,7 @@ export function ModelMappingSummary({
     return (
       <span
         aria-describedby={baselineTooltipId}
-        className="group relative inline-flex rounded-full bg-[#f7f7f7] px-2 py-0.5 text-[10px] text-[#666] outline-none focus:ring-2 focus:ring-stone-300"
+        className="group relative inline-flex rounded-full bg-stone-100 px-2 py-0.5 text-[10px] text-stone-600 outline-none focus:ring-2 focus:ring-stone-300"
         tabIndex={0}
       >
         <span>{BASELINE_LABEL}</span>
@@ -240,7 +240,7 @@ export function ModelMappingSummary({
     <div ref={containerRef} className="relative flex min-w-0 flex-wrap items-center gap-1">
       {visibleEntries.map((entry) => (
         <span
-          className="inline-flex max-w-48 truncate rounded-full bg-[#f7f7f7] px-2 py-0.5 font-mono text-[9px] text-[#666]"
+          className="inline-flex max-w-48 truncate rounded-full bg-stone-100 px-2 py-0.5 font-mono text-[9px] text-stone-600"
           key={entry.key}
           title={entry.detail}
         >
@@ -253,7 +253,7 @@ export function ModelMappingSummary({
           aria-haspopup="dialog"
           // Same palette as the tags it stands in for, one shade darker on hover so
           // it still reads as the one clickable thing in the row.
-          className="rounded-full bg-[#f7f7f7] px-2 py-0.5 font-mono text-[9px] text-[#666] motion-control hover:bg-[#ededed]"
+          className="rounded-full bg-stone-100 px-2 py-0.5 font-mono text-[9px] text-stone-600 motion-control hover:bg-stone-200"
           onClick={() => setOpen((current) => !current)}
           title="查看完整模型映射"
           type="button"

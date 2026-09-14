@@ -569,7 +569,7 @@ describe("vibeSkin", () => {
 
     expect(skin?.blocks?.titlebar?.title).toBe("存储终端");
     expect(blocks?.titlebar.title).toBe("存储终端");
-    expect(blocks?.titlebar.subtitle).toBe("QQ2007 蓝色经典");
+    expect(blocks?.titlebar.subtitle).toBe("XP 蓝色经典");
     expect(blocks?.profile.name).toBe("存储用户");
     expect(blocks?.showcase.title).toBe("旧展示");
     expect(blocks?.showcase.figure).toBe("data:image/png;base64,AAAA");

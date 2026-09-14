@@ -824,7 +824,7 @@ function SkinDecorationCard({
       <div className="vibe-skin-right-card vibe-skin-qq-friend-card mt-3 overflow-hidden rounded-2xl border">
         <div className="vibe-skin-qq-card-title flex items-center justify-between px-3 py-2 text-[12px] font-semibold">
           <span>{card.title ?? "我的好友"}</span>
-          <span>{card.badge ?? "QQ秀"}</span>
+          <span>{card.badge ?? "XP秀"}</span>
         </div>
         <div className="vibe-skin-qq-friend-stage mx-3 mt-3 grid place-items-center rounded-2xl border p-3">
           {friend?.image ? (
@@ -834,7 +834,7 @@ function SkinDecorationCard({
               src={friend.image}
             />
           ) : (
-            renderSkinTemplateFigure(friend?.template ?? "qq-person", friend?.label ?? "QQ秀好友形象")
+            renderSkinTemplateFigure(friend?.template ?? "qq-person", friend?.label ?? "XP秀好友形象")
           )}
         </div>
         <div className="flex items-center justify-between px-3 py-3 text-[12px]">
@@ -1740,10 +1740,11 @@ export function VibeScreen({ onExitVibe }: VibeScreenProps) {
     () =>
       ({
         ...(skinStyle ?? {}),
+        colorScheme: isDark ? "dark" : "light",
         "--vibe-session-list-width": `${effectiveSessionListWidth}px`,
         "--vibe-tile-width": `${tileWidth}px`,
       }) as CSSProperties,
-    [effectiveSessionListWidth, skinStyle, tileWidth],
+    [effectiveSessionListWidth, isDark, skinStyle, tileWidth],
   );
   const { dragging: sessionListResizing, startDragging: startSessionListResize } = useDragResize({
     axis: "x",
@@ -2085,6 +2086,7 @@ export function VibeScreen({ onExitVibe }: VibeScreenProps) {
             ? "h-screen max-h-[100dvh] overflow-hidden bg-[#002b36] text-[#d8e2dc]"
             : "h-screen max-h-[100dvh] overflow-hidden text-stone-950"
       }
+      data-vibe-theme={themeMode}
       onKeyDownCapture={activateSkinAudio}
       onPointerDownCapture={activateSkinAudio}
       style={rootStyle}

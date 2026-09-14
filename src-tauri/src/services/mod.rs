@@ -4,6 +4,8 @@ pub mod batch_service;
 pub mod cc_switch_import_service;
 pub mod claude_trust_service;
 pub mod client_identity;
+#[cfg(feature = "desktop")]
+pub mod codex_oauth;
 pub mod codex_reasoning_cache;
 pub mod config_write_service;
 pub mod cpa_export_service;

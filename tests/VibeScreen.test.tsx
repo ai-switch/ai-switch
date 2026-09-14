@@ -1068,13 +1068,22 @@ describe("VibeScreen", () => {
     expect(closeButton).not.toHaveClass("rounded-md");
   });
 
-  it("renders built-in QQ2007 skin blocks with Chinese decorative UI", async () => {
+  it("sets a local color scheme for Vibe instead of inheriting the app theme", async () => {
+    renderScreen();
+    expect(screen.getByRole("main")).toHaveAttribute("data-vibe-theme", "dark");
+    expect(screen.getByRole("main")).toHaveStyle({ colorScheme: "dark" });
+    await switchThemeFromAppearance("Light");
+    expect(screen.getByRole("main")).toHaveAttribute("data-vibe-theme", "light");
+    expect(screen.getByRole("main")).toHaveStyle({ colorScheme: "light" });
+  });
+
+  it("renders XP-branded built-in skin blocks without QQ display text", async () => {
     renderScreen();
 
     await switchToSkinTheme();
 
-    expect(screen.getByText("Codex 2007 - 优化 KV 读写成本")).toBeInTheDocument();
-    expect(screen.getByText("QQ2007 蓝色经典")).toBeInTheDocument();
+    expect(screen.getByText("Codex XP - 优化 KV 读写成本")).toBeInTheDocument();
+    expect(screen.getByText("XP 蓝色经典")).toBeInTheDocument();
     expect(screen.getAllByText("在线").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Codex 小蓝").length).toBeGreaterThan(0);
     expect(screen.getByText("手机在线")).toBeInTheDocument();
@@ -1088,7 +1097,10 @@ describe("VibeScreen", () => {
     expect(screen.getByTestId("vibe-skin-qq-person")).toBeInTheDocument();
     expect(screen.queryByText("皮肤区域")).not.toBeInTheDocument();
     expect(screen.getByText("Codex 已连接")).toBeInTheDocument();
-    expect(screen.getByText("QQ2007 皮肤模式")).toBeInTheDocument();
+    expect(screen.getByText("XP 皮肤模式")).toBeInTheDocument();
+    expect(screen.getByText("XP秀")).toBeInTheDocument();
+    expect(screen.getByRole("main").textContent).not.toMatch(/QQ/i);
+    expect(screen.getByRole("main")).toHaveAttribute("data-vibe-theme", "skin");
 
     const controls = screen.getByTestId("vibe-window-controls");
     expect(controls).toHaveAttribute("aria-hidden", "true");
@@ -1303,7 +1315,7 @@ describe("VibeScreen", () => {
     expect(screen.getByTestId("vibe-skin-rescue-chicken")).toBeInTheDocument();
   });
 
-  it("does not render QQ2007 decorative skin blocks in dark or light themes", async () => {
+  it("does not render XP decorative skin blocks in dark or light themes", async () => {
     renderScreen();
 
     expect(
@@ -1496,7 +1508,7 @@ describe("VibeScreen", () => {
     expect(screen.getByRole("button", { name: "开始" })).toBeInTheDocument();
     expect(screen.getAllByText("AI Switch 终端").length).toBeGreaterThan(0);
     expect(screen.getByText("Codex 已连接")).toBeInTheDocument();
-    expect(screen.getByText("QQ2007 皮肤模式")).toBeInTheDocument();
+    expect(screen.getByText("XP 皮肤模式")).toBeInTheDocument();
     expect(screen.getByText("Vibe")).toBeInTheDocument();
     expect(screen.getAllByText("在线").length).toBeGreaterThan(0);
     expect(document.querySelector(".vibe-skin-taskbar")).toBeTruthy();

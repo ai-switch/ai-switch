@@ -5,6 +5,9 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   archiveRouteCredentials,
+  startCodexOAuth,
+  getCodexOAuthStatus,
+  cancelCodexOAuth,
   clearRouteCredentialFailureState,
   clearRouteCredentialModelState,
   createBatch,
@@ -85,6 +88,9 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("../src/lib/api/client", () => ({
   archiveRouteCredentials: vi.fn(),
+  startCodexOAuth: vi.fn(),
+  getCodexOAuthStatus: vi.fn(),
+  cancelCodexOAuth: vi.fn(),
   clearRouteCredentialFailureState: vi.fn(),
   clearRouteCredentialModelState: vi.fn(),
   createBatch: vi.fn(),
@@ -498,6 +504,9 @@ describe("AccountsScreen", () => {
     vi.mocked(open).mockReset();
     vi.mocked(openExternal).mockReset();
     vi.mocked(openExternal).mockResolvedValue(undefined);
+    vi.mocked(startCodexOAuth).mockReset();
+    vi.mocked(getCodexOAuthStatus).mockReset();
+    vi.mocked(cancelCodexOAuth).mockReset();
     vi.mocked(archiveRouteCredentials).mockReset();
     vi.mocked(createBatch).mockReset();
     vi.mocked(copyRouteCredential).mockReset();
@@ -2730,6 +2739,65 @@ describe("AccountsScreen", () => {
         batch_name: "Codex Batch",
       }),
     );
+  });
+
+  it("places Codex OAuth beside JSON import and requires the shared batch name", async () => {
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "批量导入" }));
+    const oauth = screen.getByRole("button", { name: "OAuth 登录 Codex" });
+    const files = screen.getByRole("button", { name: "导入 JSON 文件" });
+    expect(oauth.parentElement).toBe(files.parentElement);
+    await userEvent.click(oauth);
+    expect(screen.getByText("批量名称不能为空")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "OAuth 登录 Codex" })).not.toBeInTheDocument();
+    expect(startCodexOAuth).not.toHaveBeenCalled();
+    await userEvent.type(screen.getByLabelText("导入批量名称"), "OAuth batch");
+    await userEvent.click(oauth);
+    expect(screen.getByRole("dialog", { name: "OAuth 登录 Codex" })).toHaveTextContent("OAuth batch");
+    expect(screen.getByLabelText("账号 JSON")).not.toBeVisible();
+  });
+
+  it("disables Codex OAuth in Web mode and hides it for other platforms", async () => {
+    vi.mocked(isDesktop).mockReturnValue(false);
+    const { unmount } = renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "批量导入" }));
+    expect(screen.getByRole("button", { name: "OAuth 登录 Codex" })).toBeDisabled();
+    unmount();
+    vi.mocked(isDesktop).mockReturnValue(true);
+    renderScreen("claude");
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "批量导入" }));
+    expect(screen.queryByRole("button", { name: "OAuth 登录 Codex" })).not.toBeInTheDocument();
+  });
+
+  it.each([true, false])("imports a Codex OAuth account with join-current-group=%s without changing JSON", async (join) => {
+    const status = {
+      session_id: "oauth-session", method: "browser" as const, status: "succeeded" as const,
+      authorization_url: null, user_code: null, expires_at: "2026-09-15T01:00:00Z",
+      account: { id: "oauth-account", display_name: "oauth@example.test", email: "oauth@example.test" }, error: null,
+    };
+    vi.mocked(startCodexOAuth).mockResolvedValue(status);
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "批量导入" }));
+    await userEvent.type(screen.getByLabelText("导入批量名称"), "OAuth batch");
+    fireEvent.change(screen.getByLabelText("账号 JSON"), { target: { value: "user-owned-json" } });
+    await userEvent.click(screen.getByLabelText("提交完重置表单"));
+    if (!join) await userEvent.click(screen.getByLabelText("创建后加入当前分组"));
+    await userEvent.click(screen.getByRole("button", { name: "OAuth 登录 Codex" }));
+    await userEvent.click(screen.getByRole("button", { name: "浏览器授权" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "OAuth 登录 Codex" })).not.toBeInTheDocument());
+    expect(startCodexOAuth).toHaveBeenCalledWith({ method: "browser", batch_name: "OAuth batch" });
+    expect(importOfficialRouteCredentialsFromText).not.toHaveBeenCalled();
+    if (join) {
+      expect(moveRoutePoolGroupMembers).toHaveBeenCalledWith(expect.objectContaining({ platform: "codex", account_ids: ["oauth-account"] }));
+    } else {
+      expect(moveRoutePoolGroupMembers).not.toHaveBeenCalled();
+    }
+    await userEvent.click(screen.getByRole("button", { name: "新增账号" }));
+    expect(screen.getByLabelText("账号 JSON")).toHaveValue("user-owned-json");
   });
 
   it("imports official credentials from multiple file paths", async () => {

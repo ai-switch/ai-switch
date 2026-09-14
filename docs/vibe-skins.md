@@ -8,7 +8,7 @@ Vibe mode accepts three skin file types:
 
 Zip packages can include image assets. When `ui.backgroundImage`, `regions.*.backgroundImage`, `showcase.image`, `blocks.profile.avatar`, `blocks.showcase.figure`, `blocks.taskbar.startButton.icon`, `blocks.taskbar.items[].icon`, `decorations.rightCards[].figure`, or `decorations.rightCards[].items[].image` is a relative path, Vibe resolves it from inside the zip package and stores it as a data URL in local storage.
 
-The built-in `Codex 2007 Blue` skin is QQ2007-inspired chrome: glossy title bar, left rail, tab strip, terminal shell, right display rail, and taskbar. It does not directly use the reference image as a full-screen background.
+The built-in `Codex XP Blue` skin is XP-inspired chrome: glossy title bar, left rail, tab strip, terminal shell, right display rail, and taskbar. It does not directly use the reference image as a full-screen background.
 
 The built-in `星舰驾驶舱` skin is a cinematic cockpit package: deep-space starflow, cockpit HUD chrome, a radar card, rotating CSS spacecraft, telemetry output, starmap, transparent terminal shell, and bottom ship console taskbar.
 
@@ -83,7 +83,7 @@ To make a derivative skin, copy one of those folders, edit `skin.json` with a ne
   "blocks": {
     "titlebar": {
       "title": "AI Switch 终端",
-      "subtitle": "QQ2007 蓝色经典",
+      "subtitle": "XP 蓝色经典",
       "badge": "皮肤模式"
     },
     "profile": {
@@ -94,11 +94,11 @@ To make a derivative skin, copy one of those folders, edit `skin.json` with a ne
       "avatar": "assets/avatar.png"
     },
     "showcase": {
-      "title": "QQ秀展示",
-      "subtitle": "Codex 2007 Blue",
+      "title": "XP秀展示",
+      "subtitle": "Codex XP Blue",
       "body": "右侧展示区可由皮肤定义图片、舞台和说明。",
-      "badge": "我的QQ秀",
-      "figure": "assets/qqshow.png",
+      "badge": "我的XP秀",
+      "figure": "assets/showcase.png",
       "footer": "自定义展示区"
     },
     "statusbar": {
@@ -171,7 +171,7 @@ To make a derivative skin, copy one of those folders, edit `skin.json` with a ne
 }
 ```
 
-All `ui` fields are optional. Missing values fall back to the built-in Codex 2007 Blue skin. The `terminal` object is also optional and may override any xterm color key supported by the app.
+All `ui` fields are optional. Missing values fall back to the built-in Codex XP Blue skin. The `terminal` object is also optional and may override any xterm color key supported by the app.
 
 ## Content Blocks
 
@@ -189,11 +189,11 @@ Supported blocks:
 - `blocks.profile.signature`: short status signature under the nickname.
 - `blocks.profile.badge`: small profile badge.
 - `blocks.profile.avatar`: avatar image path or data URL.
-- `blocks.showcase.title`: right QQ秀-style display title.
+- `blocks.showcase.title`: right XP-style display title.
 - `blocks.showcase.subtitle`: right display subtitle.
 - `blocks.showcase.body`: descriptive text inside the showcase stage.
 - `blocks.showcase.badge`: small right rail label.
-- `blocks.showcase.figure`: figure image path or data URL for the QQ秀-style stage.
+- `blocks.showcase.figure`: figure image path or data URL for the XP-style stage.
 - `blocks.showcase.footer`: footer tag under the showcase stage.
 - `blocks.statusbar.left`: left status bar text.
 - `blocks.statusbar.right`: right status bar text.
@@ -225,12 +225,13 @@ The taskbar start menu supports only a fixed allowlist of app actions. Unknown a
 
 ## Decorations
 
-`decorations` defines optional app-rendered decorative layout pieces. It is intended for highly themed skins such as QQ2007-style side rails or a rescue-team layout. These values are still skin package data, not hardcoded by skin ID.
+`decorations` defines optional app-rendered decorative layout pieces. It is intended for highly themed skins such as XP-style side rails or a rescue-team layout. These values are still skin package data, not hardcoded by skin ID.
 
 Supported fields:
 
 - `decorations.variant`: optional visual variant class. Supported values are `codex-2007`, `rescue-pups`, and `starship-cockpit`.
 - `decorations.titlebarMark`: short text shown in the titlebar badge. It is truncated to four characters.
+- Template IDs such as `qq-person` and `qq-mascot` remain supported for compatibility with existing skin packages; the built-in display branding is XP.
 - `decorations.avatarTemplate`: app-rendered template for the left profile avatar. Supported values include `qq-person`, `rescue-rider`, and `space-ai-core`.
 - `decorations.showcaseTemplate`: app-rendered template for the right showcase stage. Supported values include `qq-mascot`, `rescue-hq`, and `space-ship`.
 - `decorations.rightCards`: extra right-rail cards declared by the skin package.
@@ -344,7 +345,7 @@ my-skin.zip
     start.png
     app.png
     showcase-stage.png
-    qqshow.png
+    showcase.png
     dog-red.png
     mayor.png
     chicken.png

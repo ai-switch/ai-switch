@@ -56,6 +56,7 @@ import {
   isImportableExternalItem,
   useExternalClientImportPreview,
 } from "../components/accounts/ExternalClientImportPanel";
+import { CodexOAuthDialog } from "../components/accounts/CodexOAuthDialog";
 import { ConfigWriteTargetsDialog } from "../components/accounts/ConfigWriteTargetsDialog";
 import { FormTabs, type FormTab } from "../components/accounts/FormTabs";
 import { RouteCredentialExportDialog } from "../components/accounts/RouteCredentialExportDialog";
@@ -150,6 +151,7 @@ import type {
   ExternalImportClient,
   FetchedRouteModel,
   InterfaceFormat,
+  ImportedCodexAccount,
   ModelMapping,
   PlatformId,
   QuotaRefreshOutcome,
@@ -2948,6 +2950,8 @@ export function AccountsScreen({
   const [resetFormAfterCreate, setResetFormAfterCreate] = useState(true);
   const [officialText, setOfficialText] = useState(() => defaultOfficialJson(activePlatform));
   const [officialBatchName, setOfficialBatchName] = useState("");
+  const [codexOAuthOpen, setCodexOAuthOpen] = useState(false);
+  const [codexOAuthError, setCodexOAuthError] = useState<string | null>(null);
   const [officialFilePaths, setOfficialFilePaths] = useState<string[]>([]);
   const [filePickerError, setFilePickerError] = useState<string | null>(null);
   const [externalClient, setExternalClient] = useState<ExternalImportClient>("cc-switch");
@@ -3606,6 +3610,8 @@ export function AccountsScreen({
     const nextInterfaceFormat = defaultInterfaceFormat(activePlatform);
     setOfficialText(defaultOfficialJson(activePlatform));
     setOfficialBatchName("");
+    setCodexOAuthOpen(false);
+    setCodexOAuthError(null);
     setOfficialFilePaths([]);
     setFilePickerError(null);
     setApiName("");
@@ -4030,6 +4036,51 @@ export function AccountsScreen({
     },
   });
 
+  async function finishCreatedAccounts(accountIds: string[], showSuccessFeedback = true) {
+    if (accountIds.length > 0) {
+      if (joinPoolOnCreate) {
+        const targetGroupId =
+          selectedGroupId ?? routePoolQuery.data?.group_id ?? routePoolQuery.data?.active_group_id;
+        if (targetGroupId) {
+          try {
+            await moveRoutePoolGroupMembers({
+              platform: activePlatform,
+              group_id: targetGroupId,
+              account_ids: accountIds,
+            });
+            if (showSuccessFeedback) {
+              setRoutePoolFeedback({
+                type: "success",
+                message: `已新增 ${accountIds.length} 个账号并加入当前分组。`,
+              });
+            }
+          } catch (error) {
+            setRoutePoolFeedback({
+              type: "error",
+              message: `分组同步失败：${formatApiError(error, "请求未成功。")}`,
+            });
+          }
+        }
+      } else {
+        const outGroupId = routePoolGroups.find(
+          (group) => group.id === `${activePlatform}-out`,
+        )?.id;
+        if (outGroupId) {
+          setSelectedGroupId(outGroupId);
+        }
+      }
+      setAccountView("in_pool");
+    }
+    await invalidateAccountData();
+  }
+
+  async function handleCodexOAuthImported(account: ImportedCodexAccount) {
+    setCodexOAuthOpen(false);
+    setCreateOpen(false);
+    if (resetFormAfterCreate) resetCreateForm();
+    await finishCreatedAccounts([account.id]);
+  }
+
   const createMutation = useMutation({
     mutationFn: async () => {
       if (createMode === "external") {
@@ -4172,41 +4223,7 @@ export function AccountsScreen({
       const poolCandidateIds = external
         ? external.created_ids
         : imported.map((credential) => credential.id);
-      if (poolCandidateIds.length > 0) {
-        if (joinPoolOnCreate) {
-          const targetGroupId =
-            selectedGroupId ?? routePoolQuery.data?.group_id ?? routePoolQuery.data?.active_group_id;
-          if (targetGroupId) {
-            try {
-              await moveRoutePoolGroupMembers({
-                platform: activePlatform,
-                group_id: targetGroupId,
-                account_ids: poolCandidateIds,
-              });
-              if (!external) {
-                setRoutePoolFeedback({
-                  type: "success",
-                  message: `已新增 ${poolCandidateIds.length} 个账号并加入当前分组。`,
-                });
-              }
-            } catch (error) {
-              setRoutePoolFeedback({
-                type: "error",
-                message: `分组同步失败：${formatApiError(error, "请求未成功。")}`,
-              });
-            }
-          }
-        } else {
-          const outGroupId = routePoolGroups.find(
-            (group) => group.id === `${activePlatform}-out`,
-          )?.id;
-          if (outGroupId) {
-            setSelectedGroupId(outGroupId);
-          }
-        }
-        setAccountView("in_pool");
-      }
-      await invalidateAccountData();
+      await finishCreatedAccounts(poolCandidateIds, !external);
     },
   });
 
@@ -5914,7 +5931,7 @@ export function AccountsScreen({
         }}
       >
         <div
-          className="relative z-30 flex h-full min-h-0 items-center justify-between gap-3 border-b border-[#d1d1d6] bg-[#f2f2f7] px-3"
+          className="relative z-30 flex h-full min-h-0 items-center justify-between gap-3 border-b border-stone-300 bg-stone-100 px-3"
           data-testid="account-workspace-toolbar"
           onFocus={revealToolbar}
           onPointerEnter={() => {
@@ -8191,7 +8208,7 @@ export function AccountsScreen({
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                <button className={secondaryButtonClass} onClick={() => setLiveLogEntries([])} type="button">
+                <button className={`${secondaryButtonClass} whitespace-nowrap`} onClick={() => setLiveLogEntries([])} type="button">
                   清空
                 </button>
                 <button aria-label="关闭" onClick={() => setLiveLogOpen(false)} type="button">
@@ -8603,6 +8620,7 @@ export function AccountsScreen({
 
       {createOpen && (
         <div className="motion-overlay fixed inset-0 z-50 grid place-items-center bg-stone-950/35 p-4 backdrop-blur-sm"
+          style={codexOAuthOpen ? { visibility: "hidden" } : undefined}
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) {
               setCreateOpen(false);
@@ -8988,7 +9006,7 @@ export function AccountsScreen({
                   <input
                     aria-label="导入批量名称"
                     className={fieldClass}
-                    onChange={(event) => setOfficialBatchName(event.target.value)}
+                    onChange={(event) => { setOfficialBatchName(event.target.value); setCodexOAuthError(null); }}
                     placeholder="必填，用于标记本次批量导入"
                     required
                     value={officialBatchName}
@@ -9010,17 +9028,37 @@ export function AccountsScreen({
                   />
                 </label>
                 <div className="grid gap-2">
-                  <button
-                    aria-label="导入 JSON 文件"
-                    className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-[13px] font-semibold text-blue-900 motion-control hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={!desktop}
-                    onClick={() => void chooseOfficialFiles()}
-                    title={desktop ? undefined : "此功能仅桌面端可用。"}
-                    type="button"
-                  >
-                    <FileCode2 className="h-3.5 w-3.5" />
-                    导入 JSON 文件
-                  </button>
+                  <div className={`grid gap-2 ${activePlatform === "codex" ? "sm:grid-cols-2" : ""}`}>
+                    {activePlatform === "codex" && (
+                      <button
+                        aria-label="OAuth 登录 Codex"
+                        className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-[13px] font-semibold text-blue-900 motion-control hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={!desktop || createMutation.isPending}
+                        onClick={() => {
+                          if (!officialBatchName.trim()) { setCodexOAuthError("批量名称不能为空"); return; }
+                          setCodexOAuthError(null);
+                          setCodexOAuthOpen(true);
+                        }}
+                        title={desktop ? "使用官方 Codex CLI 登录，不覆盖现有登录" : "此功能仅桌面端可用。"}
+                        type="button"
+                      >
+                        <KeyRound className="h-3.5 w-3.5" />
+                        OAuth 登录 Codex
+                      </button>
+                    )}
+                    <button
+                      aria-label="导入 JSON 文件"
+                      className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-[13px] font-semibold text-blue-900 motion-control hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={!desktop}
+                      onClick={() => void chooseOfficialFiles()}
+                      title={desktop ? undefined : "此功能仅桌面端可用。"}
+                      type="button"
+                    >
+                      <FileCode2 className="h-3.5 w-3.5" />
+                      导入 JSON 文件
+                    </button>
+                  </div>
+                  {codexOAuthError && <p role="alert" className="text-[12px] text-red-700">{codexOAuthError}</p>}
                   {!desktop && (
                     <p className="text-[12px] text-stone-500">此功能仅桌面端可用。</p>
                   )}
@@ -9086,6 +9124,14 @@ export function AccountsScreen({
             </div>
           </div>
         </div>
+      )}
+
+      {createOpen && codexOAuthOpen && activePlatform === "codex" && (
+        <CodexOAuthDialog
+          batchName={officialBatchName}
+          onClose={() => setCodexOAuthOpen(false)}
+          onImported={handleCodexOAuthImported}
+        />
       )}
 
       {editingCredential && (

@@ -1,4 +1,5 @@
 pub mod batch_commands;
+pub mod codex_oauth_commands;
 pub mod disk_space_commands;
 pub mod external_client_import_commands;
 pub mod import_commands;

@@ -15,6 +15,7 @@ use commands::imagegen_commands::{
 };
 use commands::notification_commands::test_notification;
 use commands::platform_commands::list_platform_capabilities;
+use commands::codex_oauth_commands::{cancel_codex_oauth, get_codex_oauth_status, start_codex_oauth};
 use commands::route_credential_commands::{
     archive_route_credentials, clear_route_credential_failure_state,
     clear_route_credential_model_state, copy_route_credential, create_api_route_credential,
@@ -72,6 +73,7 @@ use mcp::command::{
     mcp_upsert_local_server,
 };
 use paths::AppPaths;
+use services::codex_oauth::CodexOAuthRuntime;
 use services::config_write_service::ConfigWriteRuntimeState;
 use services::deeplink_protocol_service::{
     DeepLinkProtocolRegistrar, DeepLinkProtocolRuntime, DeepLinkProtocolStatus, UNSUPPORTED_REASON,
@@ -377,6 +379,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
+        .manage(CodexOAuthRuntime::default())
         .manage(AppState {
             paths,
             pool,
@@ -512,6 +515,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            start_codex_oauth,
+            get_codex_oauth_status,
+            cancel_codex_oauth,
             crate::saas::transport::saas_admin,
             imagegen_list_sessions,
             imagegen_create_session,
@@ -649,6 +655,7 @@ pub fn run() {
             // that it may skip these events entirely. The sidecar's stdin
             // watchdog is what covers that path.
             if let RunEvent::Exit = event {
+                tauri::async_runtime::block_on(app_handle.state::<CodexOAuthRuntime>().shutdown());
                 let state = app_handle.state::<AppState>();
                 tauri::async_runtime::block_on(async {
                     if state.saas.logs.shutdown().await.is_err() {

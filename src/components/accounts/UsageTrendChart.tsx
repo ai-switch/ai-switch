@@ -260,7 +260,8 @@ export function UsageTrendChart({
             return (
               <g key={index}>
                 <line
-                  stroke={index === 0 ? "#d6d3d1" : "#e7e5e4"}
+                  className={index === 0 ? "text-stone-300" : "text-stone-200"}
+                  stroke="currentColor"
                   x1={padLeft}
                   x2={width - padRight}
                   y1={y}
@@ -268,7 +269,8 @@ export function UsageTrendChart({
                 />
                 <text
                   dominantBaseline="middle"
-                  fill="#a8a29e"
+                  className="text-stone-400"
+                  fill="currentColor"
                   fontSize={10}
                   textAnchor="end"
                   x={padLeft - 6}
@@ -284,7 +286,8 @@ export function UsageTrendChart({
             <g key={column.bucket.start}>
               {active === index ? (
                 <rect
-                  fill="#0b0b0b"
+                  className="text-stone-950"
+                  fill="currentColor"
                   height={plotHeight}
                   opacity={0.04}
                   width={band}
@@ -319,7 +322,8 @@ export function UsageTrendChart({
               })}
               {labelEveryBar || index === peak ? (
                 <text
-                  fill="#78716c"
+                  className="text-stone-500"
+                  fill="currentColor"
                   fontSize={10}
                   textAnchor="middle"
                   x={column.bandLeft + band / 2}
@@ -330,7 +334,8 @@ export function UsageTrendChart({
               ) : null}
               {index % labelEvery === 0 ? (
                 <text
-                  fill="#a8a29e"
+                  className="text-stone-400"
+                  fill="currentColor"
                   fontSize={10}
                   textAnchor="middle"
                   x={column.bandLeft + band / 2}

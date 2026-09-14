@@ -52,6 +52,9 @@ RUN set -eux; \
     curl -fL --retry 3 --retry-delay 1 -o "/tmp/${ARCHIVE}" "${DOWNLOAD_URL}"; \
     printf '%s  /tmp/%s\n' "${EXPECTED}" "${ARCHIVE}" | sha256sum -c -; \
     unzip -q "/tmp/${ARCHIVE}" -d /package; \
+    # Release ZIPs may lose executable mode bits (for example, Windows staging).
+    # Restore modes before checking the downloaded binaries.
+    chmod 0755 /package/ai-switch-server /package/ai-switch-tsnet; \
     test -x /package/ai-switch-server; \
     test -x /package/ai-switch-tsnet; \
     test -f /package/web/index.html

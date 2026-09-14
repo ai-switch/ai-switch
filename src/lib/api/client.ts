@@ -7,6 +7,8 @@ import type {
   Batch,
   BatchGroup,
   ConfigSnapshotSummary,
+  CodexOAuthMethod,
+  CodexOAuthStatus,
   ConfigWriteClientStatus,
   ConfigWriteOutcome,
   CopyRouteCredentialInput,
@@ -434,6 +436,21 @@ export function reorderRouteCredentials(input: ReorderRouteCredentialInput): Pro
 
 export function createApiRouteCredential(input: CreateApiRouteCredentialInput): Promise<RouteCredential> {
   return invoke("create_api_route_credential", { input });
+}
+
+export function startCodexOAuth(input: {
+  method: CodexOAuthMethod;
+  batch_name: string;
+}): Promise<CodexOAuthStatus> {
+  return invoke("start_codex_oauth", { input });
+}
+
+export function getCodexOAuthStatus(sessionId: string): Promise<CodexOAuthStatus> {
+  return invoke("get_codex_oauth_status", { session_id: sessionId });
+}
+
+export function cancelCodexOAuth(sessionId: string): Promise<CodexOAuthStatus> {
+  return invoke("cancel_codex_oauth", { session_id: sessionId });
 }
 
 export function importOfficialRouteCredentialsFromText(input: {
