@@ -10,9 +10,11 @@ capability schemas, generated TypeScript declarations and ahead-of-time
 validators, safe JSON validation, portable archive/virtual path policies,
 capability negotiation, safe error envelopes, and version constants.
 
-An internal bounded MessagePort RPC layer is implemented and tested. The public
-plugin connection and host mounting APIs, Node API shims, Rust capability
-providers and installation/release integration are **not implemented yet**. The package has
+R3/R4 add a bounded MessagePort RPC layer and the public `/plugin` client,
+including lazy bootstrap, two-way acknowledgement, capability calls,
+subscriptions, storage/dialog wrappers, and connection lifecycle handling.
+The generic `/host` mounting API, Node API shims, Rust capability providers and
+installation/release integration are **not implemented yet**. The package has
 not been published to npm. Do not interpret a valid manifest as authorization
 to access files, the network, or the host application.
 
@@ -57,7 +59,7 @@ import {
 
 File DTO checks enforce canonical base64, bounded offsets/chunks and virtual
 paths. They do **not** read/write files, track actual transfer sessions or grant
-permissions; R3 onward and the future Rust backend implement those behaviors.
+permissions; later Node-client work and the future Rust backend implement those behaviors.
 
 Shared cross-language inputs live in `fixtures/aplg/protocol-v1/`. Generated
 schemas define structural contracts; semantic validation and backend grant
@@ -66,6 +68,39 @@ The implementation version is `0.1.0`; the wire identifier is `aplg/1`, the
 plugin API version is `1.0.0`, and `manifestVersion` is `1`. These are separate
 version domains.
 
+## Plugin entry
+
+```ts
+import { aplg, connectPlugin } from "@ai-switch/tauri-plugin-runtime/plugin";
+
+await connectPlugin(); // Also called lazily by aplg.ready().
+if (aplg.capabilities.supports("aplg.storage", "^1.0.0")) {
+  await aplg.storage.set("note", "hello");
+}
+```
+
+A real host must declare and authorize the requested capabilities. Imports do
+not create a connection or touch browser globals. Calling `connectPlugin()` on
+a standalone page or without bootstrap context fails explicitly; it never
+falls back to a privileged mock host. Concurrent initial calls share one
+handshake. The client requires the exact parent window/origin, nonce, one port,
+and a parent acknowledgement before resolving readiness.
+
+Session information is a frozen public snapshot, not a host credential. The
+client rejects unavailable methods and malformed standard requests/results.
+Subscriptions are bounded, duplicate/old sequence events are ignored, and
+connection changes let callers re-read state after a gap or reconnect; events
+are not replayed automatically. Closing the view or losing the peer invalidates
+pending work, subscriptions and capability discovery.
+
+RPC frames are bounded JSON strings. Cancellation and timeouts settle locally
+and send best-effort cancellation to the peer; they cannot undo side effects.
+Duplicate request detection remembers the most recent 1024 IDs, not unlimited
+history or durable idempotency across sessions.
+
+The browser tests currently use a manual test parent, **not** the still-pending
+production host API. They demonstrate Chromium iframe/CSP behavior, not Tauri
+IPC isolation, actual Rust file access, or WebKit compatibility.
 ## Development
 
 Node `^22.12.0 || ^24.0.0 || >=26.0.0` and pnpm `10.12.4` are required.
@@ -77,6 +112,8 @@ pnpm --dir packages/tauri-plugin-runtime check:generated
 pnpm --dir packages/tauri-plugin-runtime typecheck
 pnpm --dir packages/tauri-plugin-runtime test
 pnpm --dir packages/tauri-plugin-runtime build
+pnpm --dir packages/tauri-plugin-runtime exec playwright install chromium
+pnpm --dir packages/tauri-plugin-runtime test:browser
 ```
 
 JSON schemas under `src/protocol/schema/` are the authoritative structural
@@ -84,8 +121,9 @@ contract. Generated TypeScript and ESM validators are committed and verified
 without invoking runtime code generation in the browser. Validation does not
 need `eval`, `new Function`, a Node `require`, or browser globals on import.
 
-Only implemented entry points are exported. Later slices add `/host`,
-`/plugin` and `/node/*`; no empty implementations are published in advance.
+Only implemented entry points are exported: root version/types, `/protocol`, and
+`/plugin`. Later slices add `/host` and `/node/*`; no empty implementations are
+published in advance.
 
 ## License
 

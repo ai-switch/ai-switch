@@ -12,7 +12,7 @@
 
 **Related plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-devkit.md`，其中 D1 消费 R1/R2，D3/D4 消费 R4/R5/R6，最终联调需要 R8。
 
-**状态：** R1–R3 已实施并完成本地验证，R4–R8 待实施；未执行 npm 发布。后续任务中的代码仍是目标接口/测试片段。
+**状态：** R1–R4 已实施并完成本地验证，R5–R8 待实施；未执行 npm 发布。后续任务中的代码仍是目标接口/测试片段。
 
 ## Global Constraints
 
@@ -458,7 +458,7 @@ interface RpcPeer {
 
 **Interfaces:** 第 3.3 节 `aplg` / `connectPlugin`，以及内部 `createPluginClient(peer: RpcPeer, info: SessionInfo): PluginApi`。桥握手窗口信封使用 `{ channel:"aplg.bootstrap", protocol:"aplg/1", kind:"ready"|"connect", nonce }`；connect 额外包含公开 info，并 transfer 1 个 port。绝不携带 host token。
 
-- [ ] **Step 1：真实 peer 对上的 API 行为测试。**
+- [x] **Step 1：真实 peer 对上的 API 行为测试。**
 
 ```ts
 import { expect, test } from "vitest";
@@ -489,15 +489,15 @@ test("storage wrappers use the standard capability without exposing identity", a
 });
 ```
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-runtime exec vitest run tests/plugin-client.test.ts tests/handshake.test.ts`。
-- [ ] **Step 3：实现连接状态机和只读公开视图。** 状态 `idle → connecting → connected → closed`；并发 ready 不多次握手，closed 不自动恢复旧 page 的会话。`connectPlugin` 从 URL fragment 的 namespaced 参数 `aplgNonce` / `aplgParentOrigin` 读取握手提示；父窗口与预期 origin 校验成立后才接收 connect，nonce 使用 `crypto.getRandomValues` 产生 32 个随机字节，校验其 base64url 编码，必须只有一个 transferred port。fragment 提示不是后端授权来源。保留原有业务 fragment，将握手提示作为最后一个 `;aplg=` base64url JSON 段附加；成功后仅移除该段，再导入业务模块，避免破坏 hash 路由。父页面 origin 为 null 的承载明确失败，不能放宽为 wildcard 接收。
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-runtime exec vitest run tests/plugin-client.test.ts tests/handshake.test.ts`。
+- [x] **Step 3：实现连接状态机和只读公开视图。** 状态 `idle → connecting → connected → closed`；并发 ready 不多次握手，closed 不自动恢复旧 page 的会话。`connectPlugin` 从 URL fragment 的 namespaced 参数 `aplgNonce` / `aplgParentOrigin` 读取握手提示；父窗口与预期 origin 校验成立后才接收 connect，nonce 使用 `crypto.getRandomValues` 产生 32 个随机字节，校验其 base64url 编码，必须只有一个 transferred port。fragment 提示不是后端授权来源。保留原有业务 fragment，将握手提示作为最后一个 `;aplg=` base64url JSON 段附加；成功后仅移除该段，再导入业务模块，避免破坏 hash 路由。父页面 origin 为 null 的承载明确失败，不能放宽为 wildcard 接收。
 
 插件先注册 listener 再向 parent 发 ready；parent origin 不为 `*`。父向 opaque iframe 发送 connect 必须使用 `*`，但只能发送至已绑定 `contentWindow` 且精确匹配 nonce；不能把整个 window message 总线当 RPC。handshake 完成立即移除 listener，并通过 port 回应就绪确认；该确认是一次 `connection:connected` 消息，由 R5 消费，普通业务消息不能替代握手。连接消息按方向/状态验证：host 只接受首次 connected 确认，之后插件发来的 connection 消息不能改变可信 session 状态。host 收到该确认后回发一次 connected；`connectPlugin()` 必须等到该回执才 resolve，确保业务发首个 RPC 时 host 已完成绑定。devkit bootstrap await connect 之后才导入业务入口。
 
 `aplg.subscribe` 返回幂等同步 Unsubscribe：本地先移除回调，再 best-effort 关闭远端订阅；断线事件通知用户重新查询状态，不自动重放非幂等请求。包装层只检查能力与签名，不擅自补批准 grant。
 
-- [ ] **Step 4：GREEN。** 在严格 CSP 浏览器 fixture 中验证：顶层页面 connect 返回 `E_HOST_UNAVAILABLE`、错误 parent/source/nonce/端口数被拒绝、重复 ready 不换 port、ready timeout 无泄漏、`supports` 按 semver 行为、未知能力不调用 Transport。生成声明和 SSR import 测试必须在没有 window 的 Node 下通过。
-- [ ] **Step 5：提交。**
+- [x] **Step 4：GREEN。** 在严格 CSP 浏览器 fixture 中验证：顶层页面 connect 返回 `E_HOST_UNAVAILABLE`、错误 parent/source/nonce/端口数被拒绝、重复 ready 不换 port、ready timeout 无泄漏、`supports` 按 semver 行为、未知能力不调用 Transport。生成声明和 SSR import 测试必须在没有 window 的 Node 下通过。
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-runtime/src/plugin packages/tauri-plugin-runtime/src/bridge/handshake.ts packages/tauri-plugin-runtime/tests packages/tauri-plugin-runtime/scripts/build.mjs packages/tauri-plugin-runtime/package.json
@@ -785,3 +785,14 @@ git commit -m "test(runtime): 验收独立安装与无框架宿主接入"
 - JSON 字符串 codec 避免直接把任意对象挂到 MessagePort；迟到/未知/重复 reply 不会结算其他请求。
 - R3 新增 31 项测试，runtime 合计 10 文件 / 131 测试通过；类型检查、生成物检查和构建通过。
 - RPC 内部增加 rpc-types.ts 来集中类型；CallOptions 暂属内部类型，R4 的 /plugin 将重新导出。还未导出公共 plugin 或 host 入口，不宣称可装载插件。
+
+### R4
+
+- 先写客户端/握手/SSR 失败测试，再实现 `/plugin` 惰性单例入口、connectPlugin、公开只读 SessionInfo、能力发现、call/subscribe/storage/dialog。
+- 同一初始连接仅握手一次；校验 exact parent/source/origin、32 字节 nonce、协议、公有 info 和单 MessagePort，父子端双向 connected 确认后才 ready。hash 路由在握手后恢复，不传宿主 token。
+- 连接失败/退出页面/remote close 清理监听与等待；断线不自动重发调用。早到事件有数量和时间界限，重复/倒退事件忽略，迟到订阅在断线后释放；能力包装拒绝不支持选项与非法结果。
+- 真实 Chromium iframe 与严格 CSP 浏览器夹具验证 14 项，runtime 单元测试为 13 文件 / 153 项通过。测试父窗口仅实现协议夹具，不是提前实现 R5。
+- 首轮浏览器测试中 Connect 按钮 selector 匹配两个元素，按 exact role 修正测试；CSP 验证改为页面自身按钮触发执行，而非 DevTools evaluate，证实页面 new Function 和 parent DOM 访问均被阻止。
+- 浏览器下载安装调用曾超时；核验并停止本任务下载 helper 后，已安装的 Chromium 可用，后续浏览器测试真实执行。fixture server 与本任务下载 helper 均未遗留运行进程。
+- 类型、生成物、build、构建后 `/plugin` SSR import、冻结安装通过；应用 `pnpm typecheck` 与 74 文件 / 803 项测试通过。只新增包内 Playwright devDependency，应用依赖未改。
+- 本批只验证 Windows/Chromium，未宣称 WebKit、Tauri IPC 或真实 Rust 能力已验收。runtime 产物采用一次多入口 splitting，共享 chunk，`/host` 与 `/node/*` 仍未导出；devkit 未开始；未推送、发布或打 tag。

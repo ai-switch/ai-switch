@@ -27,19 +27,25 @@
       "types": "./dist/protocol/index.d.ts",
       "import": "./dist/protocol/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./plugin": {
+      "types": "./dist/plugin/index.d.ts",
+      "import": "./dist/plugin/index.js"
+    }
   },
   "scripts": {
     "generate": "node scripts/generate-protocol.mjs",
     "check:generated": "node scripts/check-generated.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "build": "node scripts/build.mjs"
+    "build": "node scripts/build.mjs",
+    "test:browser": "playwright test"
   },
   "dependencies": {
     "semver": "7.8.5"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@types/node": "22.19.15",
     "@types/semver": "7.7.1",
     "ajv": "8.20.0",
