@@ -12,7 +12,7 @@
 
 **Prerequisite plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-runtime.md`。R1/R2 的导出/契约是唯一权威，本文只引用，不维护复制的 manifest/wire schema。
 
-**状态：** 待实施。本文中方法、CLI 和代码片段是目标契约，不表示已发布包可用。
+**状态：** D1 项目源码校验、Node 入口与 CLI 基础已实施并通过 Windows 本地验证；D2–D9 待实施。dist 校验在 D4 完成前明确返回不可用，所有 npm 包仍未发布。未实施部分的方法、CLI 和代码片段仍是目标契约。
 
 ## Global Constraints
 
@@ -186,7 +186,7 @@ D1 创建 `tests/support/project.ts`，提供 `withProject(files: Record<string,
 
 **Interfaces:** 消费 R1/R2 `/protocol`；产出 validateProject、runCli 和第 3.1/3.2 节报告。不执行 package scripts、Vite config 或动态 import 项目代码。
 
-- [ ] **Step 1：写失败测试，先验证不执行未信任配置。**
+- [x] **Step 1：写失败测试，先验证不执行未信任配置。**
 
 ```ts
 import { access, readFile } from "node:fs/promises";
@@ -219,8 +219,8 @@ test("source and package versions must agree", async () => {
 });
 ```
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit exec vitest run tests/project.test.ts tests/cli.test.ts`；先建测试配置和安装依赖，失败点应为待实现行为。
-- [ ] **Step 3：实现 bounded JSON 读取与规范化结果。** `aplg.json` 最大 256 KiB，UTF-8 解码错误拒绝；保留精确字节计算 SHA。调用 runtime parse/validate，不复制 schema；web-v1 拒绝 native true。源码校验检查根、manifest/package 版本、README/LICENSE、pnpm lock 和声明 profile；dist 阶段追加 D4 的产物检查，D1 尚未实现时显式返回 `E_DIST_VALIDATION_UNAVAILABLE`，不能假成功。
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit exec vitest run tests/project.test.ts tests/cli.test.ts`；先建测试配置和安装依赖，失败点应为待实现行为。
+- [x] **Step 3：实现 bounded JSON 读取与规范化结果。** `aplg.json` 最大 256 KiB，UTF-8 解码错误拒绝；保留精确字节计算 SHA。调用 runtime parse/validate，不复制 schema；web-v1 拒绝 native true。源码校验检查根、manifest/package 版本、README/LICENSE、pnpm lock 和声明 profile；dist 阶段追加 D4 的产物检查，D1 尚未实现时显式返回 `E_DIST_VALIDATION_UNAVAILABLE`，不能假成功。
 
 ```ts
 const manifestBytes = await readBoundedFile(manifestPath, 256 * 1024);
@@ -236,8 +236,8 @@ const manifestSha256 = createHash("sha256").update(manifestBytes).digest("hex");
 
 CLI bin 只调用 `runCli(process.argv.slice(2), io, {cwd:process.cwd()})`，测试直接调用 runCli 捕获输出和退出码；help/version/unknown command 不读取插件代码。先实现 validate，其余已声明命令在相应任务完成前明确未支持，最终发布前不可保留未实现分支。
 
-- [ ] **Step 4：GREEN。** 覆盖非 JSON、非法 UTF-8、版本 mismatch、native=true、源根越界、缺 lock、无副作用与 JSON stdout；执行 `typecheck/test/build`，确认浏览器 `/testing` 与 Node 根入口未串依赖。
-- [ ] **Step 5：提交。**
+- [x] **Step 4：GREEN。** 覆盖非 JSON、非法 UTF-8、版本 mismatch、native=true、源根越界、缺 lock、无副作用与 JSON stdout；执行 `typecheck/test/build`，确认浏览器 `/testing` 与 Node 根入口未串依赖。
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-devkit package.json pnpm-lock.yaml
@@ -693,3 +693,21 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 - 公共 schema/DTO/API 名称一致；devkit 任何行为需要新协议字段时回到 runtime 契约评审，不在 devkit 隐藏塞字段。
 - 应用 typecheck/test 没有因 workspace 和测试发现范围改变而回归；两包生成物未混入主应用构建。
 - README/模板不承诺当前不存在的 Rust 能力、npm 版本、签名或商店自动发布。真正的双模式系统级完成条件仍由 Rust+ai-switch 与 plugin-store 后续计划承担。
+
+## 7. 执行记录
+
+### D1（2026-09-15）
+
+- 新建 `@ai-switch/tauri-plugin-devkit@0.1.0` 独立 Node ESM 包，只导出根 `validateProject`、相关报告类型及 package.json；bin 为 aplg。依赖 runtime 的公开 `/protocol`，没有复制 schema、源码 alias 或反向 runtime→devkit 依赖。
+- 先写 read/project/cli 失败测试，再实现 `project/{read,files,errors,types,validate}` 和 `cli/run`。最终 **3 文件 / 91 项测试**通过；构建后 **3 项 Node import/真实 CLI/旧 dist 清理测试**及 NodeNext 公共类型检查通过。Node 根类型使用 ES2022 + Node lib，不要求 DOM 全局。
+- 源码校验仅打开五个固定元数据文件：aplg.json/package.json 各 256 KiB、README/LICENSE 各 1 MiB、pnpm lock 4 MiB；不 import Vite config，不读取 node_modules/.env/source，不运行作者 scripts，不生成 dist。source 文件列表是读取元数据快照，不是 D5 归档白名单。
+- 严格 UTF-8 解码和 jsonc-parser AST 检查拒绝 BOM、注释、尾逗号、重复/转义等价键、不安全对象键、非有限数。先用 scanner 匹配花/方括号并限制 64 层，再构造 AST。审查复现错误括号使简单深度计数失效、AST 栈溢出的输入，已先建回归再修为类型匹配的容器栈。
+- 文件读取逐级 lstat 检查祖先 symlink/junction、拒绝非普通文件，open 后核查 dev/ino/mode/size，至多 64 KiB 分块、保留精确字节 hash，读取后复核路径/identity/size/mtime/ctime。真实文件测试覆盖部分读取、增大、截断、等长改写与句柄关闭；不将普通 Node fs 检查宣传为原子目录授权或恶意文件系统沙箱。
+- 复用 runtime manifest/API range 语义；校验 package.version 与 manifest 精确一致、web-v1 native=false、必需文档/锁文件。profile 只作为校验选项，不向 manifest 引入重复字段。D1 只检查 lock 非空/UTF-8/大小，不声称依赖冻结匹配。
+- CLI 支持 help/version、validate、source/dist 参数、JSON 单对象 stdout、诊断 stderr；参数/内容/路径错误退出 1，I/O/internal 退出 2。不会设置全局 cwd/核心 API process.exit；只有 bin 设置 exitCode。转义终端控制字符，不回显原始 OS 错误/绝对路径；`--` 后参数不误当 --json，驱动器相对路径/URL 不被猜测成项目目录。
+- dist 明确返回 E_DIST_VALIDATION_UNAVAILABLE；init/inspect/pack 返回 E_COMMAND_UNAVAILABLE 且不创建/执行任何内容。`/testing`、`/vite`、`/node-types` 未提前导出。最终发布前仍须完成 D2–D9，不发布此开发切片。
+- 计划依赖均固定版本加入锁文件，Vite 8 为 optional peer；主应用 Vite/TS/React 依赖未升级。devkit 的多入口构建使用 platform=node/packages=external 并安全清理 package-local dist，不把 Node 代码混入 runtime 浏览器图。
+- `tests/fixtures/plugin-example/pnpm-lock.yaml` 原样摘自已提交的 plugin-example `c30cd40d8d6fafba15acbeb0b866f72fff0229c1`，两文件 SHA-256 相同；夹具 README 明确这不是 validProjectFiles package.json 的冻结安装证明。此次只读校验现有 plugin-example 本地 checkout 成功，没有改动它或远端仓库。
+- 实际执行 pnpm pack，检查 **15 个包文件**、runtime dependency 精确为 `0.1.0`、无 workspace:、Vite peer optional，已清理临时 tarball。此项是发布元数据/文件检查，不替代 D8 仓库外消费者安装/构建/浏览器完整验收。临时外部 pack 清理命令曾被工具策略拒绝，未执行；改为仓库内显式 staging、只删除确切文件与空目录，未递归删除外部路径。
+- devkit typecheck/test/build/公共 types/构建后测试、pnpm 冻结安装通过；runtime **26 文件 / 364 项单元测试**、typecheck/类型检查和真实 tarball **Chromium/WebKit 共 8 项**复验通过；主应用 typecheck 与 **74 文件 / 803 项测试**通过。R8 既有 Linux/Node24 验收缺口未解除，不重复声称跨平台完成。
+- 新增中文 README、依赖许可说明和根 aplg:devkit:test/build 入口；本任务在同一 worktree 顺序执行并本地提交。不调用 Cargo、不改 Rust、不创建/推送 tag、不发布 npm、不改 plugin-store/plugin-example workflow。

@@ -1,0 +1,46 @@
+{
+  "name": "@ai-switch/tauri-plugin-devkit",
+  "version": "0.1.0",
+  "description": "Node tooling for validating, building and packaging APLG plugins.",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "engines": { "node": "^22.12.0 || ^24.0.0 || >=26.0.0" },
+  "packageManager": "pnpm@10.12.4",
+  "bin": { "aplg": "./dist/cli.js" },
+  "files": ["dist", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],
+  "publishConfig": { "access": "public" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:types": "tsc --noEmit -p tsconfig.type-tests.json",
+    "test:built": "node --test tests/package.test.mjs",
+    "build": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "@ai-switch/tauri-plugin-runtime": "workspace:0.1.0",
+    "es-module-lexer": "3.0.2",
+    "jsonc-parser": "3.3.1",
+    "parse5": "8.0.1",
+    "postcss": "8.5.28",
+    "postcss-value-parser": "4.2.0",
+    "yauzl": "3.4.0",
+    "yazl": "3.3.1"
+  },
+  "peerDependencies": { "vite": "^8.3.0" },
+  "peerDependenciesMeta": { "vite": { "optional": true } },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "22.19.15",
+    "@types/yauzl": "3.4.0",
+    "@types/yazl": "3.3.1",
+    "esbuild": "0.28.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.0",
+    "vitest": "5.0.0"
+  }
+}
