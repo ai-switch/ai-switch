@@ -185,7 +185,26 @@ AI_SWITCH_PORT=19527 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.co
 
 因为独立服务器的敏感命令闸门不做动态判定，凭据导出、密钥读取、MCP 与技能安装这些命令在令牌校验通过后就都能调用。
 
-## 安全注意事项
+## 忘记令牌怎么办
+
+- **Linux systemd 安装**：令牌持久化在 /etc/ai-switch/server.env，直接查看即可：
+  `ash
+  sudo cat /etc/ai-switch/server.env
+  `
+  一键安装器在结束时也会打印读取命令：sudo cat 。
+
+- **Docker 部署**：未显式设置 AI_SWITCH_TOKEN 时，entrypoint 启动后会在容器日志里打印生成的令牌：
+  `ash
+  docker logs <容器名> | grep AI_SWITCH_TOKEN
+  `
+  显式通过环境变量设置过的，查看环境变量：
+  `ash
+  docker inspect <容器名> --format '&#123;&#123;range .Config.Env&#125;&#125;&#123;&#123;println .&#125;&#125;&#123;&#123;end&#125;&#125;' | grep AI_SWITCH_TOKEN
+  `
+
+- **手动启动 / 桌面端内置 Web 服务**：令牌来自启动时的环境变量或 web-service.json，请查阅当时的终端记录或配置文件。忘记后只能重新生成一个。
+
+重新生成令牌后需要重启服务才能生效；如果令牌被用于 API 调用或客户端配置，客户端也需要同步更新。\n\n## 安全注意事项
 
 ::: warning 部署前请确认
 - **必须设置 `AI_SWITCH_TOKEN`（缺失时服务不会启动）。** 独立服务器不做敏感命令降级，令牌是唯一的访问控制手段。

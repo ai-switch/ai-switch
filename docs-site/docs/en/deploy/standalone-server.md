@@ -184,7 +184,26 @@ With that layout you do not need `AI_SWITCH_STATIC_DIR` at all. Paths that match
 
 Because the standalone server does not gate sensitive commands dynamically, credential export, proxy key reads, and MCP/skill installation are all callable once the token check passes.
 
-## Security notes
+## Recovering a lost token
+
+- **Linux systemd install**: the token is persisted in /etc/ai-switch/server.env:
+  `ash
+  sudo cat /etc/ai-switch/server.env
+  `
+  The one-click installer prints the same command when it finishes.
+
+- **Docker deployment**: if AI_SWITCH_TOKEN was not set explicitly, the entrypoint generates and prints one at startup:
+  `ash
+  docker logs <container> | grep AI_SWITCH_TOKEN
+  `
+  If you set it via environment variables, inspect the container config:
+  `ash
+  docker inspect <container> --format '&#123;&#123;range .Config.Env&#125;&#125;&#123;&#123;println .&#125;&#125;&#123;&#123;end&#125;&#125;' | grep AI_SWITCH_TOKEN
+  `
+
+- **Manual startup / desktop built-in web service**: the token comes from the environment or web-service.json. Check your terminal history or config file. If neither exists, you must generate a new one.
+
+Regenerating the token requires a service restart; any API calls or client configurations that reference the old token must be updated as well.\n\n## Security notes
 
 ::: warning Before you deploy
 - **`AI_SWITCH_TOKEN` must be set (the server will not start without it).** The standalone server does not downgrade sensitive commands, so the token is the only access control there is.
