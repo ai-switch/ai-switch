@@ -175,6 +175,23 @@ pub fn is_encrypted_content_failure(failure: &SemanticResponseFailure) -> bool {
             || message.contains("encrypted content is invalid"))
 }
 
+/// Azure cannot resolve an input item created by another resource. This is a
+/// request-history failure, not evidence of an unhealthy account or model. An
+/// opaque reference cannot be expanded without the real original item.
+pub fn is_cross_resource_item_failure(text: &str) -> bool {
+    let message = text
+        .replace(['`', '_'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    message.contains("azure openai resource")
+        && (message.contains("created under a different")
+            || message.contains("created by a different"))
+        && (message.contains("the item") || message.contains("requested item"))
+        && message.contains("use the same resource")
+}
+
 /// Returns whether a Chat upstream rejected a conversation because a content
 /// part's `type` is outside its text-only allowed list.
 ///
@@ -663,5 +680,28 @@ data: {"error":{"code":"global_fixed_window_quota_exhausted"}}
         assert!(detect_auto_pause_code(br#"{"error":{"code":"rate_limit_error"}}"#).is_none());
         assert!(detect_auto_pause_code(br#"{"error":{"message":"boom"}}"#).is_none());
         assert!(detect_auto_pause_code(br#"{}"#).is_none());
+    }
+    #[test]
+    fn cross_resource_item_failure_matches_only_the_resource_reuse_error() {
+        for message in [
+            "The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.",
+            "relay 400: The requested item was created by a different Azure OpenAI resource. Use the same resource that created the item to access it.",
+            "The requested item was created under a different `Azure_OpenAI_resource`. Use the same resource that created the item to access it.",
+        ] {
+            assert!(is_cross_resource_item_failure(message), "{message}");
+        }
+        for message in [
+            "", "The requested item was created under a different subscription.",
+            "This deployment belongs to a different Azure OpenAI resource.",
+            "Use the same resource that created the item to access it.",
+            "The requested item was created under a different Azure OpenAI resource for another request.",
+        ] {
+            assert!(!is_cross_resource_item_failure(message), "{message}");
+        }
+        let sse = b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.\"}}}\n\n";
+        let failure = detect_response_failed(sse).expect("SSE failure");
+        assert!(is_cross_resource_item_failure(&failure.message));
+        assert!(!is_encrypted_content_failure(&failure));
+        assert!(!is_quota_exhaustion_failure(&failure));
     }
 }

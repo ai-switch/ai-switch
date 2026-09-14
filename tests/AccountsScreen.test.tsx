@@ -3838,7 +3838,7 @@ describe("AccountsScreen", () => {
     await userEvent.type(screen.getByLabelText("API Key"), "sk-cleanup-test");
     await userEvent.selectOptions(screen.getByLabelText("接口格式"), "openai-responses");
     await openFormTab("高级");
-    const checkbox = screen.getByLabelText("Responses 历史密文净化");
+    const checkbox = screen.getByLabelText("Responses 推理兼容清理");
     expect(checkbox).not.toBeChecked();
     await userEvent.click(checkbox);
     await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
@@ -3849,7 +3849,7 @@ describe("AccountsScreen", () => {
     await userEvent.click(screen.getByRole("button", { name: "API 账号" }));
     await userEvent.selectOptions(screen.getByLabelText("接口格式"), "openai-responses");
     await openFormTab("高级");
-    expect(screen.getByLabelText("Responses 历史密文净化")).not.toBeChecked();
+    expect(screen.getByLabelText("Responses 推理兼容清理")).not.toBeChecked();
   });
 
   it("loads and disables Responses encrypted content cleanup independently of other settings", async () => {
@@ -3865,7 +3865,7 @@ describe("AccountsScreen", () => {
     renderScreen();
     await userEvent.click(await screen.findByRole("button", { name: "编辑 API Account" }));
     await openFormTab("高级");
-    const checkbox = screen.getByLabelText("Responses 历史密文净化");
+    const checkbox = screen.getByLabelText("Responses 推理兼容清理");
     expect(checkbox).toBeChecked();
     await userEvent.click(checkbox);
     await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
@@ -3887,11 +3887,11 @@ describe("AccountsScreen", () => {
     renderScreen();
     await userEvent.click(await screen.findByRole("button", { name: "编辑 API Account" }));
     await openFormTab("高级");
-    expect(screen.getByLabelText("Responses 历史密文净化")).not.toBeChecked();
+    expect(screen.getByLabelText("Responses 推理兼容清理")).not.toBeChecked();
     await openFormTab("基础");
     await userEvent.selectOptions(screen.getByLabelText("接口格式"), "openai");
     await openFormTab("高级");
-    expect(screen.queryByLabelText("Responses 历史密文净化")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Responses 推理兼容清理")).not.toBeInTheDocument();
   });
 
   it("creates API account with responses custom tool compat enabled when checked", async () => {

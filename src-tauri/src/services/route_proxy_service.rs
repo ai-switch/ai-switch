@@ -23,11 +23,12 @@ use crate::services::official_agent_identity_service::{
 };
 use crate::services::platform_capability_service::PlatformCapabilityService;
 use crate::services::response_failure_service::{
-    detect_response_failed, is_encrypted_content_failure, is_insufficient_permissions_failure,
-    is_quota_exhaustion_failure, is_text_only_chat_content_failure, is_thinking_signature_failure,
+    detect_response_failed, is_cross_resource_item_failure, is_encrypted_content_failure,
+    is_insufficient_permissions_failure, is_quota_exhaustion_failure,
+    is_text_only_chat_content_failure, is_thinking_signature_failure,
     stream_disconnected_before_completion, STREAM_DISCONNECTED_FAILURE_MESSAGE,
 };
-use crate::services::responses_encrypted_content::strip_replayed_encrypted_content_from_bytes;
+use crate::services::responses_encrypted_content::sanitize_replayed_reasoning_from_bytes;
 use crate::services::route_config_service::generate_route_proxy_key;
 use crate::services::route_credential_activity::{
     RouteCredentialActivityLease, RouteCredentialActivityRegistry,
@@ -345,7 +346,7 @@ pub(crate) struct BuiltUpstreamRequest {
     pub(crate) bridge_kind: Option<ProtocolBridgeKind>,
     pub(crate) tool_namespaces: BTreeMap<String, String>,
     pub(crate) streaming_request: bool,
-    pub(crate) encrypted_content_stripped: bool,
+    pub(crate) reasoning_sanitized: bool,
 }
 
 impl RouteProxyKeyCache {
@@ -982,11 +983,10 @@ pub(crate) async fn forward_request(
     let request_start = Instant::now();
     let mut acquired_any = false;
     let mut attempt = 0usize;
-    // One rewrite per client request. The body is only ever stripped of replayed
-    // reasoning, so a second pass would find nothing and the retry would repeat a
-    // request the upstream has already refused.
+    // One recovery rewrite per compatibility rule per client request. Reasoning
+    // cleanup is idempotent and must not spend the account's retry budget.
     let mut thinking_stripped = false;
-    let mut encrypted_content_stripped = false;
+    let mut reasoning_sanitized = false;
 
     while let Some((credential_index, credential_retry_count)) = retry_queue.pop_front() {
         attempt += 1;
@@ -1089,7 +1089,7 @@ pub(crate) async fn forward_request(
             bridge_kind,
             tool_namespaces,
             streaming_request,
-            encrypted_content_stripped: outbound_encrypted_content_stripped,
+            reasoning_sanitized: outbound_reasoning_sanitized,
         } = match upstream_request {
             Ok(request) => request,
             Err(error) => {
@@ -1746,15 +1746,31 @@ pub(crate) async fn forward_request(
             return proxy_upstream_response(status, upstream_headers, response_bytes.to_vec());
         }
 
+        // A resource-scoped reference cannot be recreated from its ID. Preserve
+        // the upstream explanation and request history instead of fabricating an
+        // empty reasoning item or penalizing every account in the pool.
+        if bridge_kind == Some(ProtocolBridgeKind::ResponsesToResponses)
+            && semantic_failure
+                .as_ref()
+                .is_some_and(|failure| is_cross_resource_item_failure(&failure.message))
+        {
+            return proxy_upstream_response(status, upstream_headers, response_bytes.to_vec());
+        }
+
         if bridge_kind == Some(ProtocolBridgeKind::ResponsesToResponses)
             && semantic_failure
                 .as_ref()
                 .is_some_and(is_encrypted_content_failure)
         {
-            if !encrypted_content_stripped && !outbound_encrypted_content_stripped {
-                if let Some(stripped) = strip_replayed_encrypted_content_from_bytes(&body_bytes) {
-                    body_bytes = axum::body::Bytes::from(stripped);
-                    encrypted_content_stripped = true;
+            if !reasoning_sanitized
+                && !outbound_reasoning_sanitized
+                // The bridge may already have cleared an unstored orphan ID.
+                // Only retry if cleanup can still change the body actually sent.
+                && sanitize_replayed_reasoning_from_bytes(&upstream_request_bytes).is_some()
+            {
+                if let Some(cleaned) = sanitize_replayed_reasoning_from_bytes(&body_bytes) {
+                    body_bytes = axum::body::Bytes::from(cleaned);
+                    reasoning_sanitized = true;
                     retry_queue.push_front((credential_index, credential_retry_count));
                     continue;
                 }
@@ -3941,16 +3957,16 @@ fn build_api_upstream_request(
     // converted a Responses request into `messages` or `contents`, so a reminder
     // written any earlier would land in the wrong shape.
     let mut rewritten_body = rewritten_body;
-    let mut encrypted_content_stripped = false;
+    let mut reasoning_sanitized = false;
     if bridge_kind == Some(ProtocolBridgeKind::ResponsesToResponses)
         && config
             .get("responses_encrypted_content_cleanup")
             .and_then(Value::as_bool)
             == Some(true)
     {
-        if let Some(stripped) = strip_replayed_encrypted_content_from_bytes(&rewritten_body) {
-            rewritten_body = stripped;
-            encrypted_content_stripped = true;
+        if let Some(cleaned) = sanitize_replayed_reasoning_from_bytes(&rewritten_body) {
+            rewritten_body = cleaned;
+            reasoning_sanitized = true;
         }
     }
     if turn_reminder == TurnReminderMode::Apply {
@@ -4028,7 +4044,7 @@ fn build_api_upstream_request(
         bridge_kind,
         tool_namespaces,
         streaming_request,
-        encrypted_content_stripped,
+        reasoning_sanitized,
     })
 }
 
@@ -4142,7 +4158,7 @@ fn build_official_upstream_request(
         bridge_kind,
         tool_namespaces: BTreeMap::new(),
         streaming_request,
-        encrypted_content_stripped: false,
+        reasoning_sanitized: false,
     })
 }
 
@@ -6961,16 +6977,34 @@ mod tests {
         AxumState(state): AxumState<EncryptedContentUpstreamState>,
         body: axum::body::Bytes,
     ) -> Response {
-        let attempt = state.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        state.calls.fetch_add(1, Ordering::SeqCst);
+        let body: Value = serde_json::from_slice(&body).expect("request JSON");
         state
             .bodies
             .lock()
             .expect("record Responses upstream body")
-            .push(serde_json::from_slice(&body).unwrap_or(Value::Null));
-        let (status, response_body) = if attempt == 1 {
+            .push(body.clone());
+        // This fake checks the actual contract: clean reasoning and paired tool
+        // outputs. It does not start accepting malformed input on attempt two.
+        let input = body["input"].as_array().expect("input array");
+        let invalid_ciphertext = input
+            .iter()
+            .any(|item| item["type"] == "reasoning" && item.get("encrypted_content").is_some());
+        let orphan_output = input.iter().any(|item| {
+            item["type"] == "function_call_output"
+                && !input.iter().any(|call| {
+                    call["type"] == "function_call" && call["call_id"] == item["call_id"]
+                })
+        });
+        let (status, response_body) = if invalid_ciphertext {
             (
                 StatusCode::BAD_REQUEST,
                 r#"{"error":{"code":"invalid_encrypted_content","message":"encrypted content could not be verified"}}"#,
+            )
+        } else if orphan_output {
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"error":{"code":"invalid_request_error","message":"No tool call found for function call output"}}"#,
             )
         } else {
             (
@@ -8617,95 +8651,286 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_responses_encrypted_content_is_retried_with_replayed_state_removed() {
-        use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
-        use crate::database::{create_memory_pool, run_migrations};
-
-        let (upstream, calls, bodies) = start_encrypted_content_upstream().await;
-        let pool = create_memory_pool().await.expect("pool");
-        run_migrations(&pool).await.expect("migrations");
-        let credential_id = create_proxy_api_credential_with_config(
-            &pool,
-            "responses relay",
-            &upstream,
-            json!({
-                "interface_format": "openai-responses",
-                "failure_policy": {"retry_count": 0},
-                "model_mappings": [{"from": "gpt-6-astra", "to": "gpt-6-astra"}]
-            }),
-        )
-        .await;
-        RoutePoolRepository::replace_members(&pool, "codex", std::slice::from_ref(&credential_id))
+    async fn conservative_cleanup_retries_invalid_reasoning_without_losing_history() {
+        for proactive in [false, true] {
+            let (upstream, calls, bodies) = start_encrypted_content_upstream().await;
+            let pool = create_memory_pool().await.expect("pool");
+            run_migrations(&pool).await.expect("migrations");
+            let credential_id = create_proxy_api_credential_with_config(
+                &pool, "responses relay", &upstream,
+                json!({
+                    "interface_format": "openai-responses", "responses_encrypted_content_cleanup": proactive,
+                    "failure_policy": {"retry_count": 0},
+                    "model_mappings": [{"from": "gpt-6-astra", "to": "gpt-6-astra"}]
+                }),
+            ).await;
+            RoutePoolRepository::replace_members(
+                &pool,
+                "codex",
+                std::slice::from_ref(&credential_id),
+            )
             .await
-            .expect("pool members");
-        let route_key =
-            RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-test")
+            .expect("members");
+            let key = RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-test")
                 .await
-                .expect("route key");
+                .expect("key");
+            let runtime = RouteProxyRuntimeState::default();
+            let proxy =
+                RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+                    .await
+                    .expect("proxy");
+            let request = json!({
+                "model": "gpt-6-astra", "store": false, "include": ["reasoning.encrypted_content"],
+                "input": [
+                    {"type": "reasoning", "id": "rs_bad", "encrypted_content": "bad", "summary": [{"type": "summary_text", "text": "keep plan"}]},
+                    {"type": "message", "id": "msg_1", "role": "user", "content": "continue"},
+                    {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "call_1", "output": "42"},
+                    {"type": "compaction", "id": "cc_1", "encrypted_content": "keep compaction"}
+                ],
+                "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}]
+            });
+            let response = reqwest::Client::new()
+                .post(format!(
+                    "{}/v1/responses",
+                    proxy.base_url.as_deref().unwrap()
+                ))
+                .bearer_auth(key)
+                .json(&request)
+                .send()
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.json::<Value>().await.unwrap()["id"], "resp_1");
+            let expected_calls = if proactive { 1 } else { 2 };
+            assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+            let recorded = bodies.lock().unwrap().clone();
+            if !proactive {
+                assert_eq!(recorded[0], request);
+            }
+            let mut expected = request;
+            expected["input"][0].as_object_mut().unwrap().remove("id");
+            expected["input"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("encrypted_content");
+            assert_eq!(
+                recorded.last().unwrap(),
+                &expected,
+                "all actual history must survive cleanup"
+            );
+            let account = RouteCredentialRepository::get(&pool, &credential_id)
+                .await
+                .unwrap();
+            assert_eq!(account.status, "ok");
+            assert_eq!(account.transient_failure_count, 0);
+            assert!(account.last_failure_message.is_none());
+            RouteProxyService::stop(&runtime).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_resource_item_failure_preserves_references_and_does_not_penalize_accounts() {
+        const REJECTION: &str = r#"{"error":{"message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it."}}"#;
+        for proactive in [false, true] {
+            let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+            let recorded = Arc::clone(&bodies);
+            let app = Router::new().fallback(move |body: axum::body::Bytes| {
+                let recorded = Arc::clone(&recorded);
+                async move {
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(&body).unwrap());
+                    (
+                        StatusCode::BAD_REQUEST,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        REJECTION,
+                    )
+                }
+            });
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let upstream = format!("http://{}/v1", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let pool = create_memory_pool().await.unwrap();
+            run_migrations(&pool).await.unwrap();
+            let config = json!({
+                "interface_format": "openai-responses", "responses_encrypted_content_cleanup": proactive,
+                "failure_policy": {"retry_count": 3, "retry_interval_ms": 0},
+                "model_mappings": [{"from": "gpt-6-astra", "to": "gpt-6-astra"}]
+            });
+            let first =
+                create_proxy_api_credential_with_config(&pool, "first", &upstream, config.clone())
+                    .await;
+            let second =
+                create_proxy_api_credential_with_config(&pool, "second", &upstream, config).await;
+            RoutePoolRepository::replace_members(&pool, "codex", &[first.clone(), second.clone()])
+                .await
+                .unwrap();
+            let key = RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-test")
+                .await
+                .unwrap();
+            let runtime = RouteProxyRuntimeState::default();
+            let proxy =
+                RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+                    .await
+                    .unwrap();
+            let request = json!({
+                "model": "gpt-6-astra", "input": [
+                    {"type": "item_reference", "id": "fc_foreign"},
+                    {"type": "function_call_output", "call_id": "call_1", "output": "42"},
+                    {"id": "msg_implicit"}, {"type": null, "id": "rs_implicit"}
+                ]
+            });
+            let response = reqwest::Client::new()
+                .post(format!(
+                    "{}/v1/responses",
+                    proxy.base_url.as_deref().unwrap()
+                ))
+                .bearer_auth(key)
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(response.text().await.unwrap(), REJECTION);
+            assert_eq!(
+                *bodies.lock().unwrap(),
+                vec![request],
+                "preserve the real history; neither rewrite nor walk the pool"
+            );
+            for id in [first, second] {
+                let account = RouteCredentialRepository::get(&pool, &id).await.unwrap();
+                assert_eq!(account.status, "ok");
+                assert_eq!(account.transient_failure_count, 0);
+                assert!(account.last_failure_message.is_none());
+                assert!(account.next_retry_at.is_none());
+            }
+            let affected: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM route_credential_models WHERE status <> 'ok' OR transient_failure_count > 0 OR cooldown_until IS NOT NULL OR last_failure_message IS NOT NULL")
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(affected, 0);
+            RouteProxyService::stop(&runtime).await.unwrap();
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn conservative_cleanup_does_not_retry_when_bridge_already_cleared_the_only_orphan_id() {
+        const REJECTION: &str = r#"{"error":{"code":"invalid_encrypted_content","message":"encrypted content could not be verified"}}"#;
+        let (upstream, calls) =
+            start_status_sequence_upstream(usize::MAX, StatusCode::BAD_REQUEST, REJECTION, "{}")
+                .await;
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let id = create_proxy_api_credential_with_config(&pool, "relay", &upstream, json!({
+            "interface_format": "openai-responses", "failure_policy": {"retry_count": 3, "retry_interval_ms": 0},
+            "model_mappings": [{"from": "gpt-6-astra", "to": "gpt-6-astra"}]
+        })).await;
+        RoutePoolRepository::replace_members(&pool, "codex", std::slice::from_ref(&id))
+            .await
+            .unwrap();
+        let key = RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-test")
+            .await
+            .unwrap();
         let runtime = RouteProxyRuntimeState::default();
         let proxy = RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
             .await
-            .expect("start proxy");
-
+            .unwrap();
         let response = reqwest::Client::new()
             .post(format!(
                 "{}/v1/responses",
-                proxy.base_url.as_deref().expect("base url")
+                proxy.base_url.as_deref().unwrap()
             ))
-            .bearer_auth(route_key)
+            .bearer_auth(key)
             .json(&json!({
-                "model": "gpt-6-astra",
-                "include": ["reasoning.encrypted_content"],
-                "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
-                "input": [
-                    {"type": "reasoning", "encrypted_content": "old-reasoning"},
-                    {"type": "compaction", "encrypted_content": "old-compaction"},
-                    {"type": "compaction_trigger"},
-                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "keep me"}]},
-                    {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
-                    {"type": "function_call_output", "call_id": "call_1", "output": "done"},
-                    {"type": "agent_message", "content": [
-                        {"type": "input_text", "text": "keep this prose"},
-                        {"type": "encrypted_content", "encrypted_content": "old-agent-state"}
-                    ]}
-                ]
+                "model": "gpt-6-astra", "store": false,
+                "input": [{"type": "reasoning", "id": "rs_orphan", "summary": []},
+                          {"type": "compaction", "encrypted_content": "foreign-compaction"}]
             }))
             .send()
             .await
-            .expect("proxy response");
-
-        assert_eq!(response.status(), StatusCode::OK);
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.text().await.unwrap(), REJECTION);
         assert_eq!(
-            response.json::<Value>().await.expect("response body")["id"],
-            "resp_1"
+            calls.load(Ordering::SeqCst),
+            1,
+            "a retry would resend the exact same upstream body"
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let account = RouteCredentialRepository::get(&pool, &id).await.unwrap();
+        assert_eq!(account.transient_failure_count, 0);
+        assert!(account.last_failure_message.is_none());
+        RouteProxyService::stop(&runtime).await.unwrap();
+    }
 
-        let recorded = bodies.lock().expect("recorded bodies").clone();
-        assert!(serde_json::to_string(&recorded[0])
-            .unwrap()
-            .contains("old-reasoning"));
-        let retry = &recorded[1];
-        let retry_text = serde_json::to_string(retry).unwrap();
-        assert!(!retry_text.contains("old-reasoning"));
-        assert!(!retry_text.contains("old-compaction"));
-        assert!(!retry_text.contains("old-agent-state"));
-        assert_eq!(retry["include"][0], "reasoning.encrypted_content");
-        assert_eq!(retry["input"][0]["type"], "compaction_trigger");
-        assert_eq!(retry["input"][1]["content"][0]["text"], "keep me");
-        assert_eq!(retry["input"][2]["type"], "function_call");
-        assert_eq!(retry["input"][3]["type"], "function_call_output");
-        assert_eq!(retry["input"][4]["content"][0]["text"], "keep this prose");
-        assert_eq!(retry["tools"][0]["name"], "lookup");
-
-        let credential = RouteCredentialRepository::get(&pool, &credential_id)
-            .await
-            .expect("credential");
-        assert_eq!(credential.status, "ok");
-        assert_eq!(credential.transient_failure_count, 0);
-        assert!(credential.last_failure_message.is_none());
-
-        RouteProxyService::stop(&runtime).await.expect("stop proxy");
+    #[tokio::test]
+    async fn conservative_cleanup_preserves_unrecoverable_ciphertext_without_retry_or_penalty() {
+        const VALID: &str = "gAAAAAAAAAAAAQEBAQEBAQEBAQEBAQEBAQICAgICAgICAgICAgICAgIDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw==";
+        const REJECTION: &str = r#"{"error":{"code":"invalid_encrypted_content","message":"encrypted content could not be verified"}}"#;
+        for proactive in [false, true] {
+            for item in [
+                json!({"type": "reasoning", "id": "rs_foreign", "summary": [], "encrypted_content": VALID}),
+                json!({"type": "compaction", "id": "cc_foreign", "encrypted_content": "compacted-history"}),
+            ] {
+                let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+                let recorded = Arc::clone(&bodies);
+                let app = Router::new().fallback(move |body: axum::body::Bytes| {
+                    let recorded = Arc::clone(&recorded);
+                    async move {
+                        recorded
+                            .lock()
+                            .unwrap()
+                            .push(serde_json::from_slice(&body).unwrap());
+                        (
+                            StatusCode::BAD_REQUEST,
+                            [(axum::http::header::CONTENT_TYPE, "application/json")],
+                            REJECTION,
+                        )
+                    }
+                });
+                let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+                let upstream = format!("http://{}/v1", listener.local_addr().unwrap());
+                let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                let pool = create_memory_pool().await.unwrap();
+                run_migrations(&pool).await.unwrap();
+                let id = create_proxy_api_credential_with_config(&pool, "relay", &upstream, json!({
+                    "interface_format": "openai-responses", "responses_encrypted_content_cleanup": proactive,
+                    "failure_policy": {"retry_count": 3, "retry_interval_ms": 0},
+                    "model_mappings": [{"from": "gpt-6-astra", "to": "gpt-6-astra"}]
+                })).await;
+                RoutePoolRepository::replace_members(&pool, "codex", std::slice::from_ref(&id))
+                    .await
+                    .unwrap();
+                let key = RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-test")
+                    .await
+                    .unwrap();
+                let runtime = RouteProxyRuntimeState::default();
+                let proxy =
+                    RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+                        .await
+                        .unwrap();
+                let request = json!({"model": "gpt-6-astra", "store": false, "input": [item]});
+                let response = reqwest::Client::new()
+                    .post(format!(
+                        "{}/v1/responses",
+                        proxy.base_url.as_deref().unwrap()
+                    ))
+                    .bearer_auth(key)
+                    .json(&request)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                assert_eq!(response.text().await.unwrap(), REJECTION);
+                assert_eq!(*bodies.lock().unwrap(), vec![request]);
+                let account = RouteCredentialRepository::get(&pool, &id).await.unwrap();
+                assert_eq!(account.status, "ok");
+                assert_eq!(account.transient_failure_count, 0);
+                assert!(account.last_failure_message.is_none());
+                RouteProxyService::stop(&runtime).await.unwrap();
+                server.abort();
+            }
+        }
     }
 
     /// When the stripped body is refused too, the pool walk is pointless: every
@@ -10629,7 +10854,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_encrypted_content_cleanup_only_strips_opted_in_native_requests() {
+    fn conservative_cleanup_only_sanitizes_opted_in_native_requests() {
         let request = json!({
             "model": "gpt-6-astra", "include": ["reasoning.encrypted_content"],
             "input": [
@@ -10661,7 +10886,10 @@ mod tests {
             .expect("request");
             let mut expected = request.clone();
             if should_strip {
-                expected["input"].as_array_mut().unwrap().remove(0);
+                expected["input"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("encrypted_content");
             }
             assert_eq!(
                 serde_json::from_slice::<Value>(&body).unwrap(),
@@ -10698,7 +10926,7 @@ mod tests {
         let proxy = RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
             .await
             .expect("proxy");
-        for (attempt, expected_status) in [(1, StatusCode::BAD_REQUEST), (2, StatusCode::OK)] {
+        for (attempt, expected_status) in [(1, StatusCode::OK), (2, StatusCode::OK)] {
             let response = reqwest::Client::new()
                 .post(format!("{}/v1/responses", proxy.base_url.as_deref().unwrap()))
                 .bearer_auth(&route_key).json(&json!({
@@ -10710,8 +10938,8 @@ mod tests {
             assert_eq!(response.status(), expected_status);
             assert_eq!(calls.load(Ordering::SeqCst), attempt);
             assert_eq!(
-                bodies.lock().unwrap()[attempt - 1]["input"][0]["type"],
-                "message"
+                bodies.lock().unwrap()[attempt - 1]["input"][0],
+                json!({"type": "reasoning", "summary": []})
             );
         }
         let account = RouteCredentialRepository::get(&pool, &credential_id)

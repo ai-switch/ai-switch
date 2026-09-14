@@ -1,5 +1,7 @@
 # AnyRouter Responses 密文恢复：验收记录
 
+> 2026-09-14 更新：本文保留为历史验收记录。下文「删除推理/压缩状态」的旧方案已被 [Responses 推理兼容清理](2026-09-14-responses-reasoning-cleanup-verification.md) 替代；当前实现只清理非法 reasoning 密文与孤立 ID，保留有效密文、明文和压缩上下文，不承诺 Azure 跨资源恢复。
+
 ## 当前结论
 
 截至 2026-09-08，本次变更的离线回归通过，但 **AnyRouter 真实恢复验收尚未通过**。不能将模拟上游成功、GET 模型列表成功、HTTP 已连通或渠道满载，描述成 AnyRouter 推理请求已修复。

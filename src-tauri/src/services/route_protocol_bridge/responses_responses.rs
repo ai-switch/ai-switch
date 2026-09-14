@@ -31,30 +31,31 @@ pub(super) fn responses_request_to_responses(body: &[u8]) -> Result<Vec<u8>, Str
     }
 
     if object.get("store").and_then(Value::as_bool) == Some(false) {
-        drop_non_replayable_reasoning(&mut object);
+        clear_unstored_reasoning_ids(&mut object);
     }
 
     serde_json::to_vec(&Value::Object(object))
         .map_err(|error| format!("Could not serialize Responses request: {error}"))
 }
 
-fn drop_non_replayable_reasoning(object: &mut Map<String, Value>) {
+fn clear_unstored_reasoning_ids(object: &mut Map<String, Value>) {
     let Some(input) = object.get_mut("input").and_then(Value::as_array_mut) else {
         return;
     };
-    input.retain(|item| {
-        let is_replayable = item
-            .as_object()
-            .and_then(|item| item.get("encrypted_content"))
+    for item in input {
+        let Some(item) = item.as_object_mut() else {
+            continue;
+        };
+        let has_ciphertext = item
+            .get("encrypted_content")
             .and_then(Value::as_str)
             .is_some_and(|content| !content.trim().is_empty());
-        let is_reasoning = item
-            .as_object()
-            .and_then(|item| item.get("type"))
-            .and_then(Value::as_str)
-            .is_some_and(|item_type| item_type == "reasoning");
-        !is_reasoning || is_replayable
-    });
+        if item.get("type").and_then(Value::as_str) == Some("reasoning") && !has_ciphertext {
+            // Do not drop the summary or content just because an upstream cannot
+            // resolve this ID. Full ciphertext-shape cleanup is account-opt-in.
+            item.remove("id");
+        }
+    }
 }
 
 fn flatten_native_responses_tools(
@@ -314,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn store_false_drops_reasoning_without_encrypted_content() {
+    fn store_false_preserves_reasoning_summary_without_orphan_id() {
         let converted = converted_request(json!({
             "model": "gpt-5",
             "store": false,
@@ -334,11 +335,10 @@ mod tests {
 
         assert_eq!(
             converted["input"],
-            json!([{
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": "continue"}]
-            }])
+            json!([
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking"}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]}
+            ])
         );
     }
 

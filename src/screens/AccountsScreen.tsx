@@ -1154,16 +1154,16 @@ function ResponsesEncryptedContentCleanupOption({
   return (
     <label className="flex items-start gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12px] font-medium text-stone-700">
       <input
-        aria-label="Responses 历史密文净化"
+        aria-label="Responses 推理兼容清理"
         checked={checked}
         className="mt-0.5"
         onChange={(event) => onChange(event.target.checked)}
         type="checkbox"
       />
       <span className="grid gap-1">
-        <span>Responses 历史密文净化</span>
+        <span>Responses 推理兼容清理</span>
         <span className="text-[11px] font-medium text-stone-500">
-          每次发送前移除历史推理和压缩密文，避免密文校验失败后再重试。保留明文和工具数据，但可能丢失加密推理及已压缩上下文。默认关闭，关闭时仍保留密文错误的一次自动恢复。
+          每次发送前仅清理格式非法的 reasoning 密文；store 非 true 时同时移除无可用密文的孤立 ID。保留格式有效的密文、摘要、消息、工具和压缩上下文，不展开条目引用。默认关闭；密文错误最多尝试一次同样的保守清理，不保证解决 Azure 跨资源错误。
         </span>
       </span>
     </label>
