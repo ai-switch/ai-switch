@@ -5,13 +5,15 @@ import { build } from "esbuild";
 
 const fixture = new URL("./fixtures/", import.meta.url);
 const scripts = new Map();
-for (const entry of ["host", "plugin"]) {
+for (const entry of ["host", "plugin", "managed-host", "managed-plugin", "hostile-plugin"]) {
   const result = await build({ entryPoints: [fileURLToPath(new URL(`${entry}.ts`, fixture))], bundle: true, write: false, format: "esm", platform: "browser", target: "es2022", logLevel: "silent" });
   scripts.set(`/${entry}.js`, result.outputFiles[0].text);
 }
 scripts.set("/rogue.js", await readFile(new URL("rogue.js", fixture), "utf8"));
 const hostHtml = await readFile(new URL("host.html", fixture));
 const pluginHtml = await readFile(new URL("plugin.html", fixture));
+const managedHostHtml = await readFile(new URL("managed-host.html", fixture));
+const managedPluginHtml = await readFile(new URL("managed-plugin.html", fixture));
 const rogueHtml = '<!doctype html><html><body><script src="/rogue.js"></script></body></html>';
 const cspHost = "default-src 'none'; script-src 'self'; frame-src http://127.0.0.1:43172 'self'; style-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'";
 const cspPlugin = "default-src 'none'; script-src http://127.0.0.1:43172; connect-src 'none'; frame-src 'none'; style-src 'none'; base-uri 'none'; form-action 'none'";
@@ -26,10 +28,14 @@ function handler(asset) {
     response.setHeader("Content-Security-Policy", asset ? cspPlugin : cspHost);
     if (asset) response.setHeader("Access-Control-Allow-Origin", "*");
     if (pathname === "/health") { response.writeHead(200, { "Content-Type": "text/plain" }).end("ok"); return; }
-    if (scripts.has(pathname) && (asset ? pathname === "/plugin.js" : pathname !== "/plugin.js")) {
+    if (scripts.has(pathname) && (asset ? ["/plugin.js", "/managed-plugin.js", "/hostile-plugin.js"].includes(pathname) : !["/plugin.js", "/managed-plugin.js", "/hostile-plugin.js"].includes(pathname))) {
       response.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" }).end(scripts.get(pathname)); return;
     }
     if (asset && pathname === "/plugin.html") { response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(pluginHtml); return; }
+    if (asset && pathname === "/managed-plugin.html") { response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(managedPluginHtml); return; }
+    if (asset && pathname === "/hostile-plugin.html") { response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end('<!doctype html><script type="module" src="/hostile-plugin.js"></script>'); return; }
+    if (asset && pathname === "/silent-plugin.html") { response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end("<!doctype html><p>No handshake</p>"); return; }
+    if (!asset && pathname === "/runtime-host") { response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(managedHostHtml); return; }
     if (!asset && pathname === "/rogue.html") { response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(rogueHtml); return; }
     if (!asset && pathname === "/") { response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(hostHtml); return; }
     response.writeHead(404).end();

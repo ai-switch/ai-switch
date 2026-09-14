@@ -13,8 +13,9 @@ capability negotiation, safe error envelopes, and version constants.
 R3/R4 add a bounded MessagePort RPC layer and the public `/plugin` client,
 including lazy bootstrap, two-way acknowledgement, capability calls,
 subscriptions, storage/dialog wrappers, and connection lifecycle handling.
-The generic `/host` mounting API, Node API shims, Rust capability providers and
-installation/release integration are **not implemented yet**. The package has
+R5 adds the generic `/host` mounting API with scoped identity, event routing,
+reconnect handling and bounded cleanup. Node API shims, Rust capability providers
+and installation/release integration are **not implemented yet**. The package has
 not been published to npm. Do not interpret a valid manifest as authorization
 to access files, the network, or the host application.
 
@@ -98,9 +99,39 @@ and send best-effort cancellation to the peer; they cannot undo side effects.
 Duplicate request detection remembers the most recent 1024 IDs, not unlimited
 history or durable idempotency across sessions.
 
-The browser tests currently use a manual test parent, **not** the still-pending
-production host API. They demonstrate Chromium iframe/CSP behavior, not Tauri
-IPC isolation, actual Rust file access, or WebKit compatibility.
+Browser tests cover both the low-level handshake fixture and the real generic
+host API with an in-memory backend. They demonstrate Chromium iframe/CSP behavior,
+not Tauri IPC isolation, actual Rust file access, or WebKit compatibility.
+## Host entry
+
+```ts
+import { createPluginHost } from "@ai-switch/tauri-plugin-runtime/host";
+import type { HostTransport } from "@ai-switch/tauri-plugin-runtime/host";
+
+async function mountPlugin(transport: HostTransport, container: HTMLElement) {
+  const host = createPluginHost({ transport });
+  const view = await host.mount({ pluginId: "io.github.example.notes", container });
+  return async () => { await view.dispose(); await host.dispose(); };
+}
+```
+
+The application supplies an authenticated `HostTransport`; it is not handed to
+plugin code. Mounting subscribes to host events before opening a backend session,
+validates the descriptor, binds it to one sandboxed iframe/port, and resolves only
+after the plugin handshake. By default assets must use the host page's origin;
+other HTTPS/loopback origins require an explicit `allowedAssetOrigins` list.
+
+Each view gets its own backend request IDs and stable logical subscription IDs.
+A reconnect only restores active subscriptions; it never repeats a completed
+write. Backend sequence numbers are mapped into the logical subscription's
+monotonic sequence, while stale backend IDs and foreign sessions are ignored.
+
+Timeouts, container removal, document reload, remote session closure and explicit
+disposal all invalidate the view. Late session/subscription results are released,
+and cleanup is bounded even if a transport operation never resolves. The backend
+must still authorize every call and enforce grants, resource limits and asset
+access. Dedicated asset serving, CSP headers and Tauri IPC restrictions remain
+the embedding application's responsibility; an iframe is not an OS sandbox.
 ## Development
 
 Node `^22.12.0 || ^24.0.0 || >=26.0.0` and pnpm `10.12.4` are required.
@@ -121,8 +152,8 @@ contract. Generated TypeScript and ESM validators are committed and verified
 without invoking runtime code generation in the browser. Validation does not
 need `eval`, `new Function`, a Node `require`, or browser globals on import.
 
-Only implemented entry points are exported: root version/types, `/protocol`, and
-`/plugin`. Later slices add `/host` and `/node/*`; no empty implementations are
+Only implemented entry points are exported: root version/types, `/protocol`,
+`/plugin`, and `/host`. Later slices add `/node/*`; no empty implementations are
 published in advance.
 
 ## License

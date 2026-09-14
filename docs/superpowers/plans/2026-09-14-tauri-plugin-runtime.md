@@ -12,7 +12,7 @@
 
 **Related plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-devkit.md`，其中 D1 消费 R1/R2，D3/D4 消费 R4/R5/R6，最终联调需要 R8。
 
-**状态：** R1–R4 已实施并完成本地验证，R5–R8 待实施；未执行 npm 发布。后续任务中的代码仍是目标接口/测试片段。
+**状态：** R1–R5 已实施并完成本地验证，R6–R8 待实施；未执行 npm 发布。后续任务中的代码仍是目标接口/测试片段。
 
 ## Global Constraints
 
@@ -510,7 +510,7 @@ git commit -m "feat(runtime): 提供插件连接与标准能力客户端"
 
 **Interfaces:** 第 3.3 节 `createPluginHost`，消费 R2 `HostTransport`。测试服务器沿用 R4 创建的文件并扩展 host 测试路由，仅用于浏览器 fixture，不是产品资产服务；端口 43171（宿主）与 43172（资产），strict 绑定 loopback。两个独立来源保证不是碰巧同源可访问。
 
-- [ ] **Step 1：先写浏览器行为测试。** fixture host 使用只在测试内的 in-memory Transport：A/B 使用两个不同 plugin ID 的 manifest，`session.open` 每次分配新 session ID、`aplg.storage` 每 plugin ID 独立 Map；两个 manifest 都声明 storage；fixture 页面只有 mount A、mount B、dispose A 按钮，插件显示 get/set 结果。不得通过 mock parent DOM 绕过真实 iframe。
+- [x] **Step 1：先写浏览器行为测试。** fixture host 使用只在测试内的 in-memory Transport：A/B 使用两个不同 plugin ID 的 manifest，`session.open` 每次分配新 session ID、`aplg.storage` 每 plugin ID 独立 Map；两个 manifest 都声明 storage；fixture 页面只有 mount A、mount B、dispose A 按钮，插件显示 get/set 结果。不得通过 mock parent DOM 绕过真实 iframe。
 
 ```ts
 import { expect, test } from "@playwright/test";
@@ -530,8 +530,8 @@ test("two instances cannot read each other's state", async ({ page }) => {
 });
 ```
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-runtime exec playwright test tests/browser/host.spec.ts`；首次用 `pnpm --dir packages/tauri-plugin-runtime exec playwright install chromium` 准备浏览器。失败须归因于没有挂载/会话行为，不是浏览器缺失。
-- [ ] **Step 3：实现 host 生命周期。** mount 顺序为“订阅 host 事件 → session.open → 验证 descriptor → 生成 nonce → 注册 listener → 指定 iframe src → 挂载 → 握手/确认”。在任一步失败时调用 session.close、移除 iframe/listener、清理 pending；所有 dispose 幂等。返回前握手成功，任何失败不得留下看似运行中的视图。绑定清理器之前也可能发生超时：session.open 结果迟到时主动 session.close；host.dispose 后迟到的 descriptor 不得被挂载。被移除容器的观察器只覆盖已挂载目标，关闭时断开观察，避免永久监听整个 document。
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-runtime exec playwright test tests/browser/host.spec.ts`；首次用 `pnpm --dir packages/tauri-plugin-runtime exec playwright install chromium` 准备浏览器。失败须归因于没有挂载/会话行为，不是浏览器缺失。
+- [x] **Step 3：实现 host 生命周期。** mount 顺序为“订阅 host 事件 → session.open → 验证 descriptor → 生成 nonce → 注册 listener → 指定 iframe src → 挂载 → 握手/确认”。在任一步失败时调用 session.close、移除 iframe/listener、清理 pending；所有 dispose 幂等。返回前握手成功，任何失败不得留下看似运行中的视图。绑定清理器之前也可能发生超时：session.open 结果迟到时主动 session.close；host.dispose 后迟到的 descriptor 不得被挂载。被移除容器的观察器只覆盖已挂载目标，关闭时断开观察，避免永久监听整个 document。
 
 关键身份转发必须显式构造，不 spread 插件输入覆盖会话字段：
 
@@ -553,8 +553,8 @@ return transport.call("capability.call", args);
 
 `transport.state=disconnected` 通知客户端；connected 后只重建仍活跃的订阅，不重发 call。插件看到的是宿主分配的稳定逻辑订阅 ID；宿主维护 logical→backend ID 映射。重连更换 backend ID 并将其新序号转换为逻辑订阅内继续递增的序号，旧 backend ID 不再路由。全部活跃订阅重建后发送 connected，调用方重读快照；取消使用稳定 logical ID，不会关闭其他后端订阅。session.closed 直接 dispose。iframe 第二次导航/load、容器卸载、host.dispose、握手超时同样关闭会话；测试覆盖首次真实加载与 about:blank 不误触发关闭。
 
-- [ ] **Step 4：GREEN 与安全反例。** 增加：错误来源 postMessage、伪造 sessionId、父 DOM/localStorage 访问、未知能力调用、跨订阅取消、关闭前慢请求、订阅先事件后响应、重连不重复 set、reload 自动失效、重复 dispose。fixture 的 CSP 使用无 `unsafe-eval` 的本地 script-src，资产 CORS 仅对只读静态资源开放；生产 Tauri IPC 无法在此证明，验收记录明确留给 Rust 接入计划。
-- [ ] **Step 5：提交。**
+- [x] **Step 4：GREEN 与安全反例。** 增加：错误来源 postMessage、伪造 sessionId、父 DOM/localStorage 访问、未知能力调用、跨订阅取消、关闭前慢请求、订阅先事件后响应、重连不重复 set、reload 自动失效、重复 dispose。fixture 的 CSP 使用无 `unsafe-eval` 的本地 script-src，资产 CORS 仅对只读静态资源开放；生产 Tauri IPC 无法在此证明，验收记录明确留给 Rust 接入计划。
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-runtime/src/host packages/tauri-plugin-runtime/tests packages/tauri-plugin-runtime/playwright.config.ts packages/tauri-plugin-runtime/scripts/build.mjs packages/tauri-plugin-runtime/package.json
@@ -796,3 +796,15 @@ git commit -m "test(runtime): 验收独立安装与无框架宿主接入"
 - 浏览器下载安装调用曾超时；核验并停止本任务下载 helper 后，已安装的 Chromium 可用，后续浏览器测试真实执行。fixture server 与本任务下载 helper 均未遗留运行进程。
 - 类型、生成物、build、构建后 `/plugin` SSR import、冻结安装通过；应用 `pnpm typecheck` 与 74 文件 / 803 项测试通过。只新增包内 Playwright devDependency，应用依赖未改。
 - 本批只验证 Windows/Chromium，未宣称 WebKit、Tauri IPC 或真实 Rust 能力已验收。runtime 产物采用一次多入口 splitting，共享 chunk，`/host` 与 `/node/*` 仍未导出；devkit 未开始；未推送、发布或打 tag。
+
+### R5
+
+- 新增公共 `/host`、createPluginHost/mount/dispose；请求、视图、事件路由、策略分别放在独立文件中，继续单次多入口 splitting，不绑定 Tauri/React。
+- 挂载前订阅事件、验证会话/插件身份与 asset origin，再绑定 iframe/nonce/单 MessagePort。后台 sessionId/requestId 由可信宿主分配，直接绕过客户端 SDK 的伪造消息也会被拒绝。
+- 视图关闭/移除/reload、启动超时、远端撤销会释放资源；迟到 session.open/subscribe 结果不挂载并清理。新增 session ownership 预占，避免并发重复 descriptor 导致失败的挂载关闭另一个已获授权会话。
+- subscription logical ID 跨重连保持稳定，backend ID 和序号重新绑定；取消订阅与重连重叠、旧恢复失败与新连接成功的竞态经 RED/GREEN 修复，不重发已完成的写操作。
+- Transport unsubscribe 抛错不会阻止 session.close；有界 revoked-session 缓冲超限时拒绝 pending mounts，不遗忘撤销记录后允许挂载。最后一个离线视图销毁后新的挂载可以重新观察 transport 状态。
+- 测试先行并逐项补反例：新增 23 项单元、26 项真实 Chromium 宿主测试；runtime 合计 16 文件 / 176 单元测试，浏览器合计 40 项（含 R4 的 14 项）全部通过。
+- 类型、生成物一致性、build、`/host` SSR import/idle dispose、冻结安装通过。应用 `pnpm typecheck` 和 74 文件 / 803 项测试通过；最终并发 session 修正后包内单元/浏览器/构建再次全量通过。
+- 测试使用已实现的 public host + in-memory backend 与跨来源 iframe，未扩展生产 Rust/Tauri 权限，也未承诺 WebKit/真实磁盘/应用接入完成；本任务 fixture server 在结束后停止。
+- Node 子集 R6/R7、外部 tarball R8、devkit 和实际 Rust 能力尚未实施；不推送、打 tag、发布 npm 包。
