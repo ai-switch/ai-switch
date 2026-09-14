@@ -10,7 +10,11 @@ const generated = spawnSync(process.execPath, [join(packageRoot, "scripts/check-
 if (generated.status !== 0) throw new Error("Generated protocol check failed.");
 await build({
   absWorkingDir: packageRoot,
-  entryPoints: { index: "src/index.ts", "protocol/index": "src/protocol/index.ts", "plugin/index": "src/plugin/index.ts", "host/index": "src/host/index.ts" },
+  entryPoints: {
+    index: "src/index.ts", "protocol/index": "src/protocol/index.ts",
+    "plugin/index": "src/plugin/index.ts", "host/index": "src/host/index.ts",
+    "node/path": "src/node/path.ts", "node/buffer": "src/node/buffer.ts", "node/events": "src/node/events.ts",
+  },
   outdir: "dist", bundle: true, splitting: true, format: "esm", platform: "browser",
   target: "es2022", sourcemap: false, legalComments: "inline", logLevel: "info",
 });

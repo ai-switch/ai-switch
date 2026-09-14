@@ -14,8 +14,9 @@ R3/R4 add a bounded MessagePort RPC layer and the public `/plugin` client,
 including lazy bootstrap, two-way acknowledgement, capability calls,
 subscriptions, storage/dialog wrappers, and connection lifecycle handling.
 R5 adds the generic `/host` mounting API with scoped identity, event routing,
-reconnect handling and bounded cleanup. Node API shims, Rust capability providers
-and installation/release integration are **not implemented yet**. The package has
+reconnect handling and bounded cleanup. R6 adds pure-JavaScript path, Buffer and
+EventEmitter entry points. Filesystem shims, Rust capability providers and
+installation/release integration are **not implemented yet**. The package has
 not been published to npm. Do not interpret a valid manifest as authorization
 to access files, the network, or the host application.
 
@@ -132,6 +133,45 @@ and cleanup is bounded even if a transport operation never resolves. The backend
 must still authorize every call and enforce grants, resource limits and asset
 access. Dedicated asset serving, CSP headers and Tauri IPC restrictions remain
 the embedding application's responsibility; an iframe is not an OS sandbox.
+## Pure JavaScript Node subset
+
+```ts
+import path from "@ai-switch/tauri-plugin-runtime/node/path";
+import { Buffer } from "@ai-switch/tauri-plugin-runtime/node/buffer";
+import EventEmitter from "@ai-switch/tauri-plugin-runtime/node/events";
+
+const filename = path.resolve("notes", "example.txt"); // /data/notes/example.txt
+const bytes = Buffer.from("hello", "utf8");
+const events = new EventEmitter();
+events.once("saved", (name: string) => console.log(name));
+events.emit("saved", filename);
+```
+
+These modules are local JS operations: importing them does not connect to a
+host, grant file access, or install `Buffer`, `process`, or `require` globals.
+`node:path`/`node:buffer`/`node:events` build aliases belong to the later devkit;
+use the explicit package subpaths until that toolchain is implemented.
+
+- **Path:** only `join`, `resolve`, `normalize`, `dirname`, `basename`, `extname`,
+  `relative`, and `isAbsolute`. Semantics are POSIX on every host. Both `resolve`
+  and `relative` use `/data` as the virtual working directory, never the OS cwd.
+  String operations can produce a path outside the allowed virtual roots; the
+  actual filesystem capability must reject it. No `win32`, `parse`, or `format`.
+- **Buffer:** uses the browser `buffer@6.0.3` implementation, including byte
+  arrays, UTF-8/base64 conversion, concatenation and Buffer-returning subarrays.
+  It is not Node's native/global Buffer. Compatibility is limited to the pinned
+  implementation and verified behavior, not every modern Node Buffer overload.
+- **EventEmitter:** only `on`, `once`, `off`, `emit`, and `removeAllListeners`,
+  with string/symbol events, synchronous delivery, original-listener removal,
+  and `this` bound to the public emitter. Listener exceptions propagate, as in
+  Node. No promise helpers, prepend API or listener-limit configuration is exposed.
+  Removing an event's listeners is not cancellation of work they already started.
+
+Type tests cover source and built package exports without installing Node globals.
+Browser tests load the actual built ESM files while trapping access to Node globals,
+including inside an opaque sandboxed iframe; these are not source-alias-only tests.
+The upstream path dependency retains an unreachable `process.cwd()` fallback in
+its bundle, but every exposed resolving path supplies an explicit absolute root.
 ## Development
 
 Node `^22.12.0 || ^24.0.0 || >=26.0.0` and pnpm `10.12.4` are required.
@@ -143,6 +183,8 @@ pnpm --dir packages/tauri-plugin-runtime check:generated
 pnpm --dir packages/tauri-plugin-runtime typecheck
 pnpm --dir packages/tauri-plugin-runtime test
 pnpm --dir packages/tauri-plugin-runtime build
+pnpm --dir packages/tauri-plugin-runtime test:types
+pnpm --dir packages/tauri-plugin-runtime test:types:public
 pnpm --dir packages/tauri-plugin-runtime exec playwright install chromium
 pnpm --dir packages/tauri-plugin-runtime test:browser
 ```
@@ -153,8 +195,8 @@ without invoking runtime code generation in the browser. Validation does not
 need `eval`, `new Function`, a Node `require`, or browser globals on import.
 
 Only implemented entry points are exported: root version/types, `/protocol`,
-`/plugin`, and `/host`. Later slices add `/node/*`; no empty implementations are
-published in advance.
+`/plugin`, `/host`, `/node/path`, `/node/buffer`, and `/node/events`. Later work
+adds filesystem entry points; no empty implementations are published in advance.
 
 ## License
 

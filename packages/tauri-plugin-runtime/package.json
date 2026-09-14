@@ -33,8 +33,20 @@
       "import": "./dist/plugin/index.js"
     },
     "./host": {
-      "import": "./dist/host/index.js",
-      "types": "./dist/host/index.d.ts"
+      "types": "./dist/host/index.d.ts",
+      "import": "./dist/host/index.js"
+    },
+    "./node/path": {
+      "types": "./dist/node/path.d.ts",
+      "import": "./dist/node/path.js"
+    },
+    "./node/buffer": {
+      "types": "./dist/node/buffer.d.ts",
+      "import": "./dist/node/buffer.js"
+    },
+    "./node/events": {
+      "types": "./dist/node/events.d.ts",
+      "import": "./dist/node/events.js"
     }
   },
   "scripts": {
@@ -43,14 +55,21 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "build": "node scripts/build.mjs",
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "test:types": "tsc --noEmit -p tsconfig.type-tests.json",
+    "test:types:public": "tsc --noEmit -p tsconfig.public-type-tests.json"
   },
   "dependencies": {
+    "buffer": "6.0.3",
+    "events": "3.3.0",
+    "path-browserify": "1.0.1",
     "semver": "7.8.5"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",
+    "@types/events": "3.0.3",
     "@types/node": "22.19.15",
+    "@types/path-browserify": "1.0.3",
     "@types/semver": "7.7.1",
     "ajv": "8.20.0",
     "esbuild": "0.28.0",

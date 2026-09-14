@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "skipLibCheck": false },
+  "include": ["tests/types/node-subset.test-d.ts"]
+}

@@ -12,7 +12,7 @@
 
 **Related plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-devkit.md`，其中 D1 消费 R1/R2，D3/D4 消费 R4/R5/R6，最终联调需要 R8。
 
-**状态：** R1–R5 已实施并完成本地验证，R6–R8 待实施；未执行 npm 发布。后续任务中的代码仍是目标接口/测试片段。
+**状态：** R1–R6 已实施并完成本地验证，R7/R8 待实施；未执行 npm 发布。后续任务中的代码仍是目标接口/测试片段。
 
 ## Global Constraints
 
@@ -567,7 +567,7 @@ git commit -m "feat(runtime): 隔离插件容器与会话生命周期"
 
 **Interfaces:** `/node/path` 默认对象与命名导出只包含 `join/resolve/normalize/dirname/basename/extname/relative/isAbsolute`；`/node/buffer` 导出 Buffer；`/node/events` 导出 EventEmitter 与默认 EventEmitter。不提供 process 全局或 require。
 
-- [ ] **Step 1：写针对可观察语义的测试。**
+- [x] **Step 1：写针对可观察语义的测试。**
 
 ```ts
 import { expect, test } from "vitest";
@@ -590,8 +590,8 @@ test("once is removed before a subsequent emit", () => {
 });
 ```
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-runtime exec vitest run tests/node-builtins.test.ts`。
-- [ ] **Step 3：包装受维护 JS 实现，不抄写完整 Node 标准库。** `path-browserify` 的 resolve 必须显式加 `/data` 绝对前缀，避免其访问不存在的 process.cwd；仅导出承诺的方法。Buffer/events 使用已锁版本，esbuild 正确转为浏览器 ESM，保留许可证；测试声明不把 Node 原生文件类型误混入浏览器类型。
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-runtime exec vitest run tests/node-builtins.test.ts`。
+- [x] **Step 3：包装受维护 JS 实现，不抄写完整 Node 标准库。** `path-browserify` 的 resolve 必须显式加 `/data` 绝对前缀，避免其访问不存在的 process.cwd；仅导出承诺的方法。Buffer/events 使用已锁版本，esbuild 正确转为浏览器 ESM，保留许可证；测试声明不把 Node 原生文件类型误混入浏览器类型。
 
 ```ts
 export const resolve = (...parts: string[]) => posix.resolve("/data", ...parts);
@@ -599,8 +599,8 @@ export const resolve = (...parts: string[]) => posix.resolve("/data", ...parts);
 
 `posix` 为该模块的 `path-browserify` 导入，不由调用方注入。path 字符串操作不授予 filesystem 访问权；即使 resolve 到 `/etc`，实际 fs 客户端和 Rust 必须拒绝。
 
-- [ ] **Step 4：GREEN。** 对表列方法使用真实 `node:path.posix` 的固定输入差分，虚拟 cwd 单独判定；验证打包代码中没有 process 依赖、父页面污染或自动 polyfill 全局 Buffer。
-- [ ] **Step 5：提交。**
+- [x] **Step 4：GREEN。** 对表列方法使用真实 `node:path.posix` 的固定输入差分，虚拟 cwd 单独判定；验证打包代码中没有 process 依赖、父页面污染或自动 polyfill 全局 Buffer。
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-runtime/src/node packages/tauri-plugin-runtime/tests packages/tauri-plugin-runtime/package.json packages/tauri-plugin-runtime/scripts/build.mjs packages/tauri-plugin-runtime/THIRD_PARTY_NOTICES.md
@@ -808,3 +808,16 @@ git commit -m "test(runtime): 验收独立安装与无框架宿主接入"
 - 类型、生成物一致性、build、`/host` SSR import/idle dispose、冻结安装通过。应用 `pnpm typecheck` 和 74 文件 / 803 项测试通过；最终并发 session 修正后包内单元/浏览器/构建再次全量通过。
 - 测试使用已实现的 public host + in-memory backend 与跨来源 iframe，未扩展生产 Rust/Tauri 权限，也未承诺 WebKit/真实磁盘/应用接入完成；本任务 fixture server 在结束后停止。
 - Node 子集 R6/R7、外部 tarball R8、devkit 和实际 Rust 能力尚未实施；不推送、打 tag、发布 npm 包。
+
+### R6
+
+- 先写 Node 差分、虚拟 cwd、Buffer 字节语义、EventEmitter 子集和 TS 失败测试，再实现 `/node/path`、`/node/buffer`、`/node/events` 三个公共入口。
+- path-browserify 的 relative 也会内部调用 resolve，故 resolve/relative 都显式锚定 `/data`，不会读取机器 cwd。保留八个公开纯字符串方法，不导出 win32/parse/format；路径计算本身不授予文件访问权。
+- Buffer 显式导入浏览器 package path，避免在 Node 测试中误用 native builtin；补充上游缺失的 Buffer.subarray 返回类型，源码与公共 dist 类型检查证明无全局 Node 声明泄漏。
+- EventEmitter 使用上游事件实现并组合为五方法外壳，保留符号事件、this、once、原始回调移除、重复注册和同步异常语义；不暴露所有上游方法。局部 vendor 声明补足上游 @types/events 的 symbol 缺口。
+- 新增 57 项行为测试，runtime 合计 17 文件 / 233 项通过；3 项新增浏览器测试加载真实构建 ESM，并对 process/require/全局 Buffer 设置抛错 getter，包含 opaque iframe；浏览器总计 43 项通过。
+- 源/公共出口类型测试、typecheck、生成物校验、build、冻结安装、生产依赖审计、Node 公共包 import smoke 全部通过。主应用 typecheck 与 74 文件 / 803 项测试通过，应用直接依赖未改。
+- 声明导出按 types/import 顺序排列，构建继续单次多入口 splitting；第三方 MIT/ISC/BSD 和 Node-derived path 通知随包保留。未复制整个标准库，也未安装全局 polyfill。
+- path-browserify bundle 内仍含未到达的 process.cwd fallback；验证的是所有公开调用均不访问该分支，不声称源码文本完全无 process 字样。R8 可继续按真实打包体积做优化。
+- 初次 table test 将数组当作参数行展开，已改为对象化测试向量；ES2022 下 findLast 不可用，改为反向遍历；这些检查已在正式验证前修正。
+- 未实现 fs/R7、未执行 Cargo、未接通 devkit alias，不推送或发布。本轮测试服务器结束后无遗留进程。
