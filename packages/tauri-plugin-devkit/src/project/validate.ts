@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { apiVersion, satisfiesApiRange, validateManifest, type Diagnostic, type Manifest } from "@ai-switch/tauri-plugin-runtime/protocol";
+import type { Diagnostic, Manifest } from "@ai-switch/tauri-plugin-runtime/protocol";
+import { validateWebManifest } from "./manifest.js";
 import { ProjectError, errorCode } from "./errors.js";
 import { inspectPath, sameIdentity, samePath } from "./files.js";
 import { decodeUtf8, parseStrictJson, readBoundedFile } from "./read.js";
@@ -62,13 +63,9 @@ export async function validateProject(root: string, options: ValidateProjectOpti
   const inputManifest = json("aplg.json"); const pkg = json("package.json");
   let manifest: Manifest | undefined;
   if (inputManifest !== undefined) {
-    const checked = validateManifest(inputManifest);
+    const checked = validateWebManifest(inputManifest);
     if (!checked.ok) diagnostics.push(...checked.diagnostics.map((diagnostic) => ({ ...diagnostic, path: `aplg.json${diagnostic.path}` })));
-    else {
-      manifest = checked.value;
-      if (manifest.permissions.native) diagnostics.push({ code: "E_PROFILE_UNSUPPORTED", path: "aplg.json/permissions/native", message: "The web-v1 profile does not support native plugins." });
-      if (!satisfiesApiRange(apiVersion, manifest.engines.aplg)) diagnostics.push({ code: "E_API_INCOMPATIBLE", path: "aplg.json/engines/aplg", message: "The plugin API range does not include this runtime API version." });
-    }
+    else manifest = checked.value;
   }
   if (pkg !== undefined) {
     if (!record(pkg) || typeof pkg.version !== "string") diagnostics.push({ code: "E_PACKAGE_INVALID", path: "package.json", message: "package.json must be a JSON object with a version string." });

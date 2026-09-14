@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import { runCli } from "../src/cli/run.js";
 import { validProjectFiles, withProject } from "./support/project.js";
+import { validArchiveEntries, writeZipFixture } from "./support/zip-fixtures.js";
 
 function output() {
   let stdout = ""; let stderr = "";
@@ -74,7 +75,7 @@ describe("aplg CLI", () => {
       expect(open).not.toHaveBeenCalled();
     } finally { open.mockRestore(); }
   });
-  test.each(["init", "inspect", "pack"])("not-yet-implemented %s exits 1 without creating files", async (command) => {
+  test.each(["init", "pack"])("not-yet-implemented %s exits 1 without creating files", async (command) => {
     await withProject({}, async (root) => {
       const out = output(); expect(await runCli([command, "target", "--json"], out.io, { cwd: root })).toBe(1);
       expect(JSON.parse(out.stdout)).toMatchObject({ valid: false, diagnostics: [expect.objectContaining({ code: "E_COMMAND_UNAVAILABLE" })] });
@@ -95,6 +96,48 @@ describe("aplg CLI", () => {
     await withProject({}, async (root) => {
       const out = output(); expect(await runCli(["validate"], out.io, { cwd: root })).toBe(1);
       expect(out.stdout).toBe(""); expect(out.stderr).toContain("E_REQUIRED_FILE");
+    });
+  });
+});
+
+describe("aplg inspect CLI", () => {
+  test("returns the inspection report as one JSON object with no signature trust claim", async () => {
+    await withProject({}, async (root) => {
+      await writeZipFixture(join(root, "notes.aplg"), validArchiveEntries());
+      const out = output();
+      expect(await runCli(["inspect", "notes.aplg", "--json"], out.io, { cwd: root })).toBe(0);
+      expect(JSON.parse(out.stdout)).toMatchObject({ valid: true, signature: "not-verified", manifest: { id: "io.github.example.notes" }, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      expect(out.stdout).not.toContain(root); expect(out.stderr).toBe("");
+    });
+  });
+  test("human output explicitly distinguishes archive structure from signature trust", async () => {
+    await withProject({}, async (root) => {
+      await writeZipFixture(join(root, "notes.aplg"), validArchiveEntries()); const out = output();
+      expect(await runCli(["inspect", "notes.aplg"], out.io, { cwd: root })).toBe(0);
+      expect(out.stdout).toMatch(/archive/i); expect(out.stdout).toContain("signature: not-verified"); expect(out.stderr).toBe("");
+    });
+  });
+  test("malformed archives exit 1, retain not-verified and do not echo unsafe paths", async () => {
+    await withProject({}, async (root) => {
+      await writeZipFixture(join(root, "bad.aplg"), [{ name: "../../outside.txt", data: "bad" }]); const out = output();
+      expect(await runCli(["inspect", "bad.aplg", "--json"], out.io, { cwd: root })).toBe(1);
+      expect(JSON.parse(out.stdout)).toMatchObject({ valid: false, signature: "not-verified", diagnostics: [expect.objectContaining({ code: "E_ARCHIVE_PATH" })] });
+      expect(out.stdout + out.stderr).not.toContain("../../outside.txt");
+    });
+  });
+  test.each([["inspect", "--json"], ["inspect", "a.aplg", "b.aplg", "--json"], ["inspect", "a.aplg", "--stage", "source", "--json"], ["inspect", "a.aplg", "--json", "--json"]].map((argv) => ({ argv })))("rejects incorrect inspect arguments %j", async ({ argv }) => {
+    const out = output(); expect(await runCli(argv, out.io, { cwd: "." })).toBe(1);
+    expect(JSON.parse(out.stdout).diagnostics[0].code).toBe("E_CLI_ARGUMENTS");
+  });
+  test("inspect I/O failures exit 2 without exposing native errors", async () => {
+    await withProject({}, async (root) => {
+      await writeZipFixture(join(root, "io.aplg"), validArchiveEntries());
+      const open = vi.spyOn(fs, "open").mockRejectedValue(Object.assign(new Error(`EACCES private ${root}`), { code: "EACCES" }));
+      try {
+        const out = output(); expect(await runCli(["inspect", "io.aplg", "--json"], out.io, { cwd: root })).toBe(2);
+        expect(JSON.parse(out.stdout)).toMatchObject({ valid: false, signature: "not-verified", diagnostics: [expect.objectContaining({ code: "E_IO" })] });
+        expect(out.stdout + out.stderr).not.toContain(root);
+      } finally { open.mockRestore(); }
     });
   });
 });

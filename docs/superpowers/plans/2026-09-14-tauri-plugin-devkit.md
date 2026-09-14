@@ -12,7 +12,7 @@
 
 **Prerequisite plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-runtime.md`。R1/R2 的导出/契约是唯一权威，本文只引用，不维护复制的 manifest/wire schema。
 
-**状态：** D1 项目源码校验、Node 入口与 CLI 基础已实施并通过 Windows 本地验证；D2–D9 待实施。dist 校验在 D4 完成前明确返回不可用，所有 npm 包仍未发布。未实施部分的方法、CLI 和代码片段仍是目标契约。
+**状态：** D1/D2 项目源码校验、只读归档检查、Node 入口与 CLI 已实施并通过 Windows 本地验证；D3–D9 待实施。dist 校验在 D4 完成前明确返回不可用，所有 npm 包仍未发布。未实施部分的方法、CLI 和代码片段仍是目标契约。
 
 ## Global Constraints
 
@@ -250,7 +250,7 @@ git commit -m "feat(devkit): 建立项目校验与 CLI 基础"
 
 **Interfaces:** 消费 runtime `normalizeArchivePath` / limits；产出 inspectPackage。不调用 packProject，不信任 archive 的文件扩展名、central directory 尺寸或 CRC 自报值。
 
-- [ ] **Step 1：先写恶意 ZIP 行为测试。**
+- [x] **Step 1：先写恶意 ZIP 行为测试。**
 
 ```ts
 import { join } from "node:path";
@@ -279,15 +279,15 @@ test("symlinks cannot redirect a later installer outside its root", async () => 
 });
 ```
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit exec vitest run tests/archive-inspect.test.ts`。
-- [ ] **Step 3：使用 yauzl lazyEntries 流式读取，`zip-header.ts` 对 central/local header 的名字、flag、method、offset、长度进行独立 bounded 比对；`crc32.ts` 在流中累计标准 CRC-32 并用已知向量（UTF-8 `123456789` → `0xcbf43926`）与 ZIP fixture 验证，不假定 yauzl 已经检查 CRC。** 文件头大小先限制 128 MiB；entry 计数、解压后实际字节和累计大小逐条统计；大于 512 MiB/10,000 立即停止并关闭流，不能先整体解压到内存。所有输入内容保存在 ZIP 验证器的局部预算内，manifest 最大 256 KiB，HTML 最大 2 MiB，单个需解析的 JS/CSS 文本最大 16 MiB，超过时返回 E_LIMIT_EXCEEDED；其他资源流式散列，不整体载入内存。检查 ZIP 目录项、路径字段、encoding 与 NFC；大小写碰撞、重复项、盘符/UNC/设备路径、非法权限位、symlink、加密、重叠偏移、local/central 路径不一致、CRC 或真实大小 mismatch 均拒绝。目录项只允许零长度、单个尾随 `/`，验证时去掉该末尾分隔符；计入条目/冲突检查但不作为文件输出。首期在既有限额下只接受不带 data descriptor 的经典 ZIP，不接受 ZIP64；D5 使用`yazl.addBuffer` 读取已验证快照字节生成该 profile，避免验证器和打包器对可变长度记录支持不一致。
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit exec vitest run tests/archive-inspect.test.ts`。
+- [x] **Step 3：使用 yauzl lazyEntries 流式读取，`zip-header.ts` 对 central/local header 的名字、flag、method、offset、长度进行独立 bounded 比对；`crc32.ts` 在流中累计标准 CRC-32 并用已知向量（UTF-8 `123456789` → `0xcbf43926`）与 ZIP fixture 验证，不假定 yauzl 已经检查 CRC。** 文件头大小先限制 128 MiB；entry 计数、解压后实际字节和累计大小逐条统计；大于 512 MiB/10,000 立即停止并关闭流，不能先整体解压到内存。所有输入内容保存在 ZIP 验证器的局部预算内，manifest 最大 256 KiB，HTML 最大 2 MiB，单个需解析的 JS/CSS 文本最大 16 MiB，超过时返回 E_LIMIT_EXCEEDED；其他资源流式散列，不整体载入内存。检查 ZIP 目录项、路径字段、encoding 与 NFC；大小写碰撞、重复项、盘符/UNC/设备路径、非法权限位、symlink、加密、重叠偏移、local/central 路径不一致、CRC 或真实大小 mismatch 均拒绝。目录项只允许零长度、单个尾随 `/`，验证时去掉该末尾分隔符；计入条目/冲突检查但不作为文件输出。首期在既有限额下只接受不带 data descriptor 的经典 ZIP，不接受 ZIP64；D5 使用`yazl.addBuffer` 读取已验证快照字节生成该 profile，避免验证器和打包器对可变长度记录支持不一致。
 
 只接受 `.aplg` 包内 `aplg.json`、`dist/**`、`LICENSE`、可选 `README.md`、`icon.svg`/`icon.png` 与 `THIRD_PARTY_NOTICES.md`。未知顶层路径、源码 `.env`、证书私钥、node_modules、Git 元数据不进入包；web-v1 拒绝 native 目录及可执行/动态库产物。大小写冲突使用 NFC + ASCII 大小写折叠，非 ASCII 名称保留且对平台特有等价规则保守拒绝已知歧义，不能声称覆盖所有文件系统命名等价。
 
 `aplg.json` 必须恰好 1 份且 <=256 KiB；解析、manifest/profile/entry 检查复用 D1/runtime。返回包 SHA-256 与每个实际字节文件的 SHA-256。没有签名输入/信任配置的 inspect 无论结构多完整都只能给 `signature:"not-verified"`。
 
-- [ ] **Step 4：GREEN。** 加入固定可安装结构成功、空包、缺清单、多个清单、entry 不存在、重复大小写路径、ZIP bomb（实际流上限）、截断、损坏 CRC、local/central 不一致、错误扩展名；验证临时根外没有任何写入。
-- [ ] **Step 5：提交。**
+- [x] **Step 4：GREEN。** 加入固定可安装结构成功、空包、缺清单、多个清单、entry 不存在、重复大小写路径、ZIP bomb（实际流上限）、截断、损坏 CRC、local/central 不一致、错误扩展名；验证临时根外没有任何写入。
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-devkit/src/archive packages/tauri-plugin-devkit/src/index.ts packages/tauri-plugin-devkit/src/cli packages/tauri-plugin-devkit/tests
@@ -711,3 +711,16 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 - 实际执行 pnpm pack，检查 **15 个包文件**、runtime dependency 精确为 `0.1.0`、无 workspace:、Vite peer optional，已清理临时 tarball。此项是发布元数据/文件检查，不替代 D8 仓库外消费者安装/构建/浏览器完整验收。临时外部 pack 清理命令曾被工具策略拒绝，未执行；改为仓库内显式 staging、只删除确切文件与空目录，未递归删除外部路径。
 - devkit typecheck/test/build/公共 types/构建后测试、pnpm 冻结安装通过；runtime **26 文件 / 364 项单元测试**、typecheck/类型检查和真实 tarball **Chromium/WebKit 共 8 项**复验通过；主应用 typecheck 与 **74 文件 / 803 项测试**通过。R8 既有 Linux/Node24 验收缺口未解除，不重复声称跨平台完成。
 - 新增中文 README、依赖许可说明和根 aplg:devkit:test/build 入口；本任务在同一 worktree 顺序执行并本地提交。不调用 Cargo、不改 Rust、不创建/推送 tag、不发布 npm、不改 plugin-store/plugin-example workflow。
+### D2（2026-09-15）
+
+- 按 TDD 先写独立 ZIP 字节构造器、路径/头部/CRC/压缩限额与 CLI 失败测试，再实现 archive/{inspect,source,zip-header,paths,content,crc32,errors,types}。包根增加 inspectPackage/PackageInspection，CLI 增加 inspect；D1 的源码与归档共用 project/manifest，继续只调用 runtime 公共 schema/版本/路径/限额。
+- 单次只读 FileHandle 配合自有 yauzl RandomAccessReader，先检查 128 MiB 压缩大小，独立读取 EOCD/central/local 头部并与 yauzl lazyEntries 逐条复核。拒绝 ZIP64、多盘、加密、data descriptor、未知/重复 extra、非法版本/flags、损坏长度/offset、记录重叠、前后附加数据和未引用空洞；支持 stored/deflate、无歧义 ASCII/严格 UTF-8、yazl 的 0x5455 时间戳。已验证 central 与 local 条目顺序可以不同。
+- 路径复用 runtime normalizeArchivePath；NFC + ASCII 大小写规则并保守检查非 ASCII casefold/兼容字符、8.3/方向控制歧义、文件/目录祖先冲突。路径注册只保留显式条目并按分隔后的组件排序比较邻居，不为 10000 个深层路径缓存所有祖先字符串，避免内存放大；不宣称覆盖所有文件系统名称等价。
+- 限定顶层 aplg.json、dist、LICENSE、可选文档/icon；目录只能单个末尾斜线/零数据/CRC，计入条目但不返回为文件。拒绝 links/special/可执行文件权限、源码/map、隐藏/Git/node_modules、native/动态库/可执行及常见私钥文件名；流中检查 MZ/ELF/Mach-O 等原生标记、跨块 PEM 私钥标记。该保守策略不是完整恶意代码/秘密扫描器，已在 README 声明误拒和检测边界。
+- raw member stream 经独立 inflate/pipeline 逐块核查实际尺寸、总展开量、CRC-32 与 SHA-256，deflate 消费字节数必须与压缩长度一致，拒绝隐藏尾部 payload。展开总量 512 MiB/10000 条目，manifest 256 KiB、HTML 2 MiB、JS/CSS 16 MiB；声明和实际流预算均测试，除清单外不缓存整个成员。成功返回整个包及每文件精确字节 hash，路径稳定排序。
+- 输出始终 signature:"not-verified"。结构不等于签名、运行代码安全、授权或安装成功；D2 只读、不落盘解包、不执行 JS，不做 D3/D4 的 HTML/CSS/JS 离线资源图检查。D5 pack、真实签名/安装与商店仍未交付。
+- 输入读取前后核查 dev/ino/mode/size/mtime/ctime 和路径组件，失败会销毁流并关闭唯一自有句柄；错误分别为可读结构诊断、OS I/O 异常与内部执行异常（CLI 1/2），不复制原始 ZIP 异常里的恶意路径或 OS stack。测试涵盖成功、CRC/清单/压缩失败、早停、读错误、截断、并发改时间、junction 及输出目录无写入。额外复现了关闭时只等待首个 OS read、未等待完整部分读取范围的竞态，已改为跟踪整个 range Promise 后关闭句柄。
+- 恶意 ZIP 由独立 bitwise CRC 与手写 local/central 生成，不借 packProject 构造同源预期；正向额外使用真实 yazl addBuffer（含/不含 extra）、空文件/目录、Unicode 资源、乱序 central 互操作性。CRC 以 123456789 → cbf43926 和 Node zlib.crc32 独立对照。
+- 最终 devkit **7 文件 / 252 项测试**通过（相对 D1 净增 161 项，原 inspect-unavailable 用例替换为真实功能用例）；构建后 **4 项**公共 import/真实进程 CLI/清理/实际 ZIP 测试、typecheck 与无 DOM NodeNext 公共类型检查通过。无新增依赖/锁文件变更，pnpm 冻结安装通过。
+- runtime **26 文件 / 364 项单元测试**、生成物一致性、typecheck 和独立 tarball 的 **Chromium/WebKit 共 8 项**复验通过；主应用 typecheck 与 **74 文件 / 803 项回归**通过。并行运行应用回归时 runtime generator 测试曾超过默认 5 秒，检查生成物已还原后串行单测/全量复跑通过；没有放宽超时或修改 runtime 代码掩盖失败。
+- 所有验证仍为 Windows Node 22.22.2；Linux/Node24 与真实 Rust/Tauri/Web 的既有缺口未解除。本任务不调用 Cargo、不新建 target、不推送/tag/npm publish、不改远端 plugin-example/plugin-store，临时测试目录/服务均已清理。

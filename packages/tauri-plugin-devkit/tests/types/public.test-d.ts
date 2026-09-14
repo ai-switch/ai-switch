@@ -26,3 +26,19 @@ validateProject(new URL("file:///tmp/plugin"));
 
 // @ts-expect-error the Node entry must not require browser DOM globals.
 document.body.append('not a browser SDK');
+
+import { inspectPackage, type PackageInspection } from "@ai-switch/tauri-plugin-devkit";
+const inspection: PackageInspection = await inspectPackage("./notes.aplg");
+const untrusted: "not-verified" = inspection.signature;
+if (inspection.valid) {
+  const manifest: Manifest = inspection.manifest;
+  const files: PackFile[] = inspection.files;
+  const bytes: number = inspection.size;
+  void [manifest, files, bytes];
+} else {
+  // @ts-expect-error an invalid archive never promises verified file hashes.
+  inspection.sha256;
+}
+void untrusted;
+// @ts-expect-error inspect never offers an extraction output directory.
+inspectPackage("./notes.aplg", { extract: "./output" });

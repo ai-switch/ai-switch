@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { ZipFile } from "yazl";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
@@ -15,7 +18,7 @@ test("public Node import never runs the CLI, reads a project or imports browser/
     for(const name of ['window','document']) Object.defineProperty(globalThis,name,{get(){throw new Error('DOM access on import');}});
     fs.open = async () => { throw new Error('project read on import'); };
     const api = await import('@ai-switch/tauri-plugin-devkit');
-    assert.deepEqual(Object.keys(api), ['validateProject']);
+    assert.deepEqual(Object.keys(api), ['inspectPackage', 'validateProject']);
     assert.equal(typeof api.validateProject, 'function');
     for(const path of ['/testing','/vite','/src/index.ts','/dist/cli.js']) await assert.rejects(import('@ai-switch/tauri-plugin-devkit'+path),{code:'ERR_PACKAGE_PATH_NOT_EXPORTED'});
   `], { cwd: root, encoding: "utf8", timeout: 10000, windowsHide: true });
@@ -46,4 +49,29 @@ test("building clears stale generated artifacts without shipping source aliases"
     assert.ok(!source.includes("tauri-plugin-runtime/src"));
     assert.equal(metadata.peerDependenciesMeta.vite.optional, true);
   } finally { await rm(sentinel, { force: true }); }
+});
+
+test("built inspect CLI succeeds with a real ZIP without writing or claiming a trusted signature", async () => {
+  const parent = await realpath(tmpdir()); const directory = await mkdtemp(join(parent, "aplg-inspect-bin-"));
+  const initial = await lstat(directory);
+  try {
+    const file = join(directory, "example.aplg"); const zip = new ZipFile(); const chunks = [];
+    const bytes = new Promise((resolve, reject) => { zip.outputStream.on("data", (chunk) => chunks.push(chunk)); zip.outputStream.once("end", () => resolve(Buffer.concat(chunks))); zip.outputStream.once("error", reject); zip.once("error", reject); });
+    const manifest = await readFile(new URL("../../../fixtures/aplg/protocol-v1/manifest.valid.json", import.meta.url));
+    zip.addBuffer(manifest, "aplg.json");
+    zip.addBuffer(await readFile(new URL("../LICENSE", import.meta.url)), "LICENSE");
+    zip.addBuffer(Buffer.from("<!doctype html><p>Fixture</p>"), JSON.parse(manifest).entry);
+    zip.end(); await writeFile(file, await bytes);
+    const result = spawnSync(process.execPath, [cli, "inspect", file, "--json"], { cwd: directory, encoding: "utf8", timeout: 10000, windowsHide: true });
+    assert.equal(result.status, 0, result.stderr);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.valid, true); assert.equal(report.signature, "not-verified"); assert.equal(report.files.length, 3);
+    assert.equal(report.sha256.length, 64); assert.equal(result.stderr, ""); assert.deepEqual(await readdir(directory), ["example.aplg"]);
+    const invalid = spawnSync(process.execPath, [cli, "inspect", "missing.aplg", "--json"], { cwd: directory, encoding: "utf8", timeout: 10000, windowsHide: true });
+    assert.equal(invalid.status, 1); assert.equal(JSON.parse(invalid.stdout).signature, "not-verified");
+  } finally {
+    const actual = await realpath(directory); const current = await lstat(directory);
+    if (actual !== directory || dirname(actual) !== parent || current.isSymbolicLink() || current.ino !== initial.ino || current.dev !== initial.dev) throw new Error("Refusing unowned CLI fixture cleanup");
+    await rm(actual, { recursive: true, force: true });
+  }
 });

@@ -19,7 +19,9 @@ Direct dependency licenses:
 | yazl | 3.3.1 | MIT |
 
 Only runtime/protocol and jsonc-parser are used by the D1 source validator.
-Archive/build dependencies are pinned for the subsequent implementation slices;
+D2 uses yauzl for lazy ZIP reading; CRC-32 is implemented locally from the
+standard polynomial and tested against the published check vector. Remaining
+archive/build dependencies are pinned for the subsequent implementation slices;
 pinning them does not mean those features are implemented. Vite is an optional
 peer dependency; build/test tools and test fixtures are not distributed in the
 npm tarball. No global Node shim or Tauri implementation is bundled here.
