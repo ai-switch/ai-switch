@@ -1,4 +1,4 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["tests/types"]
+  "include": ["tests/types/public.test-d.ts"]
 }

@@ -12,7 +12,7 @@
 
 **Prerequisite plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-runtime.md`。R1/R2 的导出/契约是唯一权威，本文只引用，不维护复制的 manifest/wire schema。
 
-**状态：** D1/D2 项目源码校验、只读归档检查、Node 入口与 CLI 已实施并通过 Windows 本地验证；D3–D9 待实施。dist 校验在 D4 完成前明确返回不可用，所有 npm 包仍未发布。未实施部分的方法、CLI 和代码片段仍是目标契约。
+**状态：** D1–D3 项目源码校验、只读归档检查、CLI、Vite Node alias 与浏览器 ambient 类型已实施并通过 Windows 本地验证；D4–D9 待实施。dist 校验在 D4 完成前明确返回不可用，所有 npm 包仍未发布。未实施部分的方法、CLI 和代码片段仍是目标契约。
 
 ## Global Constraints
 
@@ -300,7 +300,7 @@ git commit -m "feat(devkit): 安全检查 APLG 归档结构"
 
 **Interfaces:** `aplgVite(options?):Plugin[]` 消费 runtime 子入口；依赖 R6/R7。只有 plugin bundle 重定向，Vite 配置/CLI/Node build scripts 仍使用真实 Node builtin。`src/node-types.d.ts` 仅随 types-only 出口交付，不生成可执行 shim，也不能让 Node config 误解析为浏览器虚拟 fs。
 
-- [ ] **Step 1：从真实 Vite 构建写失败测试。** fixture code 使用 `node:path`，构建产物导入浏览器后应返回 POSIX 虚拟路径，而不是 Node/Rollup external stub。`withBuildProject(files,run)` 在 D3 建立：由已构建 runtime 产出本地 tarball，临时 project 的测试专用 package.json 仅安装该 tarball 与固定 Vite，生成真实 lock 后用配置对象调用 aplgVite。它不安装尚未发布的 registry devkit，也不需要 D8 helpers；测试的是当前 devkit 实现 + 已打包 runtime，最终两包隔离安装由 D8 验证。
+- [x] **Step 1：从真实 Vite 构建写失败测试。** fixture code 使用 `node:path`，构建产物导入浏览器后应返回 POSIX 虚拟路径，而不是 Node/Rollup external stub。`withBuildProject(files,run)` 在 D3 建立：由已构建 runtime 产出本地 tarball，临时 project 的测试专用 package.json 仅安装该 tarball 与固定 Vite，生成真实 lock 后用配置对象调用 aplgVite。它不安装尚未发布的 registry devkit，也不需要 D8 helpers；测试的是当前 devkit 实现 + 已打包 runtime，最终两包隔离安装由 D8 验证。
 
 ```ts
 import { build } from "vite";
@@ -319,8 +319,8 @@ test("unsupported system builtins fail at build time", async () => {
 });
 ```
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit exec vitest run tests/vite-aliases.test.ts`。
-- [ ] **Step 3：精确 specifier 映射，不正则吞前缀。**
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit exec vitest run tests/vite-aliases.test.ts`。
+- [x] **Step 3：精确 specifier 映射，不正则吞前缀。**
 
 ```ts
 const aliases = new Map([
@@ -349,8 +349,8 @@ declare module "node:fs/promises" {
 ```
 
 通过 types-only `/node-types` 出口提供；浏览器 tsconfig 设置 `types:["@ai-switch/tauri-plugin-devkit/node-types"]`，不引入全量 `@types/node`。Vite 配置使用单独 Node tsconfig。类型测试须证明支持的重载可用、未支持的 `watch`/stream/fd 不能编译；运行时 alias 与 `.d.ts` 重导出表由同一个 specifier 映射生成，避免各写一份。
-- [ ] **Step 4：GREEN。** 对 `fs/promises`、`node:fs/promises` 同样工作；对 child_process/net/tls/worker_threads/process/.node 失败；浏览器执行打包后的 path/Buffer 程序并验证结果。测试未配置 aplgVite 的宿主 Vite 构建不受影响。
-- [ ] **Step 5：提交。**
+- [x] **Step 4：GREEN。** 对 `fs/promises`、`node:fs/promises` 同样工作；对 child_process/net/tls/worker_threads/process/.node 失败；浏览器执行打包后的 path/Buffer 程序并验证结果。测试未配置 aplgVite 的宿主 Vite 构建不受影响。
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-devkit/src/vite packages/tauri-plugin-devkit/tests/vite-aliases.test.ts packages/tauri-plugin-devkit/package.json packages/tauri-plugin-devkit/scripts/build.mjs
@@ -724,3 +724,20 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 - 最终 devkit **7 文件 / 252 项测试**通过（相对 D1 净增 161 项，原 inspect-unavailable 用例替换为真实功能用例）；构建后 **4 项**公共 import/真实进程 CLI/清理/实际 ZIP 测试、typecheck 与无 DOM NodeNext 公共类型检查通过。无新增依赖/锁文件变更，pnpm 冻结安装通过。
 - runtime **26 文件 / 364 项单元测试**、生成物一致性、typecheck 和独立 tarball 的 **Chromium/WebKit 共 8 项**复验通过；主应用 typecheck 与 **74 文件 / 803 项回归**通过。并行运行应用回归时 runtime generator 测试曾超过默认 5 秒，检查生成物已还原后串行单测/全量复跑通过；没有放宽超时或修改 runtime 代码掩盖失败。
 - 所有验证仍为 Windows Node 22.22.2；Linux/Node24 与真实 Rust/Tauri/Web 的既有缺口未解除。本任务不调用 Cargo、不新建 target、不推送/tag/npm publish、不改远端 plugin-example/plugin-store，临时测试目录/服务均已清理。
+### D3（2026-09-15）
+
+- 先用真实 Vite 构建写失败测试，再实现 `/vite` 的 aplgVite、node-aliases 与 AST Node 用法检查。fs/promises、fs、path、buffer、events 的裸名/`node:` 前缀精确映射至 runtime 公开出口，不匹配 path-helper 等相似名称，不进行字符串改写或全局 polyfill。
+- 新建 `src/vite/node-specifiers.mjs` 同源列表，生成 `src/node-types.d.ts`，声明逐项 re-export runtime，不复制完整 Node 签名；buffer 不伪造 default。`/node-types` 仅 types 条件，无运行 JS；Node 配置/CLI tsconfig 排除此 ambient 文件，浏览器 tsconfig 不包含 @types/node。
+- TS 的 types 指令在包自引用环境不会像普通 import 那样解析当前包名，故本地测试 include 实际 dist 声明，另在仓库外消费者按 npm 布局放置已构建包并使用 `types:["@ai-switch/tauri-plugin-devkit/node-types"]`，确认公开子入口、Buffer 身份/重载与拒绝 watch/stream/fd/global process。此为 D3 声明包结构验证，不冒充 D8 双 tarball 安装。
+- AST 使用已固定 Vite 8.3 的 parseSync，识别 JS/TS 的函数/块/循环/catch/class/switch 作用域、参数/解构/import 绑定；跳过纯类型语法并检查运行期 decorators、动态 import 参数。反例推动修复了解构全局、作用域泄漏、re-export 名称被当 global 的误判。静态 literal require 交由 Vite 转换，计算/别名/宿主 require 明确诊断。
+- Node builtin、`.node`、Tauri/devkit/runtime host 入口及可识别的相对/绝对安装路径绕行在导入与模块检查中拒绝。输出 chunk 静态/动态 imports 再检查，防止用户 external 配置跳过 resolve/transform 后遗留真实 Node 模块。所有检查仅限可解析图，不宣传为恶意代码沙箱。
+- 验证 Vite 的 Node config 仍能用真实 fs/path，未启用 aplgVite 的宿主 SSR 构建保持原状，显式 SSR/server 环境跳过 adaptation。runtime 排除出 dev prebundle，保留已打包共享 chunks；真实 Vite dev transform 验证同一 alias，不放宽容器/权限。
+- `withBuildProject` 在 os.tmpdir 仓库外安装真实 runtime tgz + 固定 Vite 8.3，生成与输入匹配的 package-lock 后 npm ci，所有 install 禁用 scripts；测试用 D3 本地 hook/固定 Vite 驱动，不使用 runtime src alias。普通 ESM、静态 CJS、transitive dependency、external 和原生 addon 反例均覆盖。
+- Chromium/WebKit 实际执行产物，验证虚拟 `/data` path、UTF-8 Buffer、EventEmitter once、裸名/前缀 fs promises 同例、缺宿主 E_HOST_UNAVAILABLE。全局 Buffer/require 设置抛错 getter，process 保持浏览器 undefined；runtime 上游 semver 的 typeof process 探测不等于访问 OS，也不能用抛错 getter 扭曲正常浏览器条件。
+- 首轮把 Rolldown 自带 virtual runtime 的 Node 二进制 helper 当作作者代码误拒，查明后仅豁免精确 `\0rolldown/runtime.js`（浏览器未用 helper 由 bundler tree-shake）；保留对普通依赖/作者代码的检查。runtime 本身为已验证浏览器 bundle，不递归用作者规则重审其上游不可达 fallback。
+- 首轮加载临时安装 Vite 的 native Rolldown DLL 导致 Windows 进程存续期间清理锁文件；改用 D3 计划规定的测试工具 Vite 驱动。原测试退出后仅删除已确认的自有 DLL 文件/空目录；一次失败的 dev optimizer 晚写入也在进程退出后按精确路径清理。后续全套成功运行无临时根/测试服务残留，未修改/放宽生产目录清理规则。
+- 新增 82 项测试，devkit 合计 **10 文件 / 334 项**（其中含真实 Chromium/WebKit 2 项），构建后 **5 项**测试、Node/public browser 类型、生成物一致性、typecheck、build 均通过。test 先构建本包，保证新 checkout 的已构建声明可用。未新增依赖/锁文件变化；根应用 Vite/TS 无升级。
+- pnpm pack 实测包含 30 个文件，runtime workspace 依赖转成精确 0.1.0、/vite 与 types-only /node-types 导出正确，无源文件/测试输出混入；清理本地临时 tgz。npm 包仍未发布，此项不替代 D8 外部双包完整验收。
+- runtime **26 文件 / 364 项**、typecheck 和独立 tarball **8 项 Chromium/WebKit**复验通过；主应用 typecheck 与 **74 文件 / 803 项**通过。Windows Node 22.22.2 以外 Linux/Node24 的既有验证缺口未解除。
+- 当前 `/vite` 只做 D3 adaptation；manifestPath 明确返回 APLG_OPTION_UNAVAILABLE，preview 预留但不创建 provider，不注入握手 bootstrap、不宣称 dist/离线产物合格。D4/D7、pack/init、真实 Rust/Tauri/Web、签名安装与商店发布仍待实施。README 已说明这些边界。
+- 本任务顺序本地实施/提交，无 subagent、Cargo、新 target、推送、tag、npm publish 或远程 plugin-store/plugin-example 修改。

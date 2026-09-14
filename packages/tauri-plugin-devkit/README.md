@@ -2,7 +2,7 @@
 
 APLG 插件的 Node 开发工具包。单向依赖 `@ai-switch/tauri-plugin-runtime` 公共协议入口，不依赖 AI Switch 应用源码或 Tauri。
 
-> 当前为 **0.1.0 开发实现，尚未发布到 npm**。D1/D2 已交付项目源码校验、只读归档 inspect 和 CLI。pack、Vite alias/bootstrap、init 模板、浏览器 testing 和 CI 发布仍在后续任务，不要把这些目标当作现成功能。
+> 当前为 **0.1.0 开发实现，尚未发布到 npm**。D1–D3 已交付源码校验、只读归档 inspect、CLI、Vite Node alias 与浏览器类型适配。pack、bootstrap、init 模板、浏览器 testing 和 CI 发布仍在后续任务，不要把这些目标当作现成功能。
 
 ## 使用已构建的本地包
 
@@ -31,7 +31,7 @@ if (report.valid) {
 }
 ```
 
-包根入口是 **Node-only ESM**；导入本身不会读取项目、执行 CLI 或访问浏览器 DOM。公共报告类型直接复用 runtime 的 `Manifest` / `Diagnostic`。`/vite`、`/testing` 和 `/node-types` 尚未导出，内部 `src`/`dist` 路径不是公共接口。
+包根入口是 **Node-only ESM**；导入本身不会读取项目、执行 CLI 或访问浏览器 DOM。公共报告类型直接复用 runtime 的 `Manifest` / `Diagnostic`。`/vite` 是独立 Node 构建插件入口，`/node-types` 仅包含声明，`/testing` 尚未导出。内部 `src`/`dist` 路径不是公共接口。
 
 ## D1 的 source 校验范围
 
@@ -71,7 +71,7 @@ aplg --version
 
 指定 `--json` 时 stdout 只有一个 `ProjectReport` 或 `PackageInspection` JSON 对象，stderr 可有简洁提示。报告中的 manifest 是作者提供的元数据，请勿将敏感信息写入清单。人类可读诊断会转义终端控制字符。
 
-D1 的 `--stage dist` **始终失败并给出 `E_DIST_VALIDATION_UNAVAILABLE`**。`init` / `pack` 返回 `E_COMMAND_UNAVAILABLE`，不创建文件、不解包、不隐式 build。后续 D3–D9 完成前不发布此开发切片。
+D1 的 `--stage dist` **始终失败并给出 `E_DIST_VALIDATION_UNAVAILABLE`**。`init` / `pack` 返回 `E_COMMAND_UNAVAILABLE`，不创建文件、不解包、不隐式 build。后续 D4–D9 完成前不发布此开发切片。
 
 ## D2 的只读归档检查
 
@@ -105,21 +105,90 @@ console.log(archive.signature); // 始终 "not-verified"
 成功、结构失败、解压失败或 I/O 错误都释放流和唯一自有句柄。结构/内容错误返回 `valid:false, signature:"not-verified"`；OS I/O 仍为安全异常，CLI 退出 2，不泄漏真实路径或错误栈。
 
 D2 **不扫描 HTML/CSS/JS 的离线资源图或运行行为**。例如含 Node import 的文本可以作为字节通过 inspect，但尚不能通过后续 D3/D4 的构建/产物政策。正式打包 D5、签名/安装和商店审核是不同边界。已验证真实 yazl `addBuffer` 输出（有/无时间戳 extra），不是用被测 packProject 产生所有成功夹具；恶意 ZIP 由独立头部构造器生成。
+## D3 的插件 Vite 构建适配
+
+只在**插件自身**的 `vite.config.ts` 中启用，不放进 AI Switch 主应用/宿主配置：
+
+```ts
+import { defineConfig } from "vite";
+import { aplgVite } from "@ai-switch/tauri-plugin-devkit/vite";
+
+export default defineConfig({
+  plugins: aplgVite({ preview: false }),
+});
+```
+
+插件代码可以使用 Node 风格 ESM 导入，但语义仍是 runtime 的受限浏览器接口：
+
+```ts
+import path from "node:path";
+import { Buffer } from "buffer";
+import fs from "node:fs/promises";
+
+const file = path.resolve("notes.txt"); // 固定虚拟 cwd /data
+const bytes = Buffer.from("hello", "utf8");
+// 真正 I/O 仍要求宿主握手、manifest 声明和能力授权。
+await fs.writeFile(file, bytes);
+```
+
+| 精确导入（均支持 `node:` 前缀） | runtime 目标 |
+| --- | --- |
+| `fs/promises` | `/node/fs/promises` |
+| `fs` | `/node/fs` |
+| `path` | `/node/path` |
+| `buffer` | `/node/buffer`（仅 named Buffer，无伪造 default） |
+| `events` | `/node/events` |
+
+- 不改写 `path-helper` 等相似包名，不替换源代码字符串，不安装全局 `process`/`Buffer`/`require`。静态字面量 CommonJS require 可交由 Vite 转换；动态/别名 require、未支持 builtin、`.node` 文件会收到 APLG 诊断。
+- 使用 AST/局部作用域识别未支持的 Node globals、已知全局属性/解构，区分注释、字符串、类型语法、普通对象属性和本地变量。依赖模块同样检查；runtime 已打包模块及精确的 Rolldown virtual runtime helper 不重复作为作者源码检查。
+- 拒绝 runtime `/host`、devkit/Tauri 管理入口进入插件图，包括可识别的安装路径/alias 绕行。最终 chunk import/dynamicImport 列表再检查，避免 external 选项绕过 resolver 留下真实 Node 导入。
+- 将 runtime 排除出 Vite dev dependency optimization，保留原有共享 ESM chunks/插件单例；测试覆盖 build 与 dev transform。SSR/server 环境不适配，Vite 配置脚本和 CLI 继续使用真正 Node API。没有配置 aplgVite 的宿主构建不受影响。
+- Node 文件 API 是异步客户端，不在网页制造真实磁盘；没有宿主时明确 `E_HOST_UNAVAILABLE`。
+
+**当前阶段边界：** D3 不注入握手 bootstrap，不校验完整离线产物，也不创建开发模拟宿主。`preview` 为后续 D7 选项，本阶段没有预览 Provider；`manifestPath` 在 D4 完成前返回 `APLG_OPTION_UNAVAILABLE`，不假装已按自定义清单构建。不要把 Vite alias 的静态诊断当作恶意代码沙箱：显式 Vite build 会运行作者配置/依赖，计算 URL、运行期生成代码、额外插件改写等仍需后续产物策略与生产 CSP/权限系统约束。
+
+### 浏览器 TypeScript 配置
+
+仅给插件业务代码使用，Vite 配置单独使用 Node tsconfig：
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM"],
+    "types": ["@ai-switch/tauri-plugin-devkit/node-types"],
+    "strict": true,
+    "skipLibCheck": false,
+    "noEmit": true
+  },
+  "include": ["src"]
+}
+```
+
+`/node-types` 是 types-only 子入口，不能运行期 import。不要同时注入 `@types/node`：它会把 streams/watch/fd 等不支持的完整 Node API 带入编译上下文。声明直接 re-export runtime 公共类型，和 Vite alias 由 `src/vite/node-specifiers.mjs` 同表生成；`generate:node-types` 更新，构建和 `check:node-types` 检查陈旧产物。普通 Node 配置没有这些 ambient declarations，仍获得原生类型。
+
+D3 验收在仓库外临时项目安装真实 runtime `.tgz` 与固定 Vite，生成匹配的 npm lock 后运行 `npm ci --ignore-scripts`。驱动构建的是 devkit 固定 Vite 8.3（避免把临时 Rolldown native DLL 装入 Windows 测试进程而锁住清理目录）；不是 D8 的两包独立工具进程验收。公共类型测试另外把已构建的 devkit 声明按包结构复制到消费者，验证上述 `types` 配置。Chromium/WebKit 实际执行构建结果，测试 path、Buffer、EventEmitter、fs 单例及缺少宿主错误；不声称已接入真实 OS Provider。
+
 ## 开发验证
 
-从仓库根目录：
+从仓库根目录；首次浏览器测试需先安装 Chromium/WebKit：
 
 ```sh
+pnpm --dir packages/tauri-plugin-devkit exec playwright install chromium webkit
 pnpm aplg:devkit:test
 pnpm --dir packages/tauri-plugin-devkit typecheck
 pnpm --dir packages/tauri-plugin-devkit build
+pnpm --dir packages/tauri-plugin-devkit check:node-types
 pnpm --dir packages/tauri-plugin-devkit test:types
+pnpm --dir packages/tauri-plugin-devkit test:types:browser
 pnpm --dir packages/tauri-plugin-devkit test:built
 ```
 
-测试包括真实临时目录、无副作用配置反例、部分读取/截断/改写、JSON 歧义、恶意 ZIP/解压预算/句柄回收、真实 yazl 输出、CLI stdout/exit codes、构建后 Node import/CLI 和公共类型。不修改开发者项目；测试临时目录在 finally 中复核路径/身份/所有权后删除。
+`test` 会先构建 devkit，以便新 checkout 的公共类型消费者测试有真实 dist。测试包括真实临时目录、无副作用配置反例、部分读取/截断/改写、JSON 歧义、恶意 ZIP/解压预算/句柄回收、真实 yazl 输出、CLI stdout/exit codes、构建后 Node import/CLI 和公共类型。不修改开发者项目；测试临时目录在 finally 中复核路径/身份/所有权后删除。
 
-`vite:^8.3.0` 为 optional peer，纯 CLI 不要求安装 Vite。其余计划依赖已按固定版本写入锁文件，D1 使用 runtime 与 jsonc-parser，D2 增加 yauzl 流式读取；其余由后续工具阶段消费。devkit 构建将 registry 依赖保持 external，不把 Node 工具代码混入 runtime 浏览器图。
+`vite:^8.3.0` 为 optional peer，纯 CLI 不要求安装 Vite。其余计划依赖已按固定版本写入锁文件，D1 使用 runtime 与 jsonc-parser，D2 增加 yauzl 流式读取，D3 的 `/vite` 入口使用 Vite 8.3 的解析器；其余由后续工具阶段消费。devkit 构建将 registry 依赖保持 external，不把 Node 工具代码混入 runtime 浏览器图。
 
 对外打包应使用 `pnpm pack` 将 `workspace:0.1.0` 转换成真实 `0.1.0`。该版本目前未发布；不要用 npm pack 直接分发带 workspace: 的源码 package.json。D8 将负责两包在仓库外的完整 install/build/pack/browser 验收，D9 才提供授权发布流程。本任务不推送、不发布。
 

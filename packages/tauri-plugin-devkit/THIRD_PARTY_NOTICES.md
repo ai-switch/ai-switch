@@ -23,5 +23,6 @@ D2 uses yauzl for lazy ZIP reading; CRC-32 is implemented locally from the
 standard polynomial and tested against the published check vector. Remaining
 archive/build dependencies are pinned for the subsequent implementation slices;
 pinning them does not mean those features are implemented. Vite is an optional
-peer dependency; build/test tools and test fixtures are not distributed in the
+peer dependency and is loaded only by the /vite entry in D3. Its exported parser
+is used without copying its implementation. Build/test tools and test fixtures are not distributed in the
 npm tarball. No global Node shim or Tauri implementation is bundled here.

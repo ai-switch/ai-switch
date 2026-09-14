@@ -12,14 +12,24 @@
   "publishConfig": { "access": "public" },
   "exports": {
     ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./vite": {
+      "types": "./dist/vite/index.d.ts",
+      "import": "./dist/vite/index.js"
+    },
+    "./node-types": {
+      "types": "./dist/node-types.d.ts"
+    }
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run",
+    "test": "node scripts/build.mjs && vitest run",
     "test:types": "tsc --noEmit -p tsconfig.type-tests.json",
     "test:built": "node --test tests/package.test.mjs",
-    "build": "node scripts/build.mjs"
+    "build": "node scripts/build.mjs",
+    "generate:node-types": "node scripts/generate-node-types.mjs",
+    "check:node-types": "node scripts/generate-node-types.mjs --check",
+    "test:types:browser": "tsc --noEmit -p tsconfig.browser-type-tests.json"
   },
   "dependencies": {
     "@ai-switch/tauri-plugin-runtime": "workspace:0.1.0",

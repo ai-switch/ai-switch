@@ -20,7 +20,7 @@ test("public Node import never runs the CLI, reads a project or imports browser/
     const api = await import('@ai-switch/tauri-plugin-devkit');
     assert.deepEqual(Object.keys(api), ['inspectPackage', 'validateProject']);
     assert.equal(typeof api.validateProject, 'function');
-    for(const path of ['/testing','/vite','/src/index.ts','/dist/cli.js']) await assert.rejects(import('@ai-switch/tauri-plugin-devkit'+path),{code:'ERR_PACKAGE_PATH_NOT_EXPORTED'});
+    for(const path of ['/testing','/node-types','/src/index.ts','/dist/cli.js']) await assert.rejects(import('@ai-switch/tauri-plugin-devkit'+path),{code:'ERR_PACKAGE_PATH_NOT_EXPORTED'});
   `], { cwd: root, encoding: "utf8", timeout: 10000, windowsHide: true });
   assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout, "");
 });
@@ -74,4 +74,14 @@ test("built inspect CLI succeeds with a real ZIP without writing or claiming a t
     if (actual !== directory || dirname(actual) !== parent || current.isSymbolicLink() || current.ino !== initial.ino || current.dev !== initial.dev) throw new Error("Refusing unowned CLI fixture cleanup");
     await rm(actual, { recursive: true, force: true });
   }
+});
+test("public Vite entry is separate from the Node CLI and node-types is declarations only", () => {
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    const {aplgVite} = await import('@ai-switch/tauri-plugin-devkit/vite');
+    assert.equal(typeof aplgVite, 'function');
+    assert.equal(Array.isArray(aplgVite({preview:false})), true);
+    await assert.rejects(import('@ai-switch/tauri-plugin-devkit/node-types'), {code:'ERR_PACKAGE_PATH_NOT_EXPORTED'});
+  `], { cwd: root, encoding: "utf8", timeout: 10000, windowsHide: true });
+  assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout, "");
 });

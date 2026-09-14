@@ -42,3 +42,10 @@ if (inspection.valid) {
 void untrusted;
 // @ts-expect-error inspect never offers an extraction output directory.
 inspectPackage("./notes.aplg", { extract: "./output" });
+import { aplgVite, type AplgViteOptions } from "@ai-switch/tauri-plugin-devkit/vite";
+import type { Plugin } from "vite";
+const viteOptions: AplgViteOptions = { preview: false };
+const plugins: Plugin[] = aplgVite(viteOptions);
+void plugins;
+// @ts-expect-error unknown options must not silently change the host build.
+aplgVite({ global: true });
