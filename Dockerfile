@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG AI_SWITCH_REPOSITORY=ijry/ai-switch
+ARG AI_SWITCH_REPOSITORY=ai-switch/ai-switch
 ARG AI_SWITCH_VERSION=latest
 
 FROM debian:bookworm-slim AS download

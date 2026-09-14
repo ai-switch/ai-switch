@@ -186,14 +186,14 @@ Plain HTTP on non-loopback binds is disabled by default. With Nginx or Caddy ter
 On x86_64 Linux, install with one command:
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ijry/ai-switch/main/scripts/install-server.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ai-switch/ai-switch/main/scripts/install-server.sh)"
 ```
 
 The installer creates the `ai-switch` system user, installs under `/opt/ai-switch`, persists `/etc/ai-switch/server.env`, and enables the systemd service. Re-running it preserves the existing token and data. It does not configure Nginx, Certbot, or firewall rules.
 
 ### Docker one-click server and SaaS startup
 
-The Docker image reuses the standalone server already packaged in the GitHub Release, so no Rust compilation happens locally and desktop WebKitGTK is not required. After each stable release, CI publishes `linux/amd64` and `linux/arm64` images to `ijry/ai-switch`. By default, Redis is the log queue, PostgreSQL is the log store, and SaaS is enabled automatically:
+The Docker image reuses the standalone server already packaged in the GitHub Release, so no Rust compilation happens locally and desktop WebKitGTK is not required. With the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets configured, CI publishes `linux/amd64` and `linux/arm64` images to `ai-switch/ai-switch`. By default, Redis is the log queue, PostgreSQL is the log store, and SaaS is enabled automatically:
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -201,10 +201,12 @@ docker compose -f deploy/docker-compose.yml up -d
 
 Inside the container, the default log queue and store use `redis://redis:6379` and `postgresql://ai_switch:change-me@postgres:5432/ai_switch_logs?sslmode=disable`, via `SAAS_LOGS_REDIS_URL` and `SAAS_LOGS_POSTGRES_URL`. SaaS settings store only environment-name references and do not persist connection strings in the database.
 
+Without Docker Hub credentials, CI still validates the multi-architecture build but skips login and push with a notice. Real build errors still fail the job. Set the `DOCKERHUB_REPOSITORY` repository variable to customize the publication target.
+
 Common overrides:
 
 - `AI_SWITCH_PORT`: host port mapping, default `19527`.
-- `AI_SWITCH_DOCKER_IMAGE`: image reference, default `ijry/ai-switch:latest`; pin a release with `ijry/ai-switch:0.9.0` or `ijry/ai-switch:0.9`.
+- `AI_SWITCH_DOCKER_IMAGE`: image reference, default `ai-switch/ai-switch:latest`; pin a release with `ai-switch/ai-switch:0.9.0` or `ai-switch/ai-switch:0.9`.
 - `AI_SWITCH_TOKEN`: when unset, the entrypoint generates and prints a container-local token; set it explicitly for restarts.
 - `AI_SWITCH_SAAS_ENABLE`: default `1`; set `0` to run only the standalone server.
 - `AI_SWITCH_SAAS_ACTIVATION_CODE`, `AI_SWITCH_SAAS_INSTANCE_ID`, `AI_SWITCH_SAAS_SITE_NAME`, `AI_SWITCH_SAAS_PUBLIC_BASE_URL`.

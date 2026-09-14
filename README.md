@@ -186,14 +186,14 @@ src-tauri/target/release/ai-switch-server.exe
 Linux x86_64 可以一键安装：
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ijry/ai-switch/main/scripts/install-server.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ai-switch/ai-switch/main/scripts/install-server.sh)"
 ```
 
 安装器会创建 `ai-switch` 系统用户、安装到 `/opt/ai-switch`，持久化 `/etc/ai-switch/server.env`，并启用 systemd 服务；重复运行保留现有令牌和数据。它不会自动配置 Nginx、Certbot 或防火墙。
 
 ### Docker 一键启动 server 与 SaaS
 
-Docker 镜像直接复用 GitHub Release 里已打包的 standalone server，不在本机编译 Rust，也不需要桌面 WebKitGTK。正式版本发布后，CI 会同步推送 `ijry/ai-switch` 的 `linux/amd64` 与 `linux/arm64` 镜像。默认会启动 Redis 作为日志队列、PostgreSQL 作为日志存储，并自动开启 SaaS：
+Docker 镜像直接复用 GitHub Release 里已打包的 standalone server，不在本机编译 Rust，也不需要桌面 WebKitGTK。仓库配置 `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN` Secrets 后，正式版本发布时 CI 会同步推送 `ai-switch/ai-switch` 的 `linux/amd64` 与 `linux/arm64` 镜像。默认会启动 Redis 作为日志队列、PostgreSQL 作为日志存储，并自动开启 SaaS：
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -201,10 +201,12 @@ docker compose -f deploy/docker-compose.yml up -d
 
 容器内日志队列与存储默认使用 `redis://redis:6379` 和 `postgresql://ai_switch:change-me@postgres:5432/ai_switch_logs?sslmode=disable`，对应环境变量是 `SAAS_LOGS_REDIS_URL` 和 `SAAS_LOGS_POSTGRES_URL`。SaaS 设置只保存环境名引用，不在数据库里落库连接串。
 
+若未配置 Docker Hub 凭据，CI 仍会验证双架构镜像构建，但跳过登录和推送并给出提示。实际构建错误仍会使任务失败；自定义发布地址可设置仓库变量 `DOCKERHUB_REPOSITORY`。
+
 常用覆盖参数：
 
 - `AI_SWITCH_PORT`：宿主映射端口，默认 `19527`。
-- `AI_SWITCH_DOCKER_IMAGE`：镜像地址，默认 `ijry/ai-switch:latest`；固定版本可用 `ijry/ai-switch:0.9.0` 或 `ijry/ai-switch:0.9`。
+- `AI_SWITCH_DOCKER_IMAGE`：镜像地址，默认 `ai-switch/ai-switch:latest`；固定版本可用 `ai-switch/ai-switch:0.9.0` 或 `ai-switch/ai-switch:0.9`。
 - `AI_SWITCH_TOKEN`：不设置时 entrypoint 会生成并打印一个容器本地令牌；跨重启请显式设置。
 - `AI_SWITCH_SAAS_ENABLE`：默认 `1`，设为 `0` 只启动独立 server。
 - `AI_SWITCH_SAAS_ACTIVATION_CODE`、`AI_SWITCH_SAAS_INSTANCE_ID`、`AI_SWITCH_SAAS_SITE_NAME`、`AI_SWITCH_SAAS_PUBLIC_BASE_URL`。
