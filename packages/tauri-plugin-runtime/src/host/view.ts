@@ -8,6 +8,7 @@ import type { IncomingRequest, RpcPeer } from "../bridge/rpc-types.js";
 import { createRpcPeer } from "../bridge/rpc-peer.js";
 import { appendBootstrapHint } from "../bridge/handshake.js";
 import { createSessionRequests } from "./requests.js";
+import { createFileHandleGuard } from "./file-handles.js";
 import { createEventRouter } from "./event-router.js";
 import { randomNonce } from "./policy.js";
 import type { PluginView } from "./types.js";
@@ -34,8 +35,9 @@ export function createManagedView(options: {
   iframe.setAttribute("allow", "camera 'none'; microphone 'none'; geolocation 'none'");
   const nonce = randomNonce();
   const requests = createSessionRequests({ transport, sessionId: descriptor.sessionId, timeoutMs: options.requestTimeoutMs });
+  const fileHandles = createFileHandleGuard({ transport, requests, sessionId: descriptor.sessionId, timeoutMs: options.requestTimeoutMs, maxTransfers: descriptor.info.limits.fileTransfers });
   let peer: RpcPeer | undefined;
-  let closed = false; let established = false; let loaded = false;
+  let closed = false; let established = false; let loaded = false; let transportGeneration = 0;
   let disposePromise: Promise<void> | undefined;
   let resolveReady!: (view: PluginView) => void;
   let rejectReady!: (error: Error) => void;
@@ -66,7 +68,9 @@ export function createManagedView(options: {
       requireCapability(capability, method);
       const standard = Object.hasOwn(standardCapabilities, capability);
       if (standard && !validateCapabilityRequest(capability, method, params).ok) throw new AplgError("E_INVALID_ARGUMENT", "The capability request is invalid.");
-      const result = await requests.run("capability.call", { capability, method, params }, request.signal);
+      const result = capability === "aplg.fs"
+        ? await fileHandles.call(method, params, request.signal)
+        : await requests.run("capability.call", { capability, method, params }, request.signal);
       if (standard && !validateCapabilityResult(capability, method, result).ok) throw new AplgError("E_INVALID_MESSAGE", "The backend capability result is invalid.");
       return result;
     }
@@ -128,7 +132,7 @@ export function createManagedView(options: {
     requests.abortAll(reason);
     peer?.close(reason); iframe.remove();
     options.onDisposed();
-    void Promise.allSettled([events.dispose(), options.closeSession()]).then(() => done());
+    void Promise.allSettled([events.dispose(), fileHandles.dispose(), options.closeSession()]).then(() => done());
     return disposePromise;
   }
 
@@ -147,7 +151,18 @@ export function createManagedView(options: {
       if (closed) return;
       if (event.kind === "session.closed") { if (event.sessionId === descriptor.sessionId) void dispose(); return; }
       if (event.kind === "transport.state") {
-        void events.setConnected(event.state === "connected").catch(() => { void dispose(new AplgError("E_HOST_UNAVAILABLE", "The plugin subscriptions could not be restored.")); });
+        if (event.state === "disconnected") {
+          transportGeneration++;
+          void events.setConnected(false);
+        } else {
+          if (events.isConnected()) return;
+          const generation = transportGeneration;
+          void fileHandles.restore().then(() => {
+            if (!closed && generation === transportGeneration) return events.setConnected(true);
+          }).catch(() => {
+            if (!closed && generation === transportGeneration) void dispose(new AplgError("E_HOST_UNAVAILABLE", "The plugin resources could not be restored."));
+          });
+        }
       } else events.accept(event);
     },
   };

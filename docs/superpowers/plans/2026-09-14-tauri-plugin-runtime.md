@@ -12,7 +12,7 @@
 
 **Related plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-devkit.md`，其中 D1 消费 R1/R2，D3/D4 消费 R4/R5/R6，最终联调需要 R8。
 
-**状态：** R1–R6 已实施并完成本地验证，R7/R8 待实施；未执行 npm 发布。后续任务中的代码仍是目标接口/测试片段。
+**状态：** R1–R7 已实施并完成本地验证，R8 待实施；未执行 npm 发布。后续任务中的代码仍是目标接口/测试片段。
 
 ## Global Constraints
 
@@ -646,7 +646,7 @@ interface DataChunk { offset: number; dataBase64: string }
 
 上述注释即固定的 method contract，生成 schema 对每个 DTO 做校验；所有文件字节统一经过 transfer，即使小文件也不另开未经定义的读写通道。外部调用取消来自会话失效/通用 RPC，首期文件选项不接受未列出的 signal/stream/fd。
 
-- [ ] **Step 1：以独立内存 Provider 测真实客户端行为。** `createMemoryFsProvider()` 在测试文件提供 `{ call: CapabilityCall; session():Promise<SessionInfo>; readCommitted(path):Uint8Array|undefined; failNext(method,code):void; activeTransfers():number }`；这是测试 backend，不出现在公共 exports。
+- [x] **Step 1：以独立内存 Provider 测真实客户端行为。** `createMemoryFsProvider()` 在测试文件提供 `{ call: CapabilityCall; session():Promise<SessionInfo>; readCommitted(path):Uint8Array|undefined; failNext(method,code):void; activeTransfers():number }`；这是测试 backend，不出现在公共 exports。
 
 ```ts
 import { expect, test } from "vitest";
@@ -670,15 +670,15 @@ test("an interrupted transfer leaves no partially committed file", async () => {
 });
 ```
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-runtime exec vitest run tests/fs-client.test.ts tests/fs-options.test.ts tests/fs-transfer.test.ts tests/fs-callbacks.test.ts`。
-- [ ] **Step 3：实现输入校验和分块。** 先 `ready()`、核对 capability、选项、虚拟路径和本地 size，再占用大小为协商 fileTransfers 的信号量。写入先 open，按 offset 顺序 push，全部确认后 finish；任意失败在 finally best-effort abort 并释放槽位。读取验证服务端总 size、每块 offset/长度/base64、总字节一致后 finish，不能无限接受“永不 EOF”的回复。
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-runtime exec vitest run tests/fs-client.test.ts tests/fs-options.test.ts tests/fs-transfer.test.ts tests/fs-callbacks.test.ts`。
+- [x] **Step 3：实现输入校验和分块。** 先 `ready()`、核对 capability、选项、虚拟路径和本地 size，再占用大小为协商 fileTransfers 的信号量。写入先 open，按 offset 顺序 push，全部确认后 finish；任意失败在 finally best-effort abort 并释放槽位。读取验证服务端总 size、每块 offset/长度/base64、总字节一致后 finish，不能无限接受“永不 EOF”的回复。
 
 8 MiB+1、超过协商大小、负/错 offset、重复块、非法 base64、返回 `written` 不等于已发字节都失败。进度检查使用原始字节而不是 base64 长度；消息仍受 1 MiB 限额。取消/超时不自动重试 open/push/finish，特别是 append。错误恢复和 data buffer 释放在 finally 中执行。
 
 回调式 `fs` 接口用同一 FsPromises 实现，回调恰好调用一次，并通过 Promise 链保证异步。同步接口 `readFileSync/writeFileSync/appendFileSync/readdirSync/statSync/mkdirSync/renameSync/copyFileSync/rmSync` 为明确抛 `ERR_APLG_SYNC_IO_UNSUPPORTED` 的函数；不把同步 API 返回值改成 Promise。其他未支持 named exports 在构建失败，默认对象也不伪造不存在的方法。
 
-- [ ] **Step 4：GREEN。** 补充分块边界 0/256KiB/256KiB+1/8MiB、并发两项、第三项等待后关闭、`wx`/`ax` 已存在报 `EEXIST`、`force` 不等于忽略授权、跨根 rename、空目录、非目录 readdir、cb 成功/错误各一次、无编码 Buffer、无多余选项。对声明范围使用真实 Node 临时目录差分测试；测试 Provider 的通过只证明 JS 适配，真实 Rust symlink/junction/账户权限仍需后续计划。
-- [ ] **Step 5：提交。**
+- [x] **Step 4：GREEN。** 补充分块边界 0/256KiB/256KiB+1/8MiB、并发两项、第三项等待后关闭、`wx`/`ax` 已存在报 `EEXIST`、`force` 不等于忽略授权、跨根 rename、空目录、非目录 readdir、cb 成功/错误各一次、无编码 Buffer、无多余选项。对声明范围使用真实 Node 临时目录差分测试；测试 Provider 的通过只证明 JS 适配，真实 Rust symlink/junction/账户权限仍需后续计划。
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-runtime/src/node packages/tauri-plugin-runtime/src/protocol packages/tauri-plugin-runtime/tests packages/tauri-plugin-runtime/package.json packages/tauri-plugin-runtime/scripts/build.mjs fixtures/aplg/protocol-v1
@@ -821,3 +821,16 @@ git commit -m "test(runtime): 验收独立安装与无框架宿主接入"
 - path-browserify bundle 内仍含未到达的 process.cwd fallback；验证的是所有公开调用均不访问该分支，不声称源码文本完全无 process 字样。R8 可继续按真实打包体积做优化。
 - 初次 table test 将数组当作参数行展开，已改为对象化测试向量；ES2022 下 findLast 不可用，改为反向遍历；这些检查已在正式验证前修正。
 - 未实现 fs/R7、未执行 Cargo、未接通 devkit alias，不推送或发布。本轮测试服务器结束后无遗留进程。
+
+### R7（2026-09-15）
+
+- 先写异步 fs、选项、传输、回调、类型与 browser 失败测试，再实现 `/node/fs` / `/node/fs/promises`。九项异步操作与回调包装共用同一惰性 client 和并发队列；同步接口明确抛错。
+- 分块协议复用既有 fs schema，不另造 transport；限制 8 MiB 文件、256 KiB 原始块、协商的 2 项传输/64 项排队，按 UTF-8/base64 信封预算缩小块大小。写入只在完整 staging 后 finish，失败 abort，不重试追加/finish。
+- 严格校验虚拟路径、选项重载、write/append flags、offset/长度/ack、canonical base64、mkdir 结果关联。输入 bytes 同步快照，Stats/Dirent 返回不引用可变后端对象。
+- 新增生命周期观察接口作为 createFsClient 的可选内部参数，连接关闭/断线取消 active 与 queued 操作，结束后释放观察器。缺少宿主时保留 E_HOST_UNAVAILABLE 初始错误，不伪造浏览器 fs。
+- 回调恰好异步执行一次；回调自身异常不会作为第二次 IO 失败回调。源码及实际 package 出口类型测试覆盖 encoding/返回值/必需 callback，未支持 API 在类型检查失败。
+- 浏览器联调复现宿主超时后文件句柄无法被客户端观察的问题，因此本批增加 `host/file-handles.ts` 并接入 view：为文件 open 预留容量、复核 handle 归属、清理迟到或非法 open、恢复前确认中断句柄清理。重复 connected 事件不清理健康传输；未确认 open/abort 不被当作空闲容量。
+- 独立内存 Provider 仅位于 tests/support，不发布为生产 backend；真实 Node 临时目录的差分测试通过，Windows mkdir 的 `\\?\` 返回路径在测试映射中按 namespaced path 比较，不改插件虚拟路径语义。
+- 新增 73 项单元测试（含宿主文件 guard）和 7 项实际 ESM iframe 文件测试；runtime 合计 24 文件 / 306 单元测试，Chromium 50 项全部通过。
+- typecheck、source/public type tests、生成物一致性、build、冻结安装和构建 package 的 fs/promises 单例 SSR smoke 通过。应用 typecheck 与 74 文件 / 803 项回归通过。R7 无新增依赖或锁文件改动。
+- 未修改 Rust、未运行 Cargo、未实现真实 OS 权限/符号链接策略；R8 独立 tarball、devkit、plugin-store 自动发布仍未完成。不推送、打 tag 或 npm 发布，测试服务已结束。

@@ -15,7 +15,8 @@ including lazy bootstrap, two-way acknowledgement, capability calls,
 subscriptions, storage/dialog wrappers, and connection lifecycle handling.
 R5 adds the generic `/host` mounting API with scoped identity, event routing,
 reconnect handling and bounded cleanup. R6 adds pure-JavaScript path, Buffer and
-EventEmitter entry points. Filesystem shims, Rust capability providers and
+EventEmitter entry points. R7 adds asynchronous filesystem clients and callback
+wrappers with bounded transfer handling. Real Rust capability providers and
 installation/release integration are **not implemented yet**. The package has
 not been published to npm. Do not interpret a valid manifest as authorization
 to access files, the network, or the host application.
@@ -60,8 +61,9 @@ import {
   AplgError only from messages/details that are safe to show to plugins.
 
 File DTO checks enforce canonical base64, bounded offsets/chunks and virtual
-paths. They do **not** read/write files, track actual transfer sessions or grant
-permissions; later Node-client work and the future Rust backend implement those behaviors.
+paths. The JS filesystem client now tracks transfers over the capability bridge,
+but it does **not** execute OS filesystem operations or grant permissions. Those
+remain the responsibility of an authenticated capability provider.
 
 Shared cross-language inputs live in `fixtures/aplg/protocol-v1/`. Generated
 schemas define structural contracts; semantic validation and backend grant
@@ -172,6 +174,57 @@ Browser tests load the actual built ESM files while trapping access to Node glob
 including inside an opaque sandboxed iframe; these are not source-alias-only tests.
 The upstream path dependency retains an unreachable `process.cwd()` fallback in
 its bundle, but every exposed resolving path supplies an explicit absolute root.
+## Asynchronous filesystem client
+
+```ts
+import fs from "@ai-switch/tauri-plugin-runtime/node/fs";
+import fsp from "@ai-switch/tauri-plugin-runtime/node/fs/promises";
+
+await fsp.writeFile("/data/note.txt", "hello", "utf8");
+const text = await fs.promises.readFile("/data/note.txt", "utf8");
+fs.readFile("/data/note.txt", (error, data) => {
+  if (error) { console.error(error.code); return; }
+  console.log(data.toString("utf8"));
+});
+```
+
+The plugin must declare and be granted compatible `aplg.fs` capability. These
+imports do not call Node's real filesystem, create an implicit browser filesystem,
+or auto-connect on module import. `fs.promises`, the default promises export and
+its named methods share one lazy client and one concurrency queue.
+
+Supported operations are `readFile`, `writeFile`, `appendFile`, `readdir`, `stat`,
+`mkdir`, `rename`, `copyFile` and `rm`, plus their callback forms. Only absolute
+virtual string paths are accepted. UTF-8 reads return strings; omitted/null
+encoding returns the browser Buffer. Writes accept strings/Uint8Array and flags
+`w`/`wx`; append uses `a`/`ax`. Unknown options, streams, file descriptors, URLs,
+watch APIs and arbitrary encodings are rejected. Synchronous methods throw
+`ERR_APLG_SYNC_IO_UNSUPPORTED`, not promises.
+
+- A file is limited to **8 MiB**, chunks to **256 KiB**, and active transfers to
+  **two** (or smaller negotiated host limits). The queue is bounded at 64 operations.
+- The client snapshots input byte buffers, checks chunk offsets/lengths/base64 and
+  byte acknowledgements, and commits only after the complete transfer is staged.
+- A 30-second per-request/queue timeout and connection-close handling prevent
+  unbounded waits. Cleanup has its own bounded best-effort abort; uncertain
+  cleanup blocks new transfer admission rather than pretending capacity is free.
+- Host-side handle ownership also protects replies that arrive after a plugin
+  request timed out. Reconnect confirms interrupted handle cleanup before
+  resuming; unconfirmed opens fail closed. These are not a substitute for backend
+  resource ownership and authorization.
+- Timeouts/cancellation do not undo an already committed write or other external
+  side effect. Non-idempotent operations, especially append, are never retried
+  automatically. `force` does not bypass permissions and rename cannot cross grants.
+- Stats and directory entries expose immutable snapshots of the supported subset,
+  not the full native Node Stats/Dirent APIs. Errors contain safe virtual paths,
+  syscall names and known codes, never blindly copied backend stacks or credentials.
+
+The in-memory filesystem implementation is test-only and is not exported. Tests
+include real Node filesystem differential cases in an isolated temporary directory
+and actual built ESM imports in sandboxed browser views. The Rust provider and
+its symlink/junction, OS permissions, quotas and transactional staging still need
+separate implementation and verification. Standard `node:fs` import aliases are
+part of the later devkit, not automatically installed by this runtime.
 ## Development
 
 Node `^22.12.0 || ^24.0.0 || >=26.0.0` and pnpm `10.12.4` are required.
@@ -195,8 +248,9 @@ without invoking runtime code generation in the browser. Validation does not
 need `eval`, `new Function`, a Node `require`, or browser globals on import.
 
 Only implemented entry points are exported: root version/types, `/protocol`,
-`/plugin`, `/host`, `/node/path`, `/node/buffer`, and `/node/events`. Later work
-adds filesystem entry points; no empty implementations are published in advance.
+`/plugin`, `/host`, `/node/path`, `/node/buffer`, `/node/events`, `/node/fs`, and
+`/node/fs/promises`. Independent tarball validation (R8) and actual npm publication
+have not yet been completed.
 
 ## License
 

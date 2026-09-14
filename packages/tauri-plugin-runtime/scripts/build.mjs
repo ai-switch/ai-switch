@@ -14,6 +14,7 @@ await build({
     index: "src/index.ts", "protocol/index": "src/protocol/index.ts",
     "plugin/index": "src/plugin/index.ts", "host/index": "src/host/index.ts",
     "node/path": "src/node/path.ts", "node/buffer": "src/node/buffer.ts", "node/events": "src/node/events.ts",
+    "node/fs": "src/node/fs.ts", "node/fs/promises": "src/node/fs/promises.ts",
   },
   outdir: "dist", bundle: true, splitting: true, format: "esm", platform: "browser",
   target: "es2022", sourcemap: false, legalComments: "inline", logLevel: "info",

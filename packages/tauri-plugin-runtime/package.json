@@ -47,6 +47,14 @@
     "./node/events": {
       "types": "./dist/node/events.d.ts",
       "import": "./dist/node/events.js"
+    },
+    "./node/fs": {
+      "types": "./dist/node/fs.d.ts",
+      "import": "./dist/node/fs.js"
+    },
+    "./node/fs/promises": {
+      "types": "./dist/node/fs/promises.d.ts",
+      "import": "./dist/node/fs/promises.js"
     }
   },
   "scripts": {
