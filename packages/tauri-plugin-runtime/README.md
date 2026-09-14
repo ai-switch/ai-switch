@@ -10,8 +10,9 @@ capability schemas, generated TypeScript declarations and ahead-of-time
 validators, safe JSON validation, portable archive/virtual path policies,
 capability negotiation, safe error envelopes, and version constants.
 
-The host/plugin bridge, lifecycle, Node API shims, Rust capability providers and
-installation/release integration are **not implemented yet**. The package has
+An internal bounded MessagePort RPC layer is implemented and tested. The public
+plugin connection and host mounting APIs, Node API shims, Rust capability
+providers and installation/release integration are **not implemented yet**. The package has
 not been published to npm. Do not interpret a valid manifest as authorization
 to access files, the network, or the host application.
 

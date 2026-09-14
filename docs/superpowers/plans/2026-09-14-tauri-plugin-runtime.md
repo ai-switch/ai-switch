@@ -12,7 +12,7 @@
 
 **Related plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-devkit.md`，其中 D1 消费 R1/R2，D3/D4 消费 R4/R5/R6，最终联调需要 R8。
 
-**状态：** R1/R2 已实施并完成本地验证，R3–R8 待实施；未执行 npm 发布。后续任务中的代码仍是目标接口/测试片段。
+**状态：** R1–R3 已实施并完成本地验证，R4–R8 待实施；未执行 npm 发布。后续任务中的代码仍是目标接口/测试片段。
 
 ## Global Constraints
 
@@ -393,7 +393,7 @@ git commit -m "feat(runtime): 定义线协议与能力协商契约"
 
 **Interfaces:** 内部 `createRpcPeer(port: MessagePort, options?: { timeoutMs?: number; maxInflight?: number }): RpcPeer`；`RpcPeer.request(operation,args,options?)`、`onRequest(handler)`、`onEvent(handler)`、`sendEvent(message)`、`close(reason?)`。request 返回 `Promise<JsonValue>`，handler 接收 `{ id, operation, args, signal }` 并返回 `Promise<JsonValue>`。`RpcPeer` 在同文件导出的内部 interface 明确声明 request 返回值和 handler 类型，见本节；只在本包内部导入，不向 devkit 暴露内部类。`onEvent`/`sendEvent` 的参数为 WireMessage 中 kind=event 或 connection 的联合，连接确认复用该通道；R4/R5 不另建第二个 port listener。
 
-- [ ] **Step 1：以真实 MessageChannel 写失败测试。**
+- [x] **Step 1：以真实 MessageChannel 写失败测试。**
 
 ```ts
 import { expect, test } from "vitest";
@@ -414,8 +414,8 @@ test("closing a peer settles in-flight requests instead of hanging forever", asy
 });
 ```
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-runtime exec vitest run tests/rpc-peer.test.ts`。
-- [ ] **Step 3：实现每端独立 pending map。** 64 个最大未完成 RPC，默认 30 秒超时；每个 request 生成 UUID；先存 pending 再发消息；每个 resolve/reject 分支在 finally 清理 timer/AbortSignal listener。close 幂等并拒绝所有 pending，终止 receiver handler signal。取消请求只能指向同一个 peer 的活跃 request ID；收到取消确认不等于外部副作用回滚。
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-runtime exec vitest run tests/rpc-peer.test.ts`。
+- [x] **Step 3：实现每端独立 pending map。** 64 个最大未完成 RPC，默认 30 秒超时；每个 request 生成 UUID；先存 pending 再发消息；每个 resolve/reject 分支在 finally 清理 timer/AbortSignal listener。close 幂等并拒绝所有 pending，终止 receiver handler signal。取消请求只能指向同一个 peer 的活跃 request ID；收到取消确认不等于外部副作用回滚。
 
 ```ts
 function settlePending(id: string, action: (entry: PendingRequest) => void) {
@@ -430,8 +430,8 @@ function settlePending(id: string, action: (entry: PendingRequest) => void) {
 
 这里 `PendingRequest` 在 `rpc-peer.ts` 定义为 `{ timer: ReturnType<typeof setTimeout>; removeAbortListener(): void; resolve(value: JsonValue): void; reject(error: Error): void }`，`pending` 为该 peer 的 Map。late response、未知 ID 和重复 result 忽略；结构非法消息关闭该 peer，不接受无边界吞错误。使用 UTF-8 编码实际字节数限制，而不是 JS `.length`；序列化前限制深度 64，控制循环和巨大对象扫描。
 
-- [ ] **Step 4：GREEN。** 补充可执行测试覆盖 out-of-order response、30 秒超时（fake timer）、已 abort 请求不发送、循环对象/1 MiB+1 拒绝、64 请求上限、handler 抛错脱敏、晚到响应不会恢复已关闭任务。不得自动重发写操作。
-- [ ] **Step 5：提交。**
+- [x] **Step 4：GREEN。** 补充可执行测试覆盖 out-of-order response、30 秒超时（fake timer）、已 abort 请求不发送、循环对象/1 MiB+1 拒绝、64 请求上限、handler 抛错脱敏、晚到响应不会恢复已关闭任务。不得自动重发写操作。
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-runtime/src/bridge packages/tauri-plugin-runtime/src/plugin/errors.ts packages/tauri-plugin-runtime/tests/rpc-peer.test.ts
@@ -775,3 +775,13 @@ git commit -m "test(runtime): 验收独立安装与无框架宿主接入"
 - 额外导出的 `validateHostEvent`、`validateCapabilityRequest/Result`、`standardCapabilities` 与安全 error 工具用于后续 host/RPC/Node 客户端复用，不复制第二套 schema。
 - protocol-only 构建当前未压缩 JS 约 691 KiB，主要为完整 Ajv standalone 校验器；后续 R8 应实测包边界/体积并按需拆分，不能在此阶段宣称“轻量完成”或已可安装运行插件。
 - 未运行 Cargo，未实现 R3 之后的通信/容器/Node 行为；devkit 尚未开始；未推送、打 tag 或发布。
+
+### R3
+
+- 先写真实 MessageChannel 的 codec/RPC 失败测试，再实现有限大小 JSON 字符串传输、request/reply 关联、错误脱敏和关闭清理。
+- 默认最多 64 个出站和入站活跃请求、30 秒超时；可收紧消息字节限额。超时/取消只 best-effort 通知同一 peer 的活跃请求，不重发业务调用。
+- close 幂等，清除 timer/AbortSignal listener、拒绝 pending、终止 handler signal；remote close/无效 frame 同样完成清理。
+- 重复活跃请求失败关闭；保存最近 1024 个已见 ID 作为有界重复检测。它不是无限历史去重或跨重连的幂等性保证。
+- JSON 字符串 codec 避免直接把任意对象挂到 MessagePort；迟到/未知/重复 reply 不会结算其他请求。
+- R3 新增 31 项测试，runtime 合计 10 文件 / 131 测试通过；类型检查、生成物检查和构建通过。
+- RPC 内部增加 rpc-types.ts 来集中类型；CallOptions 暂属内部类型，R4 的 /plugin 将重新导出。还未导出公共 plugin 或 host 入口，不宣称可装载插件。
