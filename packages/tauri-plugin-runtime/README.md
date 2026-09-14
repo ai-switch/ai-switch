@@ -5,9 +5,10 @@ React, Vue, or AI Switch application source code.
 
 ## Implementation status
 
-The first implementation slice provides the manifest schema, generated
-TypeScript declarations and ahead-of-time validators, safe JSON validation,
-portable archive/virtual path policies, and version constants.
+The R1/R2 implementation slices provide manifest, wire, session and standard
+capability schemas, generated TypeScript declarations and ahead-of-time
+validators, safe JSON validation, portable archive/virtual path policies,
+capability negotiation, safe error envelopes, and version constants.
 
 The host/plugin bridge, lifecycle, Node API shims, Rust capability providers and
 installation/release integration are **not implemented yet**. The package has
@@ -23,6 +24,11 @@ import {
   manifestSchema,
   normalizeArchivePath,
   validateVirtualPath,
+  validateWireMessage,
+  validateHostEvent,
+  validateSessionDescriptor,
+  validateCapabilityRequest,
+  validateCapabilityResult,
 } from "@ai-switch/tauri-plugin-runtime/protocol";
 ```
 
@@ -35,6 +41,26 @@ import {
 - `manifestSchema` is the draft-07 structural schema. Semantic version, path,
   duplicate ID, origin and safe-JSON rules also require `validateManifest`.
 
+- `validateWireMessage` rejects unknown operations, plugin-supplied identity
+  fields, malformed replies, unsafe JSON and oversized UTF-8 envelopes.
+- `validateHostEvent` validates the separate identity-bearing host event shape.
+- `validateSessionDescriptor` checks manifest identity, capability declarations,
+  standard method completeness, API versions, asset URL safety and limits.
+  An allowed asset URL still needs the concrete host's origin/IPC policy.
+- `validateCapabilityRequest` / `validateCapabilityResult` validate v1
+  `aplg.storage`, `aplg.dialog` and `aplg.fs` DTOs. They reject unknown standard
+  methods; extension capabilities require their own provider-side validation.
+- `AplgError` and `toErrorPayload` serialize deliberately public errors without
+  blindly copying native Error stacks or real filesystem paths. Construct
+  AplgError only from messages/details that are safe to show to plugins.
+
+File DTO checks enforce canonical base64, bounded offsets/chunks and virtual
+paths. They do **not** read/write files, track actual transfer sessions or grant
+permissions; R3 onward and the future Rust backend implement those behaviors.
+
+Shared cross-language inputs live in `fixtures/aplg/protocol-v1/`. Generated
+schemas define structural contracts; semantic validation and backend grant
+checks remain necessary in every consumer.
 The implementation version is `0.1.0`; the wire identifier is `aplg/1`, the
 plugin API version is `1.0.0`, and `manifestVersion` is `1`. These are separate
 version domains.

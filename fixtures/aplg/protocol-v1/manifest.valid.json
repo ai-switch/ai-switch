@@ -1,0 +1,28 @@
+{
+  "entry": "dist/index.html",
+  "contributes": {
+    "views": [
+      {
+        "title": "Notes",
+        "id": "main"
+      }
+    ]
+  },
+  "optional": {},
+  "permissions": {
+    "network": [],
+    "native": false,
+    "filesystem": []
+  },
+  "id": "io.github.example.notes",
+  "license": "MIT",
+  "description": "Notes fixture",
+  "version": "0.1.0",
+  "manifestVersion": 1,
+  "activation": "view",
+  "name": "Notes",
+  "engines": {
+    "aplg": "^1.0.0"
+  },
+  "requires": {}
+}

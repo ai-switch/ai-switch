@@ -1,0 +1,900 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-switch.github.io/aplg/schema/v1/fs.schema.json",
+  "title": "FsCapabilityMessage",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "transfer.openRead"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "transfer.openRead"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "handle",
+            "size"
+          ],
+          "properties": {
+            "handle": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[\\x21-\\x7e]+$"
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8388608
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "transfer.openWrite"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "size",
+            "mode"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8388608
+            },
+            "mode": {
+              "enum": [
+                "w",
+                "wx",
+                "a",
+                "ax"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "transfer.openWrite"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "handle"
+          ],
+          "properties": {
+            "handle": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[\\x21-\\x7e]+$"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "transfer.pull"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "handle",
+            "offset",
+            "length"
+          ],
+          "properties": {
+            "handle": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[\\x21-\\x7e]+$"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8388608
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 262144
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "transfer.pull"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "offset",
+            "dataBase64"
+          ],
+          "properties": {
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8388608
+            },
+            "dataBase64": {
+              "type": "string",
+              "maxLength": 349528
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "transfer.push"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "handle",
+            "offset",
+            "dataBase64"
+          ],
+          "properties": {
+            "handle": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[\\x21-\\x7e]+$"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8388608
+            },
+            "dataBase64": {
+              "type": "string",
+              "maxLength": 349528
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "transfer.push"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "written"
+          ],
+          "properties": {
+            "written": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 262144
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "transfer.finish"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "handle"
+          ],
+          "properties": {
+            "handle": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[\\x21-\\x7e]+$"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "transfer.finish"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "type": "null"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "transfer.abort"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "handle"
+          ],
+          "properties": {
+            "handle": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[\\x21-\\x7e]+$"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "transfer.abort"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "type": "null"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "stat"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "stat"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "size",
+            "mtimeMs"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "file",
+                "directory"
+              ]
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "mtimeMs": {
+              "type": "number"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "readdir"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "readdir"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "kind": {
+                "enum": [
+                  "file",
+                  "directory"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "mkdir"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "recursive"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "recursive": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "mkdir"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "createdPath"
+          ],
+          "properties": {
+            "createdPath": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "rename"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "from",
+            "to"
+          ],
+          "properties": {
+            "from": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "to": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "rename"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "type": "null"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "copyFile"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "from",
+            "to"
+          ],
+          "properties": {
+            "from": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "to": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "copyFile"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "type": "null"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "rm"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "recursive",
+            "force"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "recursive": {
+              "type": "boolean"
+            },
+            "force": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.fs"
+        },
+        "method": {
+          "const": "rm"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "type": "null"
+        }
+      }
+    }
+  ]
+}

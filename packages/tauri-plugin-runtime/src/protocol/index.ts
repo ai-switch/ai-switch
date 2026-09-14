@@ -4,3 +4,15 @@ export { validateManifest, parseManifest, satisfiesApiRange } from "./manifest.j
 export { normalizeArchivePath, validateVirtualPath } from "./path-policy.js";
 export { protocolVersion, apiVersion, limits } from "./limits.js";
 export { default as manifestSchema } from "./schema/manifest.schema.json";
+export type { WireMessage, HostEvent, SessionDescriptor, StandardCapabilityMessage, FsCapabilityMessage } from "./generated/types.generated.js";
+export type { SessionInfo, CapabilityInfo, PluginRequest, PluginOperation, HostOperation, Unsubscribe, HostTransport } from "./wire.js";
+export { validateWireMessage, validateHostEvent } from "./wire.js";
+export { validateSessionDescriptor } from "./session.js";
+export { standardCapabilities, validateCapabilityRequest, validateCapabilityResult } from "./capabilities.js";
+export { default as wireSchema } from "./schema/wire.schema.json";
+export { default as sessionSchema } from "./schema/session.schema.json";
+export { default as capabilitySchema } from "./schema/capabilities.schema.json";
+export { default as fsSchema } from "./schema/fs.schema.json";
+export { default as hostEventSchema } from "./schema/host-event.schema.json";
+export { AplgError, errorCodes, toErrorPayload } from "./errors.js";
+export type { AplgErrorCode, ErrorPayload } from "./errors.js";

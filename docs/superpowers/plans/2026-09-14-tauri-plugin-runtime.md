@@ -12,7 +12,7 @@
 
 **Related plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-devkit.md`，其中 D1 消费 R1/R2，D3/D4 消费 R4/R5/R6，最终联调需要 R8。
 
-**状态：** R1 已实施并完成本地验证，R2–R8 待实施；未执行 npm 发布。后续任务中的代码仍是目标接口/测试片段。
+**状态：** R1/R2 已实施并完成本地验证，R3–R8 待实施；未执行 npm 发布。后续任务中的代码仍是目标接口/测试片段。
 
 ## Global Constraints
 
@@ -337,7 +337,7 @@ git commit -m "feat(runtime): 建立公共 manifest 契约与独立包基础"
 
 **Interfaces:** 产出第 3.2 节全部类型、`validateWireMessage`、`validateSessionDescriptor`；标准 capability 版本均为 `1.0.0`。fs 传输返回值参见 R7，不另创一份 wire 协议。
 
-- [ ] **Step 1：写失败测试。**
+- [x] **Step 1：写失败测试。**
 
 ```ts
 import { expect, test } from "vitest";
@@ -363,8 +363,8 @@ test("missing optional capabilities do not prevent startup", () => {
 });
 ```
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-runtime exec vitest run tests/protocol.test.ts`。
-- [ ] **Step 3：实现严格消息与协商。** 四种 request args 的精确键如下，其他键一律拒绝：
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-runtime exec vitest run tests/protocol.test.ts`。
+- [x] **Step 3：实现严格消息与协商。** 四种 request args 的精确键如下，其他键一律拒绝：
 
 | operation | args |
 | --- | --- |
@@ -379,8 +379,8 @@ request ID/订阅 ID 限 1–128 个可打印 ASCII；字符串参数本身按 J
 
 统一 `AplgError` 代码集合包括总规格列出的 session/timeout/cancel/limit/protocol 错误，加 `E_INVALID_ARGUMENT`、`E_INVALID_MESSAGE`、`E_HOST_UNAVAILABLE`；Node 文件错误保留后端安全的 `code`、`syscall` 和虚拟 `path`，不转发 stack 或任意 error 对象属性。
 
-- [ ] **Step 4：GREEN。** 测试同 session version 不匹配、未知 op、重复能力、错误序号、非法 JSON；运行 `check:generated`。在 README 中列明 JSON Schema 与 capability 版本，不新增 Rust 文件。
-- [ ] **Step 5：提交。**
+- [x] **Step 4：GREEN。** 测试同 session version 不匹配、未知 op、重复能力、错误序号、非法 JSON；运行 `check:generated`。在 README 中列明 JSON Schema 与 capability 版本，不新增 Rust 文件。
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-runtime/src/protocol packages/tauri-plugin-runtime/tests fixtures/aplg/protocol-v1
@@ -763,3 +763,15 @@ git commit -m "test(runtime): 验收独立安装与无框架宿主接入"
 - 根直接依赖声明和版本未变；pnpm 的 workspace 锁文件补充了 Vite 5 的可选 lightningcss peer snapshot，已单独核对并通过应用回归。
 - 只安装本批实际需要的工具和 semver；Node shim/Playwright 依赖在对应后续任务添加，避免未使用依赖提前进入包。
 - 当前只导出根版本/类型及 `/protocol`；没有占位的 host/plugin/fs 实现，也未修改 Rust 或执行发布。
+
+### R2
+
+- 新增 wire/session/host-event/standard capability/fs schema 与生成类型，宿主身份字段不允许从插件消息传入；仅接受四种插件侧操作。
+- 能力协商验证 ID/version/API、必需/可选能力、标准方法集合、声明范围和限额；`aplg.*` 为受保留的标准命名空间，扩展使用自己的命名空间。
+- 增加 standard storage/dialog/fs DTO 校验、canonical base64、UTF-8 包含信封的 1 MiB 边界、256 KiB 块上限、虚拟路径和跨 grant rename 规则；这只是契约验证，不是实际文件执行。
+- 增加安全错误信封和共享固定 JSON 夹具。fs timestamps 保留合法的 epoch 前数值；asset URL 保留业务 hash 路由，为后续 bootstrap 恢复提供条件。
+- 针对缺失方法、timestamp/标准命名空间/hash 路由问题分别确认 RED 后实现 GREEN；最终 runtime 为 8 文件 / 100 测试通过。
+- `typecheck`、`check:generated`、`build`、冻结安装、生产依赖审计和构建 ESM 的 Node/SSR smoke test 通过。应用最终回归再次为 74 文件 / 803 测试通过。
+- 额外导出的 `validateHostEvent`、`validateCapabilityRequest/Result`、`standardCapabilities` 与安全 error 工具用于后续 host/RPC/Node 客户端复用，不复制第二套 schema。
+- protocol-only 构建当前未压缩 JS 约 691 KiB，主要为完整 Ajv standalone 校验器；后续 R8 应实测包边界/体积并按需拆分，不能在此阶段宣称“轻量完成”或已可安装运行插件。
+- 未运行 Cargo，未实现 R3 之后的通信/容器/Node 行为；devkit 尚未开始；未推送、打 tag 或发布。
