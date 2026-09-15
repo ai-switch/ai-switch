@@ -20,8 +20,8 @@ use crate::services::config_write_service::{
 use crate::services::platform_capability_service::PlatformCapabilityService;
 use crate::services::route_model_capability::{
     advertised_model_catalog_entries, catalog_member_inputs, catalog_members,
-    codex_default_context_window, codex_model_catalog_payload, codex_reasoning_levels,
-    parse_model_capability,
+    client_facing_model_catalog_entries, codex_default_context_window,
+    codex_model_catalog_payload, codex_reasoning_levels, parse_model_capability,
 };
 use crate::services::settings_service::SettingsService;
 use directories::BaseDirs;
@@ -559,27 +559,35 @@ impl RouteConfigService {
         let members = catalog_members(&catalog_member_inputs(&credentials));
         let mode = RoutePoolRepository::model_mode(pool, platform.as_str()).await?;
 
-        Ok(
+        // Claude third-party clients see the upstream model name (``to``) as
+        // the model id, not the Claude Code alias (``from``).  Other platforms
+        // keep using ``advertised_model_catalog_entries`` because their ``from``
+        // IS the model name users want.
+        let entries = if platform == PlatformId::Claude {
+            client_facing_model_catalog_entries(platform.as_str(), &members, mode)
+        } else {
             advertised_model_catalog_entries(platform.as_str(), &members, mode)
-                .into_iter()
-                .map(|model| ClientModel {
-                    context_window: client_model_context_window(
-                        platform,
-                        &model.base_id,
-                        model.context_window,
-                        &model.upstream_model,
-                    ),
-                    max_output_tokens: CLIENT_MODEL_MAX_OUTPUT_TOKENS,
-                    id: model.id,
-                    reasoning_levels: if platform == PlatformId::Codex {
-                        codex_reasoning_levels(&model.base_id, model.reasoning_levels.as_deref())
-                    } else {
-                        Vec::new()
-                    },
-                    supports_image_input: model.supports_image_input,
-                })
-                .collect(),
-        )
+        };
+
+        Ok(entries
+            .into_iter()
+            .map(|model| ClientModel {
+                context_window: client_model_context_window(
+                    platform,
+                    &model.base_id,
+                    model.context_window,
+                    &model.upstream_model,
+                ),
+                max_output_tokens: CLIENT_MODEL_MAX_OUTPUT_TOKENS,
+                id: model.id,
+                reasoning_levels: if platform == PlatformId::Codex {
+                    codex_reasoning_levels(&model.base_id, model.reasoning_levels.as_deref())
+                } else {
+                    Vec::new()
+                },
+                supports_image_input: model.supports_image_input,
+            })
+            .collect())
     }
 
     async fn resolve_models_for_config_input(

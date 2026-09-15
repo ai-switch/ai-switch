@@ -416,7 +416,7 @@ pub(crate) fn supports_requested_model(
     }
 
     capability.mappings.iter().any(|mapping| {
-        is_fallback_mapping(mapping) || model_mapping_matches(&mapping.from, requested_model)
+        is_fallback_mapping(mapping) || model_mapping_matches(&mapping.from, &mapping.to, requested_model)
     })
 }
 
@@ -439,7 +439,7 @@ pub(crate) fn supports_requested_capability(
 
     capability.mappings.iter().any(|mapping| {
         !is_fallback_mapping(mapping)
-            && model_mapping_matches(&mapping.from, requested_model)
+            && model_mapping_matches(&mapping.from, &mapping.to, requested_model)
             && mapping
                 .capabilities
                 .iter()
@@ -458,7 +458,8 @@ pub(crate) fn resolve_mapping_target<'a>(
     mappings
         .iter()
         .find(|mapping| {
-            !is_fallback_mapping(mapping) && model_mapping_matches(&mapping.from, requested_model)
+            !is_fallback_mapping(mapping)
+                && model_mapping_matches(&mapping.from, &mapping.to, requested_model)
         })
         .or_else(|| mappings.iter().find(|mapping| is_fallback_mapping(mapping)))
         .map(|mapping| mapping.to.as_str())
@@ -655,6 +656,70 @@ pub(crate) fn advertised_model_catalog_entries(
     models
 }
 
+/// Model catalog entries for **third-party client config writes** (ZCode,
+/// WorkBuddy, Qoder CLI, DeepSeek Harness).
+///
+/// Unlike [`advertised_model_catalog_entries`] — which outputs the `from` alias
+/// because Claude Code's native config needs it — this function outputs the
+/// `to` (upstream model name) as the model id.  Third-party clients have no
+/// Claude Code alias limitation; they show real upstream model names so users
+/// recognise what they are selecting.
+///
+/// Key differences from [`advertised_model_catalog_entries`]:
+/// - **Aggregate mode**: `to` is the model id, deduplicated across accounts.
+/// - **Precise mode**: `{prefix}/{to}` is the model id.
+/// - Skips fallback mappings (`claude-model`) and baseline aliases
+///   (`claude-sonnet-alias` etc.) — only real `from -> to` mappings produce
+///   entries.
+/// - No `[1m]` variant expansion: third-party clients do not use the Claude
+///   1M marker.
+/// - `base_id` is `to` (the upstream model name), so context-window lookup
+///   keys on the real model.
+/// - `supports_image_input` and `context_window` merge logic is identical
+///   (AND-merge for images, max-merge for windows).
+pub(crate) fn client_facing_model_catalog_entries(
+    platform: &str,
+    members: &[ModelCatalogMember],
+    mode: PoolModelMode,
+) -> Vec<AdvertisedModel> {
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+
+    for member in members {
+        for mapping in &member.capability.mappings {
+            // Skip fallback mappings (claude-model) — they are catch-all
+            // sentinels, not real model entries.
+            if is_fallback_mapping(mapping) {
+                continue;
+            }
+            let to = mapping.to.trim();
+            if to.is_empty() {
+                continue;
+            }
+            let id = catalog_entry_id(mode, member, to);
+            let description = to.to_string();
+            push_unique_model(
+                platform,
+                &mut models,
+                &mut seen,
+                ModelContribution {
+                    id: &id,
+                    base_id: to,
+                    description: &description,
+                    upstream_model: to,
+                    context_window: mapping.context_window,
+                    reasoning_levels: mapping.reasoning_levels.as_deref(),
+                    supports_image_input: mapping
+                        .supports_image_input
+                        .unwrap_or_else(|| default_supports_image_input(to)),
+                },
+            );
+        }
+    }
+
+    models
+}
+
 /// The id one member contributes for one alias. Precise mode is the only place a
 /// prefix appears, so aggregate output stays byte-identical to what the pool
 /// advertised before the mode existed.
@@ -816,10 +881,17 @@ fn is_placeholder_model(value: &str) -> bool {
     value.is_empty() || value == "upstream-model"
 }
 
-fn model_mapping_matches(mapping_from: &str, requested_model: &str) -> bool {
+fn model_mapping_matches(mapping_from: &str, mapping_to: &str, requested_model: &str) -> bool {
     let mapping_from = mapping_from.trim();
+    let mapping_to = mapping_to.trim();
     let requested_model = requested_model.trim();
     if mapping_from == requested_model {
+        return true;
+    }
+    // A third-party client may send the upstream model name (`to`) directly
+    // instead of the alias (`from`) the proxy rewrites.  Match it so the
+    // request routes to accounts that can serve that upstream model.
+    if !mapping_to.is_empty() && mapping_to.eq_ignore_ascii_case(requested_model) {
         return true;
     }
 
@@ -1966,5 +2038,157 @@ mod tests {
             ids,
             vec!["TaBiAI-aaaaaa/gpt-5.6-sol", "TaBiAI-bbbbbb/gpt-5.6-sol"]
         );
+    }
+
+    // --- client_facing_model_catalog_entries tests ---
+
+    fn client_facing_ids(
+        platform: &str,
+        members: &[ModelCatalogMember],
+        mode: PoolModelMode,
+    ) -> Vec<String> {
+        super::client_facing_model_catalog_entries(platform, members, mode)
+            .into_iter()
+            .map(|model| model.id)
+            .collect()
+    }
+
+    #[test]
+    fn client_facing_uses_upstream_model_name_not_alias() {
+        let account = member(
+            "id-one",
+            "Grox",
+            "api",
+            r#"{"model_mappings":[{"from":"claude-sonnet-alias","to":"deepseek-v4.1"}]}"#,
+        );
+
+        let ids = client_facing_ids("claude", &[account], PoolModelMode::Aggregate);
+        assert_eq!(ids, vec!["deepseek-v4.1"]);
+    }
+
+    #[test]
+    fn client_facing_deduplicates_by_upstream_model() {
+        let a = member(
+            "id-one",
+            "Grox",
+            "api",
+            r#"{"model_mappings":[{"from":"claude-sonnet-alias","to":"deepseek-v4.1"}]}"#,
+        );
+        let b = member(
+            "id-two",
+            "sink",
+            "api",
+            r#"{"model_mappings":[{"from":"claude-opus-alias","to":"deepseek-v4.1"}]}"#,
+        );
+
+        let ids = client_facing_ids("claude", &[a, b], PoolModelMode::Aggregate);
+        // Two accounts mapping different aliases to the same upstream model
+        // produce one deduplicated entry.
+        assert_eq!(ids, vec!["deepseek-v4.1"]);
+    }
+
+    #[test]
+    fn client_facing_and_merges_image_input() {
+        let a = member(
+            "id-one",
+            "Grox",
+            "api",
+            r#"{"model_mappings":[{"from":"claude-sonnet-alias","to":"deepseek-v4.1","supports_image_input":true}]}"#,
+        );
+        let b = member(
+            "id-two",
+            "sink",
+            "api",
+            r#"{"model_mappings":[{"from":"claude-opus-alias","to":"deepseek-v4.1","supports_image_input":false}]}"#,
+        );
+
+        let entries =
+            super::client_facing_model_catalog_entries("claude", &[a, b], PoolModelMode::Aggregate);
+        assert_eq!(entries.len(), 1);
+        // AND-merge: one text-only account means no image input.
+        assert!(!entries[0].supports_image_input);
+    }
+
+    #[test]
+    fn client_facing_precise_mode_prefixes_upstream_model() {
+        let account = member(
+            "id-one",
+            "Grox",
+            "api",
+            r#"{"model_mappings":[{"from":"claude-sonnet-alias","to":"deepseek-v4.1"}]}"#,
+        );
+
+        let ids = client_facing_ids("claude", &[account], PoolModelMode::Precise);
+        assert_eq!(ids, vec!["Grox/deepseek-v4.1"]);
+    }
+
+    #[test]
+    fn client_facing_skips_fallback_mapping() {
+        let account = member(
+            "id-one",
+            "Grox",
+            "api",
+            &format!(
+                r#"{{"model_mappings":[{{"from":"{FALLBACK_MODEL_ALIAS}","to":"catch-all-upstream"}},{{"from":"claude-sonnet-alias","to":"deepseek-v4.1"}}]}}"#
+            ),
+        );
+
+        let ids = client_facing_ids("claude", &[account], PoolModelMode::Aggregate);
+        // The fallback mapping is skipped; only the real mapping appears.
+        assert_eq!(ids, vec!["deepseek-v4.1"]);
+    }
+
+    #[test]
+    fn client_facing_skips_baseline_aliases() {
+        // An account with empty mappings contributes nothing — no baseline
+        // aliases like claude-sonnet-alias appear.
+        let account = member("id-one", "Grox", "api", r#"{"model_mappings":[]}"#);
+
+        let ids = client_facing_ids("claude", &[account], PoolModelMode::Aggregate);
+        assert!(ids.is_empty());
+    }
+
+    // --- model_mapping_matches `to` matching tests ---
+
+    #[test]
+    fn supports_requested_model_matches_upstream_to_name() {
+        let capability = parse_model_capability(
+            r#"{"model_mappings":[{"from":"claude-sonnet-alias","to":"deepseek-v4.1"}]}"#,
+        );
+
+        // A third-party client sends the upstream model name directly.
+        assert!(supports_requested_model(
+            "claude",
+            &capability,
+            Some("deepseek-v4.1")
+        ));
+        // The alias still matches (Claude Code native).
+        assert!(supports_requested_model(
+            "claude",
+            &capability,
+            Some("claude-sonnet-alias")
+        ));
+        // An unrelated model does not match.
+        assert!(!supports_requested_model(
+            "claude",
+            &capability,
+            Some("gpt-5.6-sol")
+        ));
+    }
+
+    #[test]
+    fn resolve_mapping_target_returns_to_when_requested_by_upstream_name() {
+        let capability = parse_model_capability(
+            r#"{"model_mappings":[{"from":"claude-sonnet-alias","to":"deepseek-v4.1"}]}"#,
+        );
+
+        // When the client sends the upstream name, the target is the same
+        // upstream name — no rewrite needed.
+        let target = resolve_mapping_target(&capability.mappings, "deepseek-v4.1");
+        assert_eq!(target, Some("deepseek-v4.1"));
+
+        // The alias still resolves to the upstream model.
+        let target = resolve_mapping_target(&capability.mappings, "claude-sonnet-alias");
+        assert_eq!(target, Some("deepseek-v4.1"));
     }
 }
