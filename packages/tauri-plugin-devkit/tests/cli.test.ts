@@ -47,7 +47,7 @@ describe("aplg CLI", () => {
     const files = Object.fromEntries(Object.entries(validProjectFiles()).map(([name, data]) => [`--json/${name}`, data]));
     await withProject(files, async (root) => {
       const out = output(); expect(await runCli(["validate", "--", "--json"], out.io, { cwd: root })).toBe(0);
-      expect(out.stdout).toMatch(/^Valid source project:/); expect(out.stderr).toBe("");
+      expect(out.stdout).toMatch(/^Valid project:/); expect(out.stderr).toBe("");
     });
   });
   test("invalid projects exit 1 with JSON diagnostics and concise stderr", async () => {
@@ -57,10 +57,10 @@ describe("aplg CLI", () => {
       expect(out.stderr).toContain("E_JSON_SYNTAX"); expect(out.stderr).not.toContain(root);
     });
   });
-  test("dist is a clear unavailable validation, not success and not a build invocation", async () => {
+  test("dist reports missing build records without invoking a build", async () => {
     await withProject(validProjectFiles(), async (root) => {
       const out = output(); expect(await runCli(["validate", "--stage", "dist", "--json"], out.io, { cwd: root })).toBe(1);
-      expect(JSON.parse(out.stdout)).toMatchObject({ valid: false, diagnostics: expect.arrayContaining([expect.objectContaining({ code: "E_DIST_VALIDATION_UNAVAILABLE" })]) });
+      expect(JSON.parse(out.stdout)).toMatchObject({ valid: false, diagnostics: expect.arrayContaining([expect.objectContaining({ code: "E_BUILD_RECORD" })]) });
     });
   });
   test.each([

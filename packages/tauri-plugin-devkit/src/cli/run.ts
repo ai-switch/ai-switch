@@ -16,7 +16,7 @@ Usage:
 
 Source validation reads metadata only; it does not run build/install/config code.
 Inspect checks archive structure without extraction or signature verification.
-Dist validation, init and pack are not implemented in this development slice.
+Dist validation checks existing build output; init and pack are not implemented yet.
 `;
 const line = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
 
@@ -26,7 +26,7 @@ export async function runCli(argv: string[], io: CliIo, options: { cwd: string }
   const archive = Array.isArray(argv) && argv[0] === "inspect";
   function report(result: ProjectReport | PackageInspection, code: 0 | 1 | 2): 0 | 1 | 2 {
     if (json) io.stdout(`${JSON.stringify(result)}\n`);
-    if (result.valid) { if (!json) io.stdout(archive ? `Valid archive structure: ${result.manifest.id}@${result.manifest.version}; signature: not-verified\n` : `Valid source project: ${result.manifest.id}@${result.manifest.version}\n`); }
+    if (result.valid) { if (!json) io.stdout(archive ? `Valid archive structure: ${result.manifest.id}@${result.manifest.version}; signature: not-verified\n` : `Valid project: ${result.manifest.id}@${result.manifest.version}\n`); }
     else for (const diagnostic of result.diagnostics) io.stderr(`${line(diagnostic.code)}${diagnostic.path ? ` ${line(diagnostic.path)}` : ""}: ${line(diagnostic.message)}\n`);
     return code;
   }

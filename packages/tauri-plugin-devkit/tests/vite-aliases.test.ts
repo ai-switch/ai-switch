@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { runNodeCommand } from "../../tauri-plugin-runtime/scripts/verification-process.mjs";
 import type { InlineConfig, Rollup } from "vite";
 import { aplgVite } from "../src/vite/index.js";
+import { nodeAliases } from "../src/vite/aliases.js";
 import { createBuildProject } from "./support/build-project.js";
 import { validProjectFiles } from "./support/project.js";
 
@@ -16,7 +17,7 @@ afterAll(async () => { await project?.dispose(); });
 const output = (result: unknown) => (result as Rollup.RollupOutput).output.filter((item) => item.type === "chunk").map((item) => item.code).join("\n");
 async function build(code: string, extra: InlineConfig = {}) {
   await project.write("src/main.ts", code);
-  return project.vite.build({ root: project.root, configFile: false, logLevel: "silent", plugins: aplgVite({ preview: false }), build: { write: false, target: "es2022", minify: false }, ...extra });
+  return project.vite.build({ root: project.root, configFile: false, logLevel: "silent", plugins: [nodeAliases()], build: { write: false, target: "es2022", minify: false }, ...extra });
 }
 
 describe("plugin-only Node import adaptation", () => {

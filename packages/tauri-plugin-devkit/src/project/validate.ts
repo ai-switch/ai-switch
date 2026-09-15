@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { Diagnostic, Manifest } from "@ai-switch/tauri-plugin-runtime/protocol";
+import { inspectBuildFiles } from "../vite/artifacts.js";
 import { validateWebManifest } from "./manifest.js";
 import { ProjectError, errorCode } from "./errors.js";
 import { inspectPath, sameIdentity, samePath } from "./files.js";
@@ -71,7 +72,13 @@ export async function validateProject(root: string, options: ValidateProjectOpti
     if (!record(pkg) || typeof pkg.version !== "string") diagnostics.push({ code: "E_PACKAGE_INVALID", path: "package.json", message: "package.json must be a JSON object with a version string." });
     else if (manifest && pkg.version !== manifest.version) diagnostics.push({ code: "E_VERSION_MISMATCH", path: "package.json/version", message: "Package and manifest versions must agree exactly." });
   }
-  if (options.stage === "dist") diagnostics.push({ code: "E_DIST_VALIDATION_UNAVAILABLE", path: "dist", message: "Artifact validation is not implemented yet; source validation is not proof of distributable output." });
+
   if (diagnostics.length || !manifest) return { valid: false, diagnostics };
+  if (options.stage === "dist") {
+    const output = await inspectBuildFiles(directory.absolute, manifest);
+    if (output.diagnostics.length) return { valid: false, diagnostics: output.diagnostics };
+    return { valid: true, manifest, manifestSha256: files.find((file) => file.path === "aplg.json")!.sha256,
+      files: [...files.filter((file)=>["aplg.json","README.md","LICENSE"].includes(file.path)), ...output.files].sort((a,b)=>a.path<b.path?-1:1), diagnostics: [] };
+  }
   return { valid: true, manifest, manifestSha256: files.find((file) => file.path === "aplg.json")!.sha256, files: files.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0), diagnostics: [] };
 }

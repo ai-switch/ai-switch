@@ -26,6 +26,7 @@
     "test": "node scripts/build.mjs && vitest run",
     "test:types": "tsc --noEmit -p tsconfig.type-tests.json",
     "test:built": "node --test tests/package.test.mjs",
+    "test:browser": "node scripts/build.mjs && playwright test",
     "build": "node scripts/build.mjs",
     "generate:node-types": "node scripts/generate-node-types.mjs",
     "check:node-types": "node scripts/generate-node-types.mjs --check",
@@ -33,6 +34,7 @@
   },
   "dependencies": {
     "@ai-switch/tauri-plugin-runtime": "workspace:0.1.0",
+    "acorn": "8.18.0",
     "es-module-lexer": "3.0.2",
     "jsonc-parser": "3.3.1",
     "parse5": "8.0.1",

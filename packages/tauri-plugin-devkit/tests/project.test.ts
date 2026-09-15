@@ -112,9 +112,9 @@ describe("read-only source project validation", () => {
   test("web-v1 never claims native plugin support", async () => {
     await withProject(changedManifest((m) => { m.permissions.native = true; }), async (root) => { expect(await validateProject(root, { profile: "web-v1" })).toMatchObject({ valid: false, diagnostics: expect.arrayContaining([expect.objectContaining({ code: "E_PROFILE_UNSUPPORTED" })]) }); });
   });
-  test("dist explicitly reports that artifact validation is not implemented in D1", async () => {
+  test("dist rejects output that was never produced by the build hook", async () => {
     await withProject({ ...validProjectFiles(), "dist/index.html": "already built" }, async (root) => {
-      expect(await validateProject(root, { stage: "dist" })).toMatchObject({ valid: false, diagnostics: expect.arrayContaining([expect.objectContaining({ code: "E_DIST_VALIDATION_UNAVAILABLE" })]) });
+      expect(await validateProject(root, { stage: "dist" })).toMatchObject({ valid: false, diagnostics: expect.arrayContaining([expect.objectContaining({ code: "E_BUILD_RECORD" })]) });
     });
   });
   test("rejects unsupported API options instead of silently falling back to source", async () => {

@@ -12,7 +12,7 @@
 
 **Prerequisite plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-runtime.md`。R1/R2 的导出/契约是唯一权威，本文只引用，不维护复制的 manifest/wire schema。
 
-**状态：** D1–D3 项目源码校验、只读归档检查、CLI、Vite Node alias 与浏览器 ambient 类型已实施并通过 Windows 本地验证；D4–D9 待实施。dist 校验在 D4 完成前明确返回不可用，所有 npm 包仍未发布。未实施部分的方法、CLI 和代码片段仍是目标契约。
+**状态：** D1–D4 项目源码/产物校验、归档检查、CLI、Vite Node alias、握手 bootstrap 与浏览器 ambient 类型已实施并通过 Windows 本地验证；D5–D9 待实施。所有 npm 包仍未发布。未实施部分的方法、CLI 和代码片段仍是目标契约。
 
 ## Global Constraints
 
@@ -363,7 +363,7 @@ git commit -m "feat(devkit): 为插件构建适配 Node 子集接口"
 
 **Interfaces:** 消费 R4 `connectPlugin` 与 R5 host；内部 `inspectBuildFiles(root:string,manifest:Manifest):Promise<{files:PackFile[];diagnostics:Diagnostic[]}>`，由 Vite buildEnd/writeBundle 与 `validateProject(stage:"dist")` 共用。不消费项目 Vite config 来“重现”安全检查。
 
-- [ ] **Step 1：写握手前后可观察顺序与资源反例。** `tests/browser/bootstrap.spec.ts` 的 fixture host 提供按钮 `Connect plugin`，在点击前不发送 runtime connect；plugin business 入口设置一个可见文本 `business-started`。测试真实打包产物，而非伪造两个函数调用顺序。
+- [x] **Step 1：写握手前后可观察顺序与资源反例。** `tests/browser/bootstrap.spec.ts` 的 fixture host 提供按钮 `Connect plugin`，在点击前不发送 runtime connect；plugin business 入口设置一个可见文本 `business-started`。测试真实打包产物，而非伪造两个函数调用顺序。
 
 ```ts
 import { expect, test } from "@playwright/test";
@@ -398,8 +398,8 @@ test("a production HTML entry cannot depend on a remote script", async () => {
 });
 ```
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit exec vitest run tests/bootstrap.test.ts tests/artifact-policy.test.ts` 与 `exec playwright test tests/browser/bootstrap.spec.ts`，测试项目显式使用真实 runtime fixture 后端。
-- [ ] **Step 3：通过虚拟模块注入启动器，而不是多加一个并行 script。** 首期接受一个本地外部 `type=module` 业务入口，零脚本纯 HTML 也允许；拒绝多个入口、内联 JS、classic script、inline handler、remote source。parse5 解析 HTML，移除原业务 script，替换为 Vite 虚拟 bootstrap 入口。启动代码必须使用动态 import：
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit exec vitest run tests/bootstrap.test.ts tests/artifact-policy.test.ts` 与 `exec playwright test tests/browser/bootstrap.spec.ts`，测试项目显式使用真实 runtime fixture 后端。
+- [x] **Step 3：通过虚拟模块注入启动器，而不是多加一个并行 script。** 首期接受一个本地外部 `type=module` 业务入口，零脚本纯 HTML 也允许；拒绝多个入口、内联 JS、classic script、inline handler、remote source。parse5 解析 HTML，移除原业务 script，替换为 Vite 虚拟 bootstrap 入口。启动代码必须使用动态 import：
 
 ```ts
 import { connectPlugin } from "@ai-switch/tauri-plugin-runtime/plugin";
@@ -415,8 +415,8 @@ await import("/src/main.ts");
 
 清单原始字节不得在构建时改变；资源图必须存在、规范路径下且被打包候选列表覆盖。静态资源 CORS/CSP 的正确配置由宿主负责，构建器不能给应用管理 API 设置宽松 CORS。
 
-- [ ] **Step 4：GREEN。** 测试 bootstrap 单次注入、零入口、多个入口失败、脚本异常被报告、源 manifest 修改失败、路径逃逸、相对图片/CSS、unicode 文件名规范、外部网络引用失败；通过严格 CSP 的真实 iframe 验证不需 unsafe-eval。
-- [ ] **Step 5：提交。**
+- [x] **Step 4：GREEN。** 测试 bootstrap 单次注入、零入口、多个入口失败、脚本异常被报告、源 manifest 修改失败、路径逃逸、相对图片/CSS、unicode 文件名规范、外部网络引用失败；通过严格 CSP 的真实 iframe 验证不需 unsafe-eval。
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-devkit/src/vite packages/tauri-plugin-devkit/src/project packages/tauri-plugin-devkit/tests packages/tauri-plugin-devkit/playwright.config.ts
@@ -741,3 +741,18 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 - runtime **26 文件 / 364 项**、typecheck 和独立 tarball **8 项 Chromium/WebKit**复验通过；主应用 typecheck 与 **74 文件 / 803 项**通过。Windows Node 22.22.2 以外 Linux/Node24 的既有验证缺口未解除。
 - 当前 `/vite` 只做 D3 adaptation；manifestPath 明确返回 APLG_OPTION_UNAVAILABLE，preview 预留但不创建 provider，不注入握手 bootstrap、不宣称 dist/离线产物合格。D4/D7、pack/init、真实 Rust/Tauri/Web、签名安装与商店发布仍待实施。README 已说明这些边界。
 - 本任务顺序本地实施/提交，无 subagent、Cargo、新 target、推送、tag、npm publish 或远程 plugin-store/plugin-example 修改。
+### D4（2026-09-15）
+
+- 先建立 bootstrap/资源/路径/record 失败测试，再实现 Vite 受控启动器与 Node 只读产物检查。源码 HTML 经 parse5 检查后，用虚拟模块替换唯一 module 业务 script；先 await connectPlugin，后动态 import 校验过的本地入口，不静态抢跑、不并列追加脚本。纯静态零业务脚本 HTML 同样注入只负责宿主握手的 bootstrap，business 字段为 null。
+- 连接失败/业务异常输出固定安全文字，不回显原始异常、路径或凭据，也不回退直跑。重复安装 hook、多个 HTML/业务脚本、classic/inline/importmap、inline handler/style、base、活动嵌入文档等明确拒绝。支持带/不带 ./ 的正常 HTML 相对 src，不与 ESM bare specifier 规则混淆。
+- config/buildStart/renderStart 校验 base ./、项目本地 dist、ES2022、ESM/动态分块、无 source map，并在清理前检查目录/junction 与后续配置变更。source manifest 以原始字节 SHA 检查构建期间不变；manifestPath 可为项目内规范相对路径。单独 validateProject 的根源码契约仍为 aplg.json，必须与记录的源清单一致，不给任意项目配置执行权。
+- 禁用未经检查的 publicDir 复制，在 buildStart 读取/检查 public 路径、links、白名单和预算后显式 emit，纳入同一 record/资源图。公共输入总缓冲上限 128 MiB，record 上限 1 MiB，文件/条目总预算引用 runtime。公共与生成输出碰撞、秘密文件及非法资源在 emit/写出前失败。
+- 产物记录 dist/aplg-build.json 保存格式/工具版本、源 manifest 路径/精确 hash、HTML/bootstrap/business 路径和排序文件 hash（不包含自身摘要）；生成快照与落盘重新扫描共用资源政策。检查记录格式、来源、文件列表/尺寸/字节 hash、入口 script、动态边及不允许 business 静态可达的约束。产物修改、资源缺失、清单改变和伪造不一致记录均失败。
+- HTML/SVG URL/实体/srcset、CSS url/import/image-set/转义、JS static/dynamic imports、字面量 URL/Worker、require/source-map comment 分别用 parse5、PostCSS/value-parser、es-module-lexer、Acorn AST 检查。补充固定 **acorn@8.18.0** 生产依赖，以免纯 Node CLI 为额外语法检查加载 optional Vite；仅新增该依赖与锁条目，不升级主应用依赖。
+- 远程/CDN/协议相对或系统绝对路径、bare/Node/宿主模块、encoded traversal、source-root 绝对路径、source maps、非法 UTF-8/非规范文件名与未知文件集合被拒绝；普通图片/CSS/Unicode/fragment 与限定 data:image 有正向测试。已构建非压缩输出只移除经过语法定位的来源注释，不文本替换业务代码。
+- `validateProject(stage:"dist")` 与 CLI 现已检查已有产物并返回包候选文件，不再返回 unavailable；仍不隐式 build/安装/运行 config。源码 stage 保持 D1 五文件读模型。D3 alias-only 回归改为单独驱动其 hook，其完整公开 aplgVite 的时序由本批 D4 集成测试证明，避免旧“无宿主直跑”测试与新行为互相矛盾。
+- 安全边界有显式测试：record 是未签名元数据，攻击者同时修改脚本与 record 可以保持静态图自洽；静态资源策略不能证明任意脚本真的握手，不能阻止所有 computed fetch/eval/外部构建 hook。不得作为签名、来源认证、权限或 OS/浏览器沙箱。真实生成器行为以浏览器测试验证；D5/D8/安装端仍须独立验证。
+- 包内 **12 文件 / 410 项**测试（相对 D3 增加 76 项）通过；typecheck、Node/浏览器公共类型、生成物校验、build 与构建后 **5 项**通过。无框架真实宿主/独立 runtime tarball、严格 CSP、两来源 opaque iframe 的 **7 场景 × Chromium/WebKit = 14 项**通过，覆盖握手门控、无重复副作用、拒绝连接、业务异常、无宿主、静态 HTML、挂载清理。审查发现“静态 HTML 完全不注入客户端”会使 R5 mount 等待到超时，先补实际浏览器失败测试后改为 handshake-only bootstrap，验证静态页也能正常挂载。
+- 首轮 RED 的未受保护输出配置曾写入本 worktree 的 packages/outside 两个测试资产，已核对内容并按精确文件/空目录删除。初版 Playwright webServer 在 Windows 强制终止时未执行 finally，遗留一次外部 fixture 目录；后续改为资产入内存后、宣布 ready 前清理，复跑不再创建残留。对早期外部临时目录的递归清理命令被工具策略拒绝，不绕过限制；残留路径为 `C:\Users\Admin\AppData\Local\Temp\aplg-tarball-10URSa`，与工作树代码无关。
+- runtime **26 文件 / 364 项**、typecheck 和独立 tarball **8 项 Chromium/WebKit**复验通过；主应用 typecheck 与 **74 文件 / 803 项**回归通过。测试工具和业务构建均为 Windows Node 22.22.2，Linux/Node24 的既有验收缺口仍保留。
+- README、第三方许可和整体设计状态同步；本任务只本地提交，不运行 Cargo、不新建 target、不推送/tag/npm publish、不修改远程 plugin-example/plugin-store。D5 可复现打包、D6 init、D7 模拟宿主、D8 双包消费与 D9 授权发布未提前交付。

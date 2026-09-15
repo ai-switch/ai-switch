@@ -31,6 +31,6 @@ test("generation check rejects stale declarations without rewriting them", async
 test.each([null, [], {unknown:true}, {preview:"yes"}].map((options)=>({options})))("rejects invalid plugin options: %j", ({ options }) => {
   expect(() => aplgVite(options as never)).toThrow(/APLG_INVALID_OPTIONS/);
 });
-test("D3 does not pretend that custom manifest/bootstrap integration is implemented", () => {
-  expect(() => aplgVite({manifestPath:"custom.json"})).toThrow(/APLG_OPTION_UNAVAILABLE/);
+test("custom manifest options construct the build hook without reading the project", () => {
+  expect(aplgVite({manifestPath:"custom.json"})).toHaveLength(2);
 });
