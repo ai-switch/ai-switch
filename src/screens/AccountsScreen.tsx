@@ -1743,10 +1743,12 @@ function ImageMappingCapabilityFields({
     onPatch({ capabilities: next.length ? next : null });
   };
 
+  // Keep each sr-only focus target inside its visible tag; otherwise focusing
+  // it can scroll the outer page instead of this dialog or drawer.
   return (
     <div className="flex flex-wrap items-center gap-2 border-t border-stone-100 pt-2">
       <span className="text-[11px] font-semibold text-stone-500">模型能力</span>
-      <label className="inline-flex cursor-default items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-100 px-2 py-1 text-[11px] font-semibold text-emerald-900">
+      <label className="relative inline-flex cursor-default items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-100 px-2 py-1 text-[11px] font-semibold text-emerald-900">
         <input
           aria-label={`模型能力 文本 ${index + 1}`}
           checked
@@ -1757,7 +1759,7 @@ function ImageMappingCapabilityFields({
         文本
       </label>
       <label
-        className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-semibold motion-control ${
+        className={`relative inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-semibold motion-control ${
           supportsImageInput
             ? "border-emerald-300 bg-emerald-100 text-emerald-900"
             : "border-stone-200 bg-white text-stone-500 hover:bg-stone-50"
@@ -1781,7 +1783,7 @@ function ImageMappingCapabilityFields({
               ["image.edit", "图片编辑"],
             ] as const).map(([capability, label]) => (
               <label
-                className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-semibold motion-control ${
+                className={`relative inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-semibold motion-control ${
                   capabilities.includes(capability)
                     ? "border-emerald-300 bg-emerald-100 text-emerald-900"
                     : "border-stone-200 bg-white text-stone-500 hover:bg-stone-50"
@@ -1877,7 +1879,7 @@ function CodexMappingCapabilityFields({
           const checked = effectiveLevels.includes(level);
           return (
             <label
-              className={`inline-flex cursor-pointer items-center rounded-lg border px-2 py-1 text-[11px] font-semibold motion-control ${
+              className={`relative inline-flex cursor-pointer items-center rounded-lg border px-2 py-1 text-[11px] font-semibold motion-control ${
                 checked
                   ? "border-violet-300 bg-violet-100 text-violet-900"
                   : "border-stone-200 bg-white text-stone-500 hover:bg-stone-50"

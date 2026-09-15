@@ -3655,6 +3655,66 @@ describe("AccountsScreen", () => {
     expect(await screen.findByText(/共 1 条/)).toBeInTheDocument();
   });
 
+  it.each(["create", "edit"] as const)(
+    "anchors hidden model-tag checkboxes in the %s form through repeated toggles",
+    async (mode) => {
+      if (mode === "edit") {
+        vi.mocked(listRouteCredentials).mockResolvedValue([
+          credentialsFixture[0],
+          {
+            ...credentialsFixture[1],
+            config_json: JSON.stringify({
+              ...JSON.parse(credentialsFixture[1].config_json),
+              model_mappings: [{ from: "gpt-5.5", to: "provider-gpt" }],
+            }),
+          },
+        ]);
+      }
+      renderScreen();
+      await userEvent.click(await screen.findByRole("button", {
+        name: mode === "create" ? "新增账号" : "编辑 API Account",
+      }));
+      if (mode === "create") {
+        await userEvent.click(screen.getByRole("button", { name: "新增映射" }));
+        fireEvent.change(screen.getByLabelText("请求模型 1"), { target: { value: "gpt-5.5" } });
+        fireEvent.change(screen.getByLabelText("上游模型 1"), { target: { value: "provider-gpt" } });
+      }
+
+      const tags = screen.getAllByRole("checkbox", { name: /^(推理程度|模型能力) / });
+      const initial = tags.map((tag) => (tag as HTMLInputElement).checked);
+      const assertAnchored = () => {
+        // jsdom has no scrolling layout. Guard the containing block that keeps
+        // sr-only focus targets inside their visible tags, not the outer page.
+        for (const tag of tags) {
+          expect(tag).toHaveClass("sr-only");
+          expect(tag.closest("label")).toHaveClass("relative");
+        }
+      };
+      assertAnchored();
+      for (const name of ["推理程度 high 1", "模型能力 图片输入 1", "模型能力 图片生成 1", "模型能力 图片编辑 1"]) {
+        const checkbox = screen.getByRole("checkbox", { name }) as HTMLInputElement;
+        const checked = checkbox.checked;
+        for (let count = 0; count < 4; count += 1) {
+          await userEvent.click(checkbox.closest("label")!);
+          expect(checkbox.checked).toBe(count % 2 === 0 ? !checked : checked);
+          assertAnchored();
+        }
+        // Keep native focus/Space behavior instead of suppressing mouse focus
+        // or replacing the inputs with non-keyboard-accessible tags.
+        checkbox.focus();
+        await userEvent.keyboard("[Space]");
+        expect(checkbox.checked).toBe(!checked);
+        await userEvent.keyboard("[Space]");
+        expect(checkbox.checked).toBe(checked);
+        expect(checkbox).toHaveFocus();
+      }
+      expect(tags.map((tag) => (tag as HTMLInputElement).checked)).toEqual(initial);
+      expect(screen.getByRole("checkbox", { name: "模型能力 文本 1" })).toBeDisabled();
+      expect(createApiRouteCredential).not.toHaveBeenCalled();
+      expect(updateRouteCredential).not.toHaveBeenCalled();
+    },
+  );
+
   it("saves a Codex mapping's context window and custom reasoning levels", async () => {
     renderScreen();
 
