@@ -2,7 +2,6 @@ import JSZip from "jszip";
 import type { CSSProperties } from "react";
 
 import codex2007BlueSkinManifest from "../skins/codex-2007-blue/skin.json";
-import rescuePupsAdventureBaySkinManifest from "../skins/rescue-pups-adventure-bay/skin.json";
 import starshipCockpitSkinManifest from "../skins/starship-cockpit/skin.json";
 
 export const VIBE_SKIN_STORAGE_KEY = "ai-switch.vibe.custom-skin";
@@ -272,7 +271,6 @@ export type VibeSkinTaskbarBlock = {
 
 export const VIBE_SKIN_DECORATION_VARIANTS = [
   "codex-2007",
-  "rescue-pups",
   "starship-cockpit",
 ] as const;
 
@@ -281,12 +279,6 @@ export type VibeSkinDecorationVariant = (typeof VIBE_SKIN_DECORATION_VARIANTS)[n
 export const VIBE_SKIN_DECORATION_TEMPLATES = [
   "qq-mascot",
   "qq-person",
-  "rescue-rider",
-  "rescue-hq",
-  "rescue-dog-team",
-  "rescue-civic",
-  "rescue-mayor",
-  "rescue-chicken",
   "space-ai-core",
   "space-ship",
   "space-radar",
@@ -496,7 +488,6 @@ const starshipCockpitAudioAssetUrls = {
 
 export const BUILT_IN_VIBE_SKINS: VibeSkinDefinition[] = [
   asBuiltInVibeSkin(codex2007BlueSkinManifest),
-  asBuiltInVibeSkin(rescuePupsAdventureBaySkinManifest),
   withBuiltInAudioAssetUrls(asBuiltInVibeSkin(starshipCockpitSkinManifest), starshipCockpitAudioAssetUrls),
 ];
 

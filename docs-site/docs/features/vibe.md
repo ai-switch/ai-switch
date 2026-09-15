@@ -58,34 +58,35 @@ Vibe 在桌面端和 [Web 服务模式](/deploy/web-service) 下都可用——�
 
 选择结果写在浏览器本地存储的 `ai-switch.vibe.appearance` 键里（含主题、皮肤 id、音效开关），导入的自定义皮肤单独存在 `ai-switch.vibe.custom-skin`。
 
+如果此前选中的内置皮肤已不可用，会自动回退到默认内置皮肤，主题模式和其他外观设置保持不变。旧自定义皮肤仍可导入和读取，不再支持的装饰变体与模板会被忽略。
+
 ::: tip 皮肤模式下终端是透明的
 在皮肤模式下，Vibe 会把 xterm 的 wrapper、viewport、screen、rows、canvas 各层背景都置为透明，好让皮肤定义的 `terminalShell` 背景（图片、渐变、边框）透出来。所以皮肤的可读性取决于 `terminal.foreground` 等前景色配置，而不是 `terminal.background`。
 :::
 
-## 三套内置皮肤
+## 两套内置皮肤
 
-内置皮肤和用户导入的皮肤走的是**同一套解析逻辑**——它们就是仓库里三个普通的清单文件，没有任何特殊通道：
+内置皮肤和用户导入的皮肤走的是**同一套解析逻辑**——它们就是仓库里两个普通的清单文件，没有任何特殊通道：
 
 - `src/skins/codex-2007-blue/skin.json`
-- `src/skins/rescue-pups-adventure-bay/skin.json`
 - `src/skins/starship-cockpit/skin.json`
 
-三者的实际差别：
+两者的实际差别：
 
-| | Codex 2007 Blue | 汪汪队救援主题 | 星舰驾驶舱 |
-| --- | --- | --- | --- |
-| 清单 `id` | `codex-2007-blue` | `rescue-pups-adventure-bay` | `starship-cockpit` |
-| `decorations.variant` | `codex-2007` | `rescue-pups` | `starship-cockpit` |
-| 定制的区域数 | 31 | 49 | 49 |
-| `blocks` | titlebar / profile / showcase / statusbar / taskbar | 同左 | 另有 `launch`（启动栏文案） |
-| 头像模板 | 无（用 showcase 吉祥物） | `rescue-rider` | `space-ai-core` |
-| 展示台模板 | `qq-mascot` | `rescue-hq` | `space-ship` |
-| 右侧卡片 | `qq-person` | `rescue-dog-team`、`rescue-civic` | `space-radar`、`space-ship`、`space-starmap`、`space-telemetry` |
-| 任务栏开始按钮 | 「开始」 | 「出动」 | 「舰桥」 |
-| 音效 | 无 | 无 | **有**，3 个事件音 + 1 条环境音 |
-| 附带资源 | 无 | 无 | `assets/sounds/` 下三个 wav |
+| | Codex 2007 Blue | 星舰驾驶舱 |
+| --- | --- | --- |
+| 清单 `id` | `codex-2007-blue` | `starship-cockpit` |
+| `decorations.variant` | `codex-2007` | `starship-cockpit` |
+| 定制的区域数 | 31 | 49 |
+| `blocks` | titlebar / profile / showcase / statusbar / taskbar | 另有 `launch`（启动栏文案） |
+| 头像模板 | 无（用 showcase 吉祥物） | `space-ai-core` |
+| 展示台模板 | `qq-mascot` | `space-ship` |
+| 右侧卡片 | `qq-person` | `space-radar`、`space-ship`、`space-starmap`、`space-telemetry` |
+| 任务栏开始按钮 | 「开始」 | 「舰桥」 |
+| 音效 | 无 | **有**，3 个事件音 + 1 条环境音 |
+| 附带资源 | 无 | `assets/sounds/` 下三个 wav |
 
-三套皮肤都用纯 CSS 渐变和应用内置的矢量装饰件构造视觉，**不依赖外部图片**，所以清单本身可以直接当作自定义皮肤的模板抄。
+两套皮肤都用纯 CSS 渐变和应用内置的矢量装饰件构造视觉，**不依赖外部图片**，所以清单本身可以直接当作自定义皮肤的模板抄。
 
 只有星舰驾驶舱带 `assets/` 目录，也只有它定义了 `audio`。
 
@@ -269,10 +270,10 @@ fontSize  lineHeight  letterSpacing  textTransform
 
 装饰件不是自由的 HTML，而是从白名单里挑应用内置的矢量图形：
 
-- `variant`：`codex-2007`、`rescue-pups`、`starship-cockpit`
+- `variant`：`codex-2007`、`starship-cockpit`
 - `titlebarMark`：标题栏角标文字，超过 4 个字符会被截断
-- `avatarTemplate` / `showcaseTemplate` / `rightCards[].template` / `rightCards[].items[].template`：从 13 个模板里选——`qq-mascot`、`qq-person`、`rescue-rider`、`rescue-hq`、`rescue-dog-team`、`rescue-civic`、`rescue-mayor`、`rescue-chicken`、`space-ai-core`、`space-ship`、`space-radar`、`space-telemetry`、`space-starmap`
-- `items[].tone`：`red`、`blue`、`yellow`、`green`、`pink`、`orange`、`neutral`
+- `avatarTemplate` / `showcaseTemplate` / `rightCards[].template` / `rightCards[].items[].template`：从 7 个模板里选——`qq-mascot`、`qq-person`、`space-ai-core`、`space-ship`、`space-radar`、`space-telemetry`、`space-starmap`
+- `items[].tone`：为兼容旧皮肤包保留的颜色元数据，当前模板不使用它。可选值：`red`、`blue`、`yellow`、`green`、`pink`、`orange`、`neutral`
 
 不在白名单里的值会被静默忽略，不会报错也不会渲染。
 
@@ -316,7 +317,7 @@ fontSize  lineHeight  letterSpacing  textTransform
 
 ## 做一套自己的皮肤
 
-1. 复制 `src/skins/` 下任意一个内置皮肤目录，或者从 `fixtures/vibe-skins/rescue-pups/skin.json` 起步。
+1. 复制 `src/skins/codex-2007-blue/skin.json` 作为无资源示例，或复制 `src/skins/` 下其他内置皮肤目录及其资源。
 2. 改 `id`（必须唯一）和 `name`。
 3. 调 `ui` 的调色板，这一步影响最大、收益最快。
 4. 需要精修时再逐个分区写 `regions`，需要换文案时写 `blocks`。

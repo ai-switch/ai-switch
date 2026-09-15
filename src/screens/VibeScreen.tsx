@@ -52,9 +52,7 @@ import type {
   VibeAppearanceTheme,
   VibeSkinAudioEvent,
   VibeSkinDecorationCard,
-  VibeSkinDecorationItem,
   VibeSkinDecorationTemplate,
-  VibeSkinDecorationTone,
   VibeSkinDecorationVariant,
   VibeSkinDefinition,
   VibeSkinTaskbarMenuItem,
@@ -613,20 +611,6 @@ function skinVariantClass(variant: VibeSkinDecorationVariant | undefined) {
   return variant ? `vibe-skin--${variant}` : "";
 }
 
-function renderRescueDog(label: string, tone: VibeSkinDecorationTone = "neutral") {
-  return (
-    <span
-      aria-label={label}
-      className={`vibe-skin-rescue-dog vibe-skin-rescue-dog-${tone}`}
-      role="img"
-    >
-      <span className="vibe-skin-rescue-dog-ear vibe-skin-rescue-dog-ear-left" />
-      <span className="vibe-skin-rescue-dog-ear vibe-skin-rescue-dog-ear-right" />
-      <span className="vibe-skin-rescue-dog-face" />
-    </span>
-  );
-}
-
 function renderSkinTemplateFigure(
   template: VibeSkinDecorationTemplate | undefined,
   label: string,
@@ -663,73 +647,6 @@ function renderSkinTemplateFigure(
         <span className="vibe-skin-qq-person-body" />
         <span className="vibe-skin-qq-person-hand vibe-skin-qq-person-hand-left" />
         <span className="vibe-skin-qq-person-hand vibe-skin-qq-person-hand-right" />
-      </div>
-    );
-  }
-
-  if (template === "rescue-rider") {
-    return (
-      <div
-        aria-label={label}
-        className={`vibe-skin-rescue-avatar-mark ${className}`}
-        data-testid="vibe-skin-rescue-avatar"
-        role="img"
-      >
-        <span className="vibe-skin-rescue-avatar-face" />
-        <span className="vibe-skin-rescue-avatar-hair" />
-        <span className="vibe-skin-rescue-avatar-vest" />
-      </div>
-    );
-  }
-
-  if (template === "rescue-hq") {
-    return (
-      <div
-        aria-label={label}
-        className={`vibe-skin-showcase-figure vibe-skin-rescue-hq ${className}`}
-        data-testid="vibe-skin-rescue-hq"
-        role="img"
-      >
-        <span className="vibe-skin-rescue-hq-sky" />
-        <span className="vibe-skin-rescue-hq-antenna" />
-        <span className="vibe-skin-rescue-hq-deck" />
-        <span className="vibe-skin-rescue-hq-window vibe-skin-rescue-hq-window-left" />
-        <span className="vibe-skin-rescue-hq-window vibe-skin-rescue-hq-window-right" />
-        <span className="vibe-skin-rescue-hq-tower" />
-        <span className="vibe-skin-rescue-hq-badge">总部</span>
-        <span className="vibe-skin-rescue-hq-base" />
-        <span className="vibe-skin-rescue-hq-hill vibe-skin-rescue-hq-hill-left" />
-        <span className="vibe-skin-rescue-hq-hill vibe-skin-rescue-hq-hill-right" />
-      </div>
-    );
-  }
-
-  if (template === "rescue-mayor") {
-    return (
-      <div
-        aria-label={label}
-        className={`vibe-skin-rescue-mayor ${className}`}
-        data-testid="vibe-skin-rescue-mayor"
-        role="img"
-      >
-        <span className="vibe-skin-rescue-mayor-hat" />
-        <span className="vibe-skin-rescue-mayor-head" />
-        <span className="vibe-skin-rescue-mayor-body" />
-      </div>
-    );
-  }
-
-  if (template === "rescue-chicken") {
-    return (
-      <div
-        aria-label={label}
-        className={`vibe-skin-rescue-chicken ${className}`}
-        data-testid="vibe-skin-rescue-chicken"
-        role="img"
-      >
-        <span className="vibe-skin-rescue-chicken-comb" />
-        <span className="vibe-skin-rescue-chicken-body" />
-        <span className="vibe-skin-rescue-chicken-wing" />
       </div>
     );
   }
@@ -791,24 +708,6 @@ function renderSkinTemplateFigure(
   return null;
 }
 
-function renderSkinDecorationItemFigure(item: VibeSkinDecorationItem) {
-  if (item.image) {
-    return (
-      <img
-        alt={`${item.label} image`}
-        className="vibe-skin-decoration-image max-h-28 w-full object-contain"
-        src={item.image}
-      />
-    );
-  }
-
-  if (item.template) {
-    return renderSkinTemplateFigure(item.template, item.label);
-  }
-
-  return null;
-}
-
 function SkinDecorationCard({
   card,
   onHologramInteract,
@@ -842,59 +741,6 @@ function SkinDecorationCard({
           <span className="rounded-full border px-2 py-0.5 text-[11px] text-[var(--vibe-muted-text)]">
             {friend?.badge ?? "在线"}
           </span>
-        </div>
-      </div>
-    );
-  }
-
-  if (card.template === "rescue-dog-team") {
-    return (
-      <div
-        className="vibe-skin-right-card vibe-skin-rescue-team-card mt-3 rounded-2xl border p-3"
-        data-testid="vibe-skin-rescue-dogs"
-      >
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-[10px] font-semibold tracking-[0.18em] text-[var(--vibe-muted-text)]">
-            {card.title ?? "汪汪队员"}
-          </p>
-          {card.badge && (
-            <span className="rounded-full border px-2 py-0.5 text-[10px] font-semibold">
-              {card.badge}
-            </span>
-          )}
-        </div>
-        <div className="mt-3 grid grid-cols-3 gap-2">
-          {(card.items ?? []).map((item) => (
-            <span className="grid place-items-center" key={`${item.label}-${item.tone ?? "neutral"}`}>
-              {item.image ? (
-                <img
-                  alt={`${item.label} image`}
-                  className="vibe-skin-decoration-image h-12 w-12 object-contain"
-                  src={item.image}
-                />
-              ) : (
-                renderRescueDog(item.label, item.tone)
-              )}
-            </span>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  if (card.template === "rescue-civic") {
-    return (
-      <div className="vibe-skin-right-card vibe-skin-rescue-civic-card mt-3 rounded-2xl border p-3">
-        <p className="text-[10px] font-semibold tracking-[0.18em] text-[var(--vibe-muted-text)]">
-          {card.title ?? "冒险湾市政"}
-        </p>
-        <div className="vibe-skin-rescue-civic-stage mt-3 grid grid-cols-2 gap-2 rounded-2xl border p-2">
-          {(card.items ?? []).map((item) => (
-            <div className="grid place-items-center gap-1" key={item.label}>
-              {renderSkinDecorationItemFigure(item)}
-              <span className="text-[11px] font-semibold">{item.label}</span>
-            </div>
-          ))}
         </div>
       </div>
     );
@@ -2199,7 +2045,10 @@ export function VibeScreen({ onExitVibe }: VibeScreenProps) {
                           src={skinBlocks.profile.avatar}
                         />
                       ) : decorations?.avatarTemplate ? (
-                        renderSkinTemplateFigure(decorations.avatarTemplate, "莱德队长头像")
+                        renderSkinTemplateFigure(
+                          decorations.avatarTemplate,
+                          `${skinBlocks.profile.name} avatar`,
+                        )
                       ) : (
                         <AiSwitchLogo className="h-9 w-9 rounded-xl" />
                       )}

@@ -58,34 +58,35 @@ The appearance panel (reachable from the skin taskbar's appearance entry, or the
 
 Your choice is persisted in browser local storage under `ai-switch.vibe.appearance` (theme, skin id, sound toggle). An imported custom skin lives separately under `ai-switch.vibe.custom-skin`.
 
+If a previously selected bundled skin is no longer available, Vibe falls back to the default bundled skin without changing the theme mode or other appearance preferences. Older custom skins can still be imported and loaded; unsupported decoration variants and templates are ignored.
+
 ::: tip The terminal is transparent in skin mode
 In skin mode Vibe forces the xterm wrapper, viewport, screen, rows, and canvas layers to transparent backgrounds so the skin's `terminalShell` styling (image, gradient, border) shows through. Readability therefore depends on your foreground colours such as `terminal.foreground`, not on `terminal.background`.
 :::
 
-## The three bundled skins
+## The two bundled skins
 
-Bundled skins and imported skins go through **exactly the same parser** — they are three ordinary manifest files in the repository, with no privileged path:
+Bundled skins and imported skins go through **exactly the same parser** — they are two ordinary manifest files in the repository, with no privileged path:
 
 - `src/skins/codex-2007-blue/skin.json`
-- `src/skins/rescue-pups-adventure-bay/skin.json`
 - `src/skins/starship-cockpit/skin.json`
 
 How they actually differ:
 
-| | Codex 2007 Blue | Rescue Pups (汪汪队救援主题) | Starship Cockpit (星舰驾驶舱) |
-| --- | --- | --- | --- |
-| Manifest `id` | `codex-2007-blue` | `rescue-pups-adventure-bay` | `starship-cockpit` |
-| `decorations.variant` | `codex-2007` | `rescue-pups` | `starship-cockpit` |
-| Regions styled | 31 | 49 | 49 |
-| `blocks` | titlebar / profile / showcase / statusbar / taskbar | same | same, plus `launch` |
-| Avatar template | none (uses the showcase mascot) | `rescue-rider` | `space-ai-core` |
-| Showcase template | `qq-mascot` | `rescue-hq` | `space-ship` |
-| Right-rail cards | `qq-person` | `rescue-dog-team`, `rescue-civic` | `space-radar`, `space-ship`, `space-starmap`, `space-telemetry` |
-| Taskbar start button | 开始 | 出动 | 舰桥 |
-| Audio | none | none | **yes** — 3 event sounds + 1 ambient loop |
-| Bundled assets | none | none | three WAVs under `assets/sounds/` |
+| | Codex 2007 Blue | Starship Cockpit (星舰驾驶舱) |
+| --- | --- | --- |
+| Manifest `id` | `codex-2007-blue` | `starship-cockpit` |
+| `decorations.variant` | `codex-2007` | `starship-cockpit` |
+| Regions styled | 31 | 49 |
+| `blocks` | titlebar / profile / showcase / statusbar / taskbar | same, plus `launch` |
+| Avatar template | none (uses the showcase mascot) | `space-ai-core` |
+| Showcase template | `qq-mascot` | `space-ship` |
+| Right-rail cards | `qq-person` | `space-radar`, `space-ship`, `space-starmap`, `space-telemetry` |
+| Taskbar start button | 开始 | 舰桥 |
+| Audio | none | **yes** — 3 event sounds + 1 ambient loop |
+| Bundled assets | none | three WAVs under `assets/sounds/` |
 
-All three build their look from pure CSS gradients and the app's built-in vector decorations, so **none of them depends on external images**. That makes their manifests directly copyable as templates for your own skin.
+Both build their look from pure CSS gradients and the app's built-in vector decorations, so **none of them depends on external images**. That makes their manifests directly copyable as templates for your own skin.
 
 Starship Cockpit is the only one with an `assets/` directory, and the only one that defines `audio`.
 
@@ -269,10 +270,10 @@ The menu can also carry `{"type": "separator"}` dividers and decorative entries 
 
 Decorations are not free-form HTML. You pick from an allowlist of vector graphics built into the app:
 
-- `variant`: `codex-2007`, `rescue-pups`, `starship-cockpit`
+- `variant`: `codex-2007`, `starship-cockpit`
 - `titlebarMark`: the titlebar corner glyph, truncated past 4 characters
-- `avatarTemplate` / `showcaseTemplate` / `rightCards[].template` / `rightCards[].items[].template`: one of 13 templates — `qq-mascot`, `qq-person`, `rescue-rider`, `rescue-hq`, `rescue-dog-team`, `rescue-civic`, `rescue-mayor`, `rescue-chicken`, `space-ai-core`, `space-ship`, `space-radar`, `space-telemetry`, `space-starmap`
-- `items[].tone`: `red`, `blue`, `yellow`, `green`, `pink`, `orange`, `neutral`
+- `avatarTemplate` / `showcaseTemplate` / `rightCards[].template` / `rightCards[].items[].template`: one of 7 templates — `qq-mascot`, `qq-person`, `space-ai-core`, `space-ship`, `space-radar`, `space-telemetry`, `space-starmap`
+- `items[].tone`: colour metadata retained for compatibility with older packages; current templates do not use it. Accepted values: `red`, `blue`, `yellow`, `green`, `pink`, `orange`, `neutral`
 
 Values outside the allowlist are silently ignored — no error, and nothing renders.
 
@@ -316,7 +317,7 @@ In short: the worst a malicious skin can do is make the UI ugly. It gets no exec
 
 ## Building your own skin
 
-1. Copy one of the directories under `src/skins/`, or start from `fixtures/vibe-skins/rescue-pups/skin.json`.
+1. Copy `src/skins/codex-2007-blue/skin.json` as a no-asset example, or copy another bundled directory under `src/skins/` together with its assets.
 2. Change `id` (it must be unique) and `name`.
 3. Tune the `ui` palette. This is the highest-leverage step by a wide margin.
 4. Only then reach for `regions` for per-area polish, and `blocks` for copy changes.

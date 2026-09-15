@@ -1,5 +1,5 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { act } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -1112,37 +1112,47 @@ describe("VibeScreen", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders the built-in rescue pups skin with themed decorative regions", async () => {
+  it("offers only the supported built-in skins in the appearance dialog", async () => {
     renderScreen();
 
     await switchToSkinTheme();
     await openAppearanceDialog();
-    await userEvent.selectOptions(screen.getByLabelText("Vibe skin"), "rescue-pups-adventure-bay");
 
-    expect(screen.getByLabelText("Vibe skin")).toHaveValue("rescue-pups-adventure-bay");
-    expect(screen.getByText("汪汪队终端救援站")).toBeInTheDocument();
-    expect(screen.getByText("冒险湾主题")).toBeInTheDocument();
-    expect(screen.getByText("救援待命")).toBeInTheDocument();
-    expect(screen.getAllByText("莱德队长").length).toBeGreaterThan(0);
-    expect(screen.getByText("总部在线")).toBeInTheDocument();
-    expect(screen.getByText("没有困难的任务，只有勇敢的队员。")).toBeInTheDocument();
-    expect(screen.getAllByText("汪汪队总部").length).toBeGreaterThan(0);
-    expect(screen.getByText("狗狗们已在总部集结，随时支援终端任务。")).toBeInTheDocument();
-    expect(screen.getByText("莱德队长正在调度狗狗们")).toBeInTheDocument();
-    expect(screen.getByText("汪汪队员")).toBeInTheDocument();
-    expect(screen.getByText("狗狗们")).toBeInTheDocument();
-    expect(screen.getByText("冒险湾市政")).toBeInTheDocument();
-    expect(screen.getByText("古微市长")).toBeInTheDocument();
-    expect(screen.getByText("咕咕鸡")).toBeInTheDocument();
-    expect(screen.getByText("冒险湾已连接")).toBeInTheDocument();
-    expect(screen.getByText("救援队待命")).toBeInTheDocument();
-    expect(screen.getByText("出动")).toBeInTheDocument();
-    expect(screen.getByTestId("vibe-skin-rescue-avatar")).toBeInTheDocument();
-    expect(screen.getByTestId("vibe-skin-rescue-hq")).toBeInTheDocument();
-    expect(screen.getByTestId("vibe-skin-rescue-dogs")).toBeInTheDocument();
-    expect(screen.getByTestId("vibe-skin-rescue-mayor")).toBeInTheDocument();
-    expect(screen.getByTestId("vibe-skin-rescue-chicken")).toBeInTheDocument();
-    expect(screen.queryByText("皮肤区域")).not.toBeInTheDocument();
+    const skinSelect = screen.getByLabelText("Vibe skin");
+    expect(
+      within(skinSelect).getAllByRole("option").map((option) => option.getAttribute("value")),
+    ).toEqual(["codex-2007-blue", "starship-cockpit"]);
+    expect(skinSelect).toHaveValue("codex-2007-blue");
+  });
+
+  it("restores the default skin when the saved built-in selection is unavailable", async () => {
+    window.localStorage.setItem(
+      VIBE_APPEARANCE_STORAGE_KEY,
+      JSON.stringify({
+        themeMode: "skin",
+        skinId: "rescue-pups-adventure-bay",
+        skinAudioEnabled: false,
+        tiledTerminals: true,
+      }),
+    );
+    renderScreen();
+
+    await openAppearanceDialog();
+
+    expect(screen.getByLabelText("Vibe skin")).toHaveValue("codex-2007-blue");
+    expect(screen.getByRole("button", { name: "Skin" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByLabelText("Skin sound effects")).not.toBeChecked();
+    await waitFor(() =>
+      expect(JSON.parse(window.localStorage.getItem(VIBE_APPEARANCE_STORAGE_KEY)!)).toMatchObject({
+        themeMode: "skin",
+        skinId: "codex-2007-blue",
+        skinAudioEnabled: false,
+        tiledTerminals: true,
+      }),
+    );
   });
 
   it("renders the built-in starship cockpit skin with Chinese HUD blocks", async () => {
@@ -1230,12 +1240,12 @@ describe("VibeScreen", () => {
     expect(screen.getByLabelText("Vibe skin")).toHaveValue("starship-cockpit");
   });
 
-  it("renders custom rescue-style decorations from a stored skin package manifest", async () => {
+  it("renders custom decorations from a stored skin package manifest", async () => {
     window.localStorage.setItem(
       VIBE_SKIN_STORAGE_KEY,
       JSON.stringify({
-        id: "uploaded-rescue",
-        name: "Uploaded Rescue",
+        id: "uploaded-blue",
+        name: "Uploaded Blue",
         ui: {
           accent: "#0b7fec",
           background: "#78d4ff",
@@ -1251,43 +1261,43 @@ describe("VibeScreen", () => {
         },
         blocks: {
           titlebar: {
-            title: "上传救援主题",
+            title: "上传蓝色主题",
             subtitle: "皮肤包",
-            badge: "待命",
+            badge: "就绪",
           },
           profile: {
-            name: "莱德队长",
-            status: "总部在线",
+            name: "自定义用户",
+            status: "项目在线",
             signature: "自定义包",
-            badge: "队长",
+            badge: "用户",
           },
           showcase: {
             enabled: true,
-            title: "汪汪队总部",
+            title: "上传展示台",
             subtitle: "上传包",
             body: "来自皮肤文件包。",
-            badge: "救援总部",
+            badge: "展示区",
             footer: "自定义展示",
           },
         },
         decorations: {
-          variant: "rescue-pups",
-          titlebarMark: "汪",
-          avatarTemplate: "rescue-rider",
-          showcaseTemplate: "rescue-hq",
+          variant: "codex-2007",
+          titlebarMark: "蓝",
+          avatarTemplate: "qq-person",
+          showcaseTemplate: "qq-mascot",
           rightCards: [
             {
-              template: "rescue-dog-team",
-              title: "上传狗狗队",
-              badge: "狗狗们",
-              items: [{ label: "红色救援狗狗", tone: "red" }],
+              template: "qq-person",
+              title: "上传好友卡",
+              badge: "好友",
+              items: [{ label: "项目助手", template: "qq-person" }],
             },
             {
-              template: "rescue-civic",
-              title: "上传市政",
+              template: "space-telemetry",
+              title: "上传状态卡",
               items: [
-                { label: "古微市长", template: "rescue-mayor" },
-                { label: "咕咕鸡", template: "rescue-chicken" },
+                { label: "项目状态", badge: "在线" },
+                { label: "会话状态", badge: "就绪" },
               ],
             },
           ],
@@ -1299,20 +1309,20 @@ describe("VibeScreen", () => {
     await switchToSkinTheme();
     await openAppearanceDialog();
 
-    expect(screen.getByLabelText("Vibe skin")).toHaveValue("uploaded-rescue");
+    expect(screen.getByLabelText("Vibe skin")).toHaveValue("uploaded-blue");
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
-    expect(document.querySelector(".vibe-skin--rescue-pups")).toBeTruthy();
-    expect(screen.getByText("上传救援主题")).toBeInTheDocument();
+    expect(document.querySelector(".vibe-skin--codex-2007")).toBeTruthy();
+    expect(screen.getByText("上传蓝色主题")).toBeInTheDocument();
     expect(screen.getByText("皮肤包")).toBeInTheDocument();
     expect(screen.getByText("来自皮肤文件包。")).toBeInTheDocument();
-    expect(screen.getByText("上传狗狗队")).toBeInTheDocument();
-    expect(screen.getByText("上传市政")).toBeInTheDocument();
-    expect(screen.getByTestId("vibe-skin-rescue-avatar")).toBeInTheDocument();
-    expect(screen.getByTestId("vibe-skin-rescue-hq")).toBeInTheDocument();
-    expect(screen.getByTestId("vibe-skin-rescue-dogs")).toBeInTheDocument();
-    expect(screen.getByTestId("vibe-skin-rescue-mayor")).toBeInTheDocument();
-    expect(screen.getByTestId("vibe-skin-rescue-chicken")).toBeInTheDocument();
+    expect(screen.getByText("上传好友卡")).toBeInTheDocument();
+    expect(screen.getByText("上传状态卡")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "自定义用户 avatar" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "项目助手" })).toBeInTheDocument();
+    expect(screen.getByTestId("vibe-skin-qq-mascot")).toBeInTheDocument();
+    expect(screen.getByText("项目状态")).toBeInTheDocument();
+    expect(screen.getByText("会话状态")).toBeInTheDocument();
   });
 
   it("does not render XP decorative skin blocks in dark or light themes", async () => {

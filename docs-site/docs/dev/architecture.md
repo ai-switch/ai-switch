@@ -47,7 +47,7 @@ AI Switch 的核心设计目标是**一份业务逻辑，两种运行形态**。
 | `src/lib/transport/` | 传输抽象层，桌面/浏览器差异只在这里 |
 | `src/lib/api/` | 命令客户端、命令可用性探测、错误映射 |
 | `src/lib/ocr/`、`src/lib/query/` | 本地 OCR 与查询客户端配置 |
-| `src/skins/` | 3 个内置 Vibe 皮肤：`codex-2007-blue`、`rescue-pups-adventure-bay`、`starship-cockpit` |
+| `src/skins/` | 2 个内置 Vibe 皮肤：`codex-2007-blue`、`starship-cockpit` |
 
 终端界面基于 `@xterm/xterm`，Vibe 皮肤的三维场景使用 `three`，图标来自 `lucide-react`，导入导出的压缩包处理用 `jszip`。
 

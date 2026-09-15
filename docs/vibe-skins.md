@@ -15,10 +15,11 @@ The built-in `星舰驾驶舱` skin is a cinematic cockpit package: deep-space s
 Built-in skins are stored as ordinary package manifests under `src/skins/`:
 
 - `src/skins/codex-2007-blue/skin.json`
-- `src/skins/rescue-pups-adventure-bay/skin.json`
 - `src/skins/starship-cockpit/skin.json`
 
 To make a derivative skin, copy one of those folders, edit `skin.json` with a new `id`, `name`, colors, regions, blocks, decorations, and optional `assets/` paths, then zip the folder or rename the JSON manifest to `.aiskin`.
+
+If a saved built-in selection is no longer available, Vibe uses the default built-in skin and persists that choice without changing other appearance settings. Older custom packages remain readable and importable; unsupported decoration variants and templates are ignored while custom content is preserved.
 
 ## Minimal Manifest
 
@@ -143,27 +144,21 @@ To make a derivative skin, copy one of those folders, edit `skin.json` with a ne
     }
   },
   "decorations": {
-    "variant": "rescue-pups",
-    "titlebarMark": "汪",
-    "avatarTemplate": "rescue-rider",
-    "showcaseTemplate": "rescue-hq",
+    "variant": "codex-2007",
+    "titlebarMark": "XP",
+    "avatarTemplate": "qq-person",
+    "showcaseTemplate": "qq-mascot",
     "rightCards": [
       {
-        "template": "rescue-dog-team",
-        "title": "汪汪队员",
-        "badge": "狗狗们",
+        "template": "qq-person",
+        "title": "项目好友",
+        "badge": "在线",
         "items": [
-          { "label": "红色救援狗狗", "tone": "red" },
-          { "label": "蓝色救援狗狗", "tone": "blue" },
-          { "label": "黄色救援狗狗", "tone": "yellow" }
-        ]
-      },
-      {
-        "template": "rescue-civic",
-        "title": "冒险湾市政",
-        "items": [
-          { "label": "古微市长", "template": "rescue-mayor" },
-          { "label": "咕咕鸡", "template": "rescue-chicken" }
+          {
+            "label": "项目助手",
+            "template": "qq-person",
+            "image": "assets/friend.png"
+          }
         ]
       }
     ]
@@ -225,21 +220,21 @@ The taskbar start menu supports only a fixed allowlist of app actions. Unknown a
 
 ## Decorations
 
-`decorations` defines optional app-rendered decorative layout pieces. It is intended for highly themed skins such as XP-style side rails or a rescue-team layout. These values are still skin package data, not hardcoded by skin ID.
+`decorations` defines optional app-rendered decorative layout pieces. It is intended for highly themed skins such as XP-style side rails or a cockpit HUD. These values are still skin package data, not hardcoded by skin ID.
 
 Supported fields:
 
-- `decorations.variant`: optional visual variant class. Supported values are `codex-2007`, `rescue-pups`, and `starship-cockpit`.
+- `decorations.variant`: optional visual variant class. Supported values are `codex-2007` and `starship-cockpit`.
 - `decorations.titlebarMark`: short text shown in the titlebar badge. It is truncated to four characters.
 - Template IDs such as `qq-person` and `qq-mascot` remain supported for compatibility with existing skin packages; the built-in display branding is XP.
-- `decorations.avatarTemplate`: app-rendered template for the left profile avatar. Supported values include `qq-person`, `rescue-rider`, and `space-ai-core`.
-- `decorations.showcaseTemplate`: app-rendered template for the right showcase stage. Supported values include `qq-mascot`, `rescue-hq`, and `space-ship`.
+- `decorations.avatarTemplate`: app-rendered template for the left profile avatar. Supported values include `qq-person` and `space-ai-core`.
+- `decorations.showcaseTemplate`: app-rendered template for the right showcase stage. Supported values include `qq-mascot` and `space-ship`.
 - `decorations.rightCards`: extra right-rail cards declared by the skin package.
-- `decorations.rightCards[].template`: card layout template. Supported values include `qq-person`, `rescue-dog-team`, `rescue-civic`, `space-radar`, `space-ship`, `space-telemetry`, and `space-starmap`.
+- `decorations.rightCards[].template`: card layout template. Supported values include `qq-person`, `space-radar`, `space-ship`, `space-telemetry`, and `space-starmap`.
 - `decorations.rightCards[].figure`: card image path or data URL.
 - `decorations.rightCards[].items[]`: card items with `label`, optional `badge`, optional `template`, optional `tone`, and optional `image`.
-- `decorations.rightCards[].items[].template`: item template. Supported values include `qq-person`, `rescue-mayor`, `rescue-chicken`, and the cockpit templates `space-ai-core`, `space-ship`, `space-radar`, `space-telemetry`, and `space-starmap`.
-- `decorations.rightCards[].items[].tone`: rescue dog color. Supported values are `red`, `blue`, `yellow`, `green`, `pink`, `orange`, and `neutral`.
+- `decorations.rightCards[].items[].template`: item template. Supported values include `qq-person`, `qq-mascot`, and the cockpit templates `space-ai-core`, `space-ship`, `space-radar`, `space-telemetry`, and `space-starmap`.
+- `decorations.rightCards[].items[].tone`: color metadata retained for compatibility with older packages; current templates do not use it. Supported values are `red`, `blue`, `yellow`, `green`, `pink`, `orange`, and `neutral`.
 - `decorations.rightCards[].items[].image`: item image path or data URL.
 
 Unknown `variant`, `template`, `tone`, and action-like values are ignored. A skin package can combine app-rendered templates with its own images, but it cannot inject arbitrary HTML, CSS files, JavaScript, or native window commands.
@@ -346,11 +341,9 @@ my-skin.zip
     app.png
     showcase-stage.png
     showcase.png
-    dog-red.png
-    mayor.png
-    chicken.png
+    friend.png
 ```
 
 The app accepts PNG, JPG, WEBP, GIF, and SVG asset paths. Imported skins are limited to 8 MB before extraction and must fit in browser local storage after assets are embedded.
 
-The repository includes `fixtures/vibe-skins/rescue-pups/skin.json` as an upload-focused example skin package manifest. Zip that folder and import the zip, or rename the JSON manifest to `.aiskin` for a no-asset package.
+For a no-asset upload example, copy `src/skins/codex-2007-blue/skin.json` and give it a new `id` and `name`. Import the JSON directly or rename it to `.aiskin`; zip the directory together with any assets when extending the example.

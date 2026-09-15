@@ -47,7 +47,7 @@ The frontend lives in `src/` at the repository root: React 18 with TypeScript, b
 | `src/lib/transport/` | The transport abstraction — the only place desktop and browser diverge |
 | `src/lib/api/` | Command client, command-availability probing, error mapping |
 | `src/lib/ocr/`, `src/lib/query/` | Local OCR and query-client configuration |
-| `src/skins/` | Three built-in Vibe skins: `codex-2007-blue`, `rescue-pups-adventure-bay`, `starship-cockpit` |
+| `src/skins/` | Two built-in Vibe skins: `codex-2007-blue`, `starship-cockpit` |
 
 Terminals are rendered with `@xterm/xterm`, Vibe skin scenes use `three`, icons come from `lucide-react`, and import/export archives are handled by `jszip`.
 

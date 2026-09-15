@@ -164,84 +164,84 @@ describe("vibeSkin", () => {
     zip.file(
       "skin.json",
       JSON.stringify({
-        id: "uploaded-rescue",
-        name: "Uploaded Rescue",
+        id: "uploaded-blue",
+        name: "Uploaded Blue",
         ui: {
           accent: "#0b7fec",
           background: "#78d4ff",
         },
         blocks: {
           titlebar: {
-            title: "上传救援主题",
+            title: "上传蓝色主题",
             subtitle: "皮肤包",
             badge: "待命",
           },
           profile: {
-            name: "莱德队长",
-            status: "总部在线",
+            name: "自定义用户",
+            status: "项目在线",
             signature: "自定义包",
-            badge: "队长",
+            badge: "用户",
           },
           showcase: {
             enabled: true,
-            title: "汪汪队总部",
+            title: "上传展示台",
             subtitle: "上传包",
             body: "来自皮肤文件包。",
-            badge: "救援总部",
+            badge: "展示区",
             footer: "自定义展示",
           },
         },
         decorations: {
-          variant: "rescue-pups",
-          titlebarMark: "汪汪队超长",
-          avatarTemplate: "rescue-rider",
-          showcaseTemplate: "rescue-hq",
+          variant: "codex-2007",
+          titlebarMark: "自定义超长",
+          avatarTemplate: "qq-person",
+          showcaseTemplate: "qq-mascot",
           unsafeTemplate: "nativeCloseWindow",
           rightCards: [
             {
-              template: "rescue-dog-team",
-              title: "上传狗狗队",
-              badge: "狗狗们",
-              figure: "assets/team.png",
+              template: "qq-person",
+              title: "上传好友卡",
+              badge: "好友",
+              figure: "assets/friends.png",
               items: [
-                { label: "红色救援狗狗", tone: "red", image: "assets/red-dog.png" },
-                { label: "非法模板狗狗", template: "nativeCloseWindow", tone: "purple" },
-                { template: "rescue-mayor" },
+                { label: "项目助手", tone: "red", image: "assets/avatar.png" },
+                { label: "非法模板项目", template: "nativeCloseWindow", tone: "purple" },
+                { template: "qq-person" },
               ],
             },
             {
-              template: "rescue-civic",
-              title: "上传市政",
+              template: "space-telemetry",
+              title: "上传状态卡",
               items: [
-                { label: "古微市长", template: "rescue-mayor" },
-                { label: "咕咕鸡", template: "rescue-chicken", image: "assets/chicken.png" },
+                { label: "项目状态", template: "qq-person" },
+                { label: "状态助手", template: "qq-mascot", image: "assets/mascot.png" },
               ],
             },
           ],
         },
       }),
     );
-    zip.file("assets/team.png", new Uint8Array([137, 80, 78, 71]));
-    zip.file("assets/red-dog.png", new Uint8Array([137, 80, 78, 71]));
-    zip.file("assets/chicken.png", new Uint8Array([137, 80, 78, 71]));
+    zip.file("assets/friends.png", new Uint8Array([137, 80, 78, 71]));
+    zip.file("assets/avatar.png", new Uint8Array([137, 80, 78, 71]));
+    zip.file("assets/mascot.png", new Uint8Array([137, 80, 78, 71]));
 
     const blob = await zip.generateAsync({ type: "blob" });
     const skin = await importVibeSkinPackage(
-      new File([blob], "uploaded-rescue.zip", { type: "application/zip" }),
+      new File([blob], "uploaded-blue.zip", { type: "application/zip" }),
     );
 
-    expect(skin.id).toBe("uploaded-rescue");
-    expect(skin.decorations?.variant).toBe("rescue-pups");
-    expect(skin.decorations?.titlebarMark).toBe("汪汪队超");
-    expect(skin.decorations?.avatarTemplate).toBe("rescue-rider");
-    expect(skin.decorations?.showcaseTemplate).toBe("rescue-hq");
+    expect(skin.id).toBe("uploaded-blue");
+    expect(skin.decorations?.variant).toBe("codex-2007");
+    expect(skin.decorations?.titlebarMark).toBe("自定义超");
+    expect(skin.decorations?.avatarTemplate).toBe("qq-person");
+    expect(skin.decorations?.showcaseTemplate).toBe("qq-mascot");
     expect(skin.decorations?.rightCards).toHaveLength(2);
     expect(skin.decorations?.rightCards?.[0]?.figure).toMatch(/^data:image\/png;base64,/);
     expect(skin.decorations?.rightCards?.[0]?.items?.[0]?.image).toMatch(
       /^data:image\/png;base64,/,
     );
     expect(skin.decorations?.rightCards?.[0]?.items?.[1]).toEqual({
-      label: "非法模板狗狗",
+      label: "非法模板项目",
     });
     expect(skin.decorations?.rightCards?.[0]?.items).toHaveLength(2);
     expect(skin.decorations?.rightCards?.[1]?.items?.[1]?.image).toMatch(
@@ -249,6 +249,54 @@ describe("vibeSkin", () => {
     );
     expect(JSON.stringify(skin.decorations)).not.toContain("nativeCloseWindow");
   });
+
+  it.each(["package", "storage"] as const)(
+    "preserves custom content while ignoring unavailable decorations from %s",
+    async (source) => {
+      const manifest = {
+        id: "legacy-custom",
+        name: "Legacy Custom Skin",
+        ui: { accent: "#02468a" },
+        decorations: {
+          variant: "rescue-pups",
+          titlebarMark: "TEST",
+          avatarTemplate: "rescue-rider",
+          showcaseTemplate: "rescue-hq",
+          rightCards: [
+            {
+              title: "Custom roster",
+              template: "rescue-dog-team",
+              items: [
+                { label: "First figure", template: "rescue-mayor" },
+                { label: "Second figure", template: "rescue-chicken" },
+              ],
+            },
+            { title: "Custom status", template: "rescue-civic" },
+          ],
+        },
+      };
+      const contents = JSON.stringify(manifest);
+      window.localStorage.setItem(VIBE_SKIN_STORAGE_KEY, contents);
+      const skin = source === "package"
+        ? await importVibeSkinPackage(
+            new File([contents], "legacy-custom.aiskin", { type: "application/json" }),
+          )
+        : readStoredVibeSkin();
+
+      expect(skin?.id).toBe("legacy-custom");
+      expect(skin?.ui.accent).toBe("#02468a");
+      expect(skin?.decorations).toEqual({
+        titlebarMark: "TEST",
+        rightCards: [
+          {
+            title: "Custom roster",
+            items: [{ label: "First figure" }, { label: "Second figure" }],
+          },
+          { title: "Custom status" },
+        ],
+      });
+    },
+  );
 
   it("imports zip skin audio assets and drops unsafe audio references", async () => {
     const zip = new JSZip();
