@@ -18,8 +18,9 @@ test("public Node import never runs the CLI, reads a project or imports browser/
     for(const name of ['window','document']) Object.defineProperty(globalThis,name,{get(){throw new Error('DOM access on import');}});
     fs.open = async () => { throw new Error('project read on import'); };
     const api = await import('@ai-switch/tauri-plugin-devkit');
-    assert.deepEqual(Object.keys(api), ['inspectPackage', 'validateProject']);
+    assert.deepEqual(Object.keys(api), ['inspectPackage', 'packProject', 'validateProject']);
     assert.equal(typeof api.validateProject, 'function');
+    assert.equal(typeof api.packProject, 'function');
     for(const path of ['/testing','/node-types','/src/index.ts','/dist/cli.js']) await assert.rejects(import('@ai-switch/tauri-plugin-devkit'+path),{code:'ERR_PACKAGE_PATH_NOT_EXPORTED'});
   `], { cwd: root, encoding: "utf8", timeout: 10000, windowsHide: true });
   assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout, "");
@@ -33,6 +34,9 @@ test("built bin preserves the shebang, metadata version and actual process exit 
   assert.equal(unknown.status, 1); assert.equal(JSON.parse(unknown.stdout).diagnostics[0].code, "E_CLI_ARGUMENTS");
   const absent = spawnSync(process.execPath, [cli, "validate", "tests/absent-fixture", "--json"], { cwd: root, encoding: "utf8", windowsHide: true });
   assert.equal(absent.status, 1); assert.equal(JSON.parse(absent.stdout).diagnostics[0].code, "E_PROJECT_ROOT");
+  const pack = spawnSync(process.execPath, [cli, "pack", "tests/absent-fixture", "--json"], { cwd: root, encoding: "utf8", windowsHide: true });
+  assert.equal(pack.status, 1); assert.equal(JSON.parse(pack.stdout).diagnostics[0].code, "E_PROJECT_ROOT");
+  assert.ok(!pack.stdout.includes("E_COMMAND_UNAVAILABLE"));
 });
 
 test("building clears stale generated artifacts without shipping source aliases", async () => {

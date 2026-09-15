@@ -2,7 +2,7 @@
 
 APLG 插件的 Node 开发工具包。单向依赖 `@ai-switch/tauri-plugin-runtime` 公共协议入口，不依赖 AI Switch 应用源码或 Tauri。
 
-> 当前为 **0.1.0 开发实现，尚未发布到 npm**。D1–D4 已交付源码/产物校验、只读归档 inspect、CLI、Vite Node alias、握手 bootstrap 与浏览器类型适配。pack、init 模板、浏览器 testing 和 CI 发布仍在后续任务，不要把这些目标当作现成功能。
+> 当前为 **0.1.0 开发实现，尚未发布到 npm**。D1–D5 已交付源码/产物校验、只读归档 inspect、CLI、Vite Node alias、握手 bootstrap、浏览器类型适配，以及可复现且不覆盖已有文件的 `.aplg` pack。init 模板、浏览器 testing 和 CI 发布仍在 D6–D9，不要把这些目标当作现成功能。
 
 ## 使用已构建的本地包
 
@@ -13,12 +13,13 @@ pnpm install --frozen-lockfile
 pnpm aplg:devkit:build
 node packages/tauri-plugin-devkit/dist/cli.js --help
 node packages/tauri-plugin-devkit/dist/cli.js validate /path/to/plugin --json
+node packages/tauri-plugin-devkit/dist/cli.js pack /path/to/plugin --out-dir ./release --json
 ```
 
 根目录的 build/test 入口会先构建 runtime，确保 devkit 消费真实公共出口，而非源码 alias。直接在 devkit 目录运行前也需先完成 runtime build。
 
 ```ts
-import { validateProject } from "@ai-switch/tauri-plugin-devkit";
+import { packProject, validateProject } from "@ai-switch/tauri-plugin-devkit";
 
 const report = await validateProject("./my-plugin", {
   stage: "source", // 默认 source
@@ -29,6 +30,13 @@ if (report.valid) {
 } else {
   console.error(report.diagnostics);
 }
+
+// 先由作者显式 build；pack 不会运行 build/install/Vite config。
+const packed = await packProject("./my-plugin", {
+  outDir: "./release", // 相对路径按插件项目根解析
+  profile: "web-v1",
+});
+console.log(packed.path, packed.sha256, packed.size);
 ```
 
 包根入口是 **Node-only ESM**；导入本身不会读取项目、执行 CLI 或访问浏览器 DOM。公共报告类型直接复用 runtime 的 `Manifest` / `Diagnostic`。`/vite` 是独立 Node 构建插件入口，`/node-types` 仅包含声明，`/testing` 尚未导出。内部 `src`/`dist` 路径不是公共接口。
@@ -49,7 +57,7 @@ if (report.valid) {
 - profile 是校验选项，不向 runtime manifest 添加私有 profile 字段。`web-v1` 不接受 `permissions.native:true`；网络/文件权限的合法声明仍按 runtime 契约检查，不因此授予权限。
 - source **不要求 dist 已存在**，也不证明入口源码、构建配置或依赖可运行。
 - 锁文件存在并非冻结安装已验证：D1 不解析其依赖图或执行 pnpm。作者须先真实安装、提交匹配的锁文件，再在 CI 中执行冻结安装。
-- 成功报告的 `files` 是本次已读元数据文件的相对路径、大小和 SHA-256，**不是可直接打包的归档文件白名单**；`stage:"dist"` 返回另行检查的产物候选列表，D5 才负责真正打包。manifest SHA 覆盖精确字节，包括空白和换行，不重新格式化后再算。
+- 成功报告的 `files` 是本次已读元数据文件的相对路径、大小和 SHA-256，**不是可直接打包的归档文件白名单**；`stage:"dist"` 返回另行检查的产物候选列表，D5 再从这些候选创建独立私有快照并打包。manifest SHA 覆盖精确字节，包括空白和换行，不重新格式化后再算。
 - 不执行 package scripts、Vite config、build、安装依赖或网络请求。静态检查不等于恶意代码沙箱、签名验证、OS 权限授权或可发布承诺。
 
 文件读取逐级 lstat，拒绝符号链接/junction/非普通文件；open 后复核 identity/size，并用至多 64 KiB 读取块，读后再次核查 identity、size、mtime/ctime 和路径组件。POSIX 使用可用的 no-follow/non-blocking 标志；这些检查减少并检测路径竞态，**不宣称普通 Node fs 能提供原子目录级授权或对抗任意并发恶意文件系统**。后续归档操作必须使用经验证的独立快照，不能把 D1 返回的 hash 当作未变化的文件句柄。
@@ -59,19 +67,20 @@ if (report.valid) {
 ```sh
 aplg validate [directory] [--stage source|dist] [--json]
 aplg inspect <file.aplg> [--json]
+aplg pack [directory] [--out-dir <directory>] [--json]
 aplg --help
 aplg --version
 ```
 
-`--stage=source` 也支持；`--` 后只作为目录参数解析。默认目录为当前工作目录。重复选项、未知选项或多余位置参数直接失败，不猜测执行其他操作。
+`--stage=source` 与 `--out-dir=./release` 也支持；`--` 后只作为目录参数解析。默认项目目录为当前工作目录，pack 默认输出到项目根的 `.aplg-output`。重复选项、未知选项或多余位置参数直接失败，不猜测执行其他操作。
 
 - **0**：成功。
-- **1**：参数/内容/路径/兼容性校验失败。缺少项目、必需元数据，或者请求尚未实现的命令也返回 1。
+- **1**：参数/内容/路径/兼容性校验失败。缺少项目、必需元数据、已有同名输出，或者请求尚未实现的命令也返回 1。
 - **2**：OS I/O 或内部错误。程序化 API 对此抛出安全错误（如 `code:E_IO`），不返回“内容无效”的假诊断；CLI 不显示 native stack、真实绝对路径或原始 OS 错误文本。
 
-指定 `--json` 时 stdout 只有一个 `ProjectReport` 或 `PackageInspection` JSON 对象，stderr 可有简洁提示。报告中的 manifest 是作者提供的元数据，请勿将敏感信息写入清单。人类可读诊断会转义终端控制字符。
+指定 `--json` 时 stdout 只有一个 `ProjectReport`、`PackageInspection` 或 pack 成功对象；pack 的 `path` 只返回最终文件名，不回显绝对输出目录。stderr 可有简洁提示。报告中的 manifest 是作者提供的元数据，请勿将敏感信息写入清单。人类可读诊断会转义终端控制字符。
 
-`--stage dist` 检查已有 dist、源清单与构建记录；缺少记录或产物时明确失败，不隐式运行 build。`init` / `pack` 返回 `E_COMMAND_UNAVAILABLE`，不创建文件、不解包、不隐式 build。后续 D5–D9 完成前不发布此开发切片。
+`--stage dist` 检查已有 dist、源清单与构建记录；缺少记录或产物时明确失败，不隐式运行 build。`pack` 只消费已经通过该检查的产物，仍不解包、不隐式 build；`init` 暂时返回 `E_COMMAND_UNAVAILABLE`。后续 D6–D9 完成前不发布此开发切片。
 
 ## D2 的只读归档检查
 
@@ -194,7 +203,7 @@ aplg validate . --stage dist --json
 const report = await validateProject("./plugin", {stage:"dist"});
 ```
 
-`source` 仍只读五个元数据文件；`dist` 追加收集白名单目录下的产物、匹配 manifest/record 精确 hash、核对单一启动 script 和动态 business 边，返回根清单/README/LICENSE 与 dist 文件（不将 package.json/lock 当归档输入）。`manifestPath` 只指定 Vite 的源清单；根目录的标准项目校验仍读取 `aplg.json`，其清单内容必须与记录的源清单一致。当前仍不创建 `.aplg`，D5 将对候选内容做独立快照和安全打包。
+`source` 仍只读五个元数据文件；`dist` 追加收集白名单目录下的产物、匹配 manifest/record 精确 hash、核对单一启动 script 和动态 business 边，返回根清单/README/LICENSE 与 dist 文件（不将 package.json/lock 当归档输入）。`manifestPath` 只指定 Vite 的源清单；根目录的标准项目校验仍读取 `aplg.json`，其清单内容必须与记录的源清单一致。D5 的 `packProject` 只消费这份已有且有效的 dist 报告，不执行项目源码。
 
 ### 资源与行为边界
 
@@ -205,6 +214,17 @@ const report = await validateProject("./plugin", {stage:"dist"});
 - **构建记录未签名，不证明代码确实握手或无害。** 只改文件会因 hash 不匹配失败；同时改脚本和 record 仍可能保持静态图自洽。生成器的握手行为有真实浏览器测试，但安装端必须独立建立签名、来源、CSP/IPC 与 OS 授权。`fetch(computedUrl)` 等动态网络行为不是静态资源引用的完备证明。
 
 D4 浏览器验收在两个 loopback 来源与不允许 unsafe-inline/unsafe-eval 的 CSP 下运行真正构建产物。测试专用门控拦截 ready 后才释放给 runtime 公共 host，验证握手前无业务副作用、成功执行一次、连接/业务失败安全提示、无宿主不 fallback、零脚本和正常挂载/关闭。它不是 devkit `/testing` 的生产实现，也不表示 Tauri/真实 Rust 已接入。
+
+## D5 的可复现安全打包
+
+`packProject(root, options)` 与 `aplg pack` 仅归档 `aplg.json`、非空 `LICENSE`、`README.md`、已有 `dist/**`，以及存在时的 `THIRD_PARTY_NOTICES.md`、`icon.svg`、`icon.png`。`package.json`、lock、`.env`、`src/**`、`node_modules` 和默认 `.aplg-output` 都不在候选中。
+
+- 每个候选逐级 lstat，拒绝 symlink/junction/非普通文件；open 后复核 identity、size、mtime/ctime，并以不超过 64 KiB 的块复制到带随机所有权 marker 的本次私有临时目录。复制结果必须与 D1/D4 报告的大小和 SHA-256 一致，ZIP 压缩阶段只读取私有快照。
+- ZIP 条目按包内路径的 UTF-8 字节顺序写入，统一 mode `0100644`、DOS 时间 `1980-01-01 00:00:00`、压缩级别 9，不写 entry/archive comment 或扩展时间字段。锁定 yazl 版本和输入时保证本工具链内字节可复现，不承诺跨压缩器版本字节相同。
+- 默认输出 `<root>/.aplg-output/<id>-<version>.aplg`；相对 `outDir` 按项目根解析。拒绝 `dist` 内输出和任一 linked 输出目录。最终路径已存在时返回 `E_OUTPUT_EXISTS`，绝不覆盖。
+- 先在最终 outDir 以 exclusive create 写唯一 `.staged.aplg`，关闭后调用 `inspectPackage` 自检，并逐项比对快照 hash/size。随后只用同文件系统 hard-link 建立最终路径，平台不支持原子 no-clobber 时返回 `E_OUTPUT_PUBLISH`，禁止退化为覆盖式 rename。失败会按文件 identity 回滚本次 stage/已建立的 final link。
+- `inspectPackage` 自检仍只是结构与内容校验，`signature` 仍为 `not-verified`；它不代表签名信任、恶意代码沙箱、权限批准或商店审核。
+
 ## 开发验证
 
 从仓库根目录；首次浏览器测试需先安装 Chromium/WebKit：
@@ -221,7 +241,7 @@ pnpm --dir packages/tauri-plugin-devkit test:built
 pnpm --dir packages/tauri-plugin-devkit test:browser
 ```
 
-`test` 会先构建 devkit，以便新 checkout 的公共类型消费者测试有真实 dist。测试包括真实临时目录、无副作用配置反例、部分读取/截断/改写、JSON 歧义、恶意 ZIP/解压预算/句柄回收、真实 yazl 输出、CLI stdout/exit codes、构建后 Node import/CLI 和公共类型。不修改开发者项目；测试临时目录在 finally 中复核路径/身份/所有权后删除。
+`test` 会先构建 devkit，以便新 checkout 的公共类型消费者测试有真实 dist。测试包括真实临时目录、无副作用配置反例、部分读取/截断/改写、JSON 歧义、恶意 ZIP/解压预算/句柄回收、真实 yazl 输出、私有快照竞态、mtime/时区可复现性、并发 no-clobber/发布回滚、CLI stdout/exit codes、构建后 Node import/CLI 和公共类型。不修改开发者项目；测试临时目录在 finally 中复核路径/身份/所有权后删除。
 
 `vite:^8.3.0` 为 optional peer，纯 CLI 不要求安装 Vite。其余计划依赖已按固定版本写入锁文件，D1 使用 runtime 与 jsonc-parser，D2 增加 yauzl 流式读取，D3 的 `/vite` 入口使用 Vite 8.3 的解析器；D4 的静态检查使用已声明的 HTML/CSS/module parser 与 Acorn。devkit 构建将 registry 依赖保持 external，不把 Node 工具代码混入 runtime 浏览器图。
 

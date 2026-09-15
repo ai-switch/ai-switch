@@ -75,9 +75,9 @@ describe("aplg CLI", () => {
       expect(open).not.toHaveBeenCalled();
     } finally { open.mockRestore(); }
   });
-  test.each(["init", "pack"])("not-yet-implemented %s exits 1 without creating files", async (command) => {
+  test("not-yet-implemented init exits 1 without creating files", async () => {
     await withProject({}, async (root) => {
-      const out = output(); expect(await runCli([command, "target", "--json"], out.io, { cwd: root })).toBe(1);
+      const out = output(); expect(await runCli(["init", "target", "--json"], out.io, { cwd: root })).toBe(1);
       expect(JSON.parse(out.stdout)).toMatchObject({ valid: false, diagnostics: [expect.objectContaining({ code: "E_COMMAND_UNAVAILABLE" })] });
       await expect(fs.access(join(root, "target"))).rejects.toMatchObject({ code: "ENOENT" });
     });

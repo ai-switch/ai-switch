@@ -12,7 +12,7 @@
 
 **Prerequisite plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-runtime.md`。R1/R2 的导出/契约是唯一权威，本文只引用，不维护复制的 manifest/wire schema。
 
-**状态：** D1–D4 项目源码/产物校验、归档检查、CLI、Vite Node alias、握手 bootstrap 与浏览器 ambient 类型已实施并通过 Windows 本地验证；D5–D9 待实施。所有 npm 包仍未发布。未实施部分的方法、CLI 和代码片段仍是目标契约。
+**状态：** D1–D5 项目源码/产物校验、归档检查、CLI、Vite Node alias、握手 bootstrap、浏览器 ambient 类型与可复现 no-clobber `.aplg` 打包已实施并通过 Windows 本地验证；D6–D9 待实施。所有 npm 包仍未发布。未实施部分的方法、CLI 和代码片段仍是目标契约。
 
 ## Global Constraints
 
@@ -429,7 +429,7 @@ git commit -m "feat(devkit): 注入受控启动器并校验离线产物"
 
 **Interfaces:** packProject 消费 D1 dist 验证、D2 inspectPackage、D4 build record；输出 PackResult。输入根需要已有合法 dist，pack 不自动 build/install、不执行任何源码。
 
-- [ ] **Step 1：先写可复现与拒绝覆盖测试。**
+- [x] **Step 1：先写可复现与拒绝覆盖测试。**
 
 ```ts
 import { readFile, utimes } from "node:fs/promises";
@@ -460,8 +460,8 @@ test("a repeated output path never replaces an existing package", async () => {
 
 `withBuiltProject(run)` 在 D5 新建 `tests/support/built-project.ts`，由 D3 withBuildProject + 真实 Vite build/aplgVite 生成产物后调用 run；不能手写“看起来正确”的 build record 代替主要正向测试。
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit exec vitest run tests/archive-pack.test.ts`。
-- [ ] **Step 3：显式白名单快照再归档。** 仅收集 `aplg.json`、`dist/**`、LICENSE 与 D2 允许的可选文档/icon。使用 lstat/realpath/open 的身份比对拒绝 symlink、junction、文件替换、越界；输入快照拷入本次私有临时目录后再压缩，避免在压缩过程中读取可变工作区。不能只用 startsWith 字符串判断根路径，也不能从 Node config import 得到任意 includes。
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit exec vitest run tests/archive-pack.test.ts`；核心测试先以 `packProject is not a function` 失败，CLI pack 测试先以 `E_COMMAND_UNAVAILABLE` 失败。
+- [x] **Step 3：显式白名单快照再归档。** 仅收集 `aplg.json`、`dist/**`、LICENSE 与 D2 允许的可选文档/icon。使用 lstat/realpath/open 的身份比对拒绝 symlink、junction、文件替换、越界；输入快照拷入本次私有临时目录后再压缩，避免在压缩过程中读取可变工作区。不能只用 startsWith 字符串判断根路径，也不能从 Node config import 得到任意 includes。
 
 确定性设置：条目按包内 UTF-8 字节顺序排序；统一非可执行 regular file mode `0644`；固定 DOS 时间 `1980-01-01 00:00:00`（按 ZIP 字段直接控制，不随机器时区变化）；无 comment/机器路径/当前时间字段；压缩参数固定，包含原始 manifest 字节。相同工具链/锁定压缩器版本与输入保证字节一致，跨实现版本不承诺相同压缩字节。
 
@@ -478,8 +478,8 @@ if (!inspection.valid) {
 
 `stagedArchivePath` 为本次在 outDir 新建的临时文件；验收成功才建立最终路径。packResult 的 package hash 与 inspection 实际 hash 一致，source manifest hash 从读到的精确字节生成。
 
-- [ ] **Step 4：GREEN。** 测试输入排序、时区/mtime 改变、超大包/条目、缺 entry、并发相同输出、`.env` 不入包、LICENSE 缺失、symlink/junction 拒绝、失败不留下最终路径、二进制篡改 inspect 失败。Windows/Linux 矩阵验证相同夹具归档字节。
-- [ ] **Step 5：提交。**
+- [x] **Step 4：GREEN。** 覆盖输入排序、时区/mtime 改变、预算边界、缺 entry、并发相同输出、`.env` 不入包、LICENSE 缺失、symlink/junction 拒绝、私有快照竞态、自检二进制拒绝，以及 hard-link 后身份失败的 final/stage 回滚。Windows 本地定向测试、429 项 devkit 全量 Vitest、公共类型与 built bin 测试已通过；本机无 Docker，WSL Ubuntu VHD 无法挂载，因此不虚假声明 Linux 已本地验证，Linux 矩阵由 D9 CI 发布门禁承接。
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-devkit/src/archive packages/tauri-plugin-devkit/src/project packages/tauri-plugin-devkit/src/cli packages/tauri-plugin-devkit/src/index.ts packages/tauri-plugin-devkit/tests packages/tauri-plugin-devkit/README.md
