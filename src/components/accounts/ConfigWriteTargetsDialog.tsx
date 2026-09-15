@@ -1,4 +1,4 @@
-import { Check, Copy, Eye, EyeOff, Plug, X } from "lucide-react";
+import { Check, Copy, Eye, EyeOff, HelpCircle, Plug, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { ConfigWriteClientStatus, RoutePoolModelMode } from "../../lib/api/types";
 import { copySensitiveText } from "../../lib/routeCredentialTransfer";
@@ -520,8 +520,19 @@ export function ConfigWriteTargetsDialog({
                           />
                           <span className="min-w-0 grid gap-0.5">
                             <span className="flex items-center gap-2">
-                              <span className="font-semibold text-stone-950">
-                                {client.display_name}
+                              <span className="flex items-center gap-1.5">
+                                <span className="font-semibold text-stone-950">
+                                  {client.display_name}
+                                </span>
+                                {client.client_key === "codex" ? (
+                                  <span
+                                    aria-label="Codex CLI、ChatGPT 桌面版、VS Code 扩展、Codeg 等都会读取这个官方路径的配置，通常只需配置这一个。"
+                                    className="inline-flex"
+                                    title="Codex CLI、ChatGPT 桌面版、VS Code 扩展、Codeg 等都会读取这个官方路径的配置，通常只需配置这一个。"
+                                  >
+                                    <HelpCircle aria-hidden="true" className="h-3.5 w-3.5 text-stone-400" />
+                                  </span>
+                                ) : null}
                               </span>
                               <span className="text-stone-500">
                                 {fileStatusLabels[client.file_status] ?? client.file_status}
