@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.aplg-output/
+*.aplg
+.env
+.env.*
+!.env.example

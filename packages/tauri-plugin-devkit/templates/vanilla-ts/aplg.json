@@ -1,0 +1,21 @@
+{
+  "manifestVersion": 1,
+  "id": __APLG_ID_JSON__,
+  "name": __APLG_NAME_JSON__,
+  "version": "0.1.0",
+  "description": __APLG_DESCRIPTION_JSON__,
+  "license": "MIT",
+  "engines": { "aplg": "^1.0.0" },
+  "entry": "dist/index.html",
+  "activation": "view",
+  "requires": {},
+  "optional": {},
+  "permissions": {
+    "filesystem": [],
+    "network": [],
+    "native": false
+  },
+  "contributes": {
+    "views": [{ "id": "main", "title": __APLG_NAME_JSON__ }]
+  }
+}

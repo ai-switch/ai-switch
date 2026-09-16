@@ -2,7 +2,7 @@
 
 APLG 插件的 Node 开发工具包。单向依赖 `@ai-switch/tauri-plugin-runtime` 公共协议入口，不依赖 AI Switch 应用源码或 Tauri。
 
-> 当前为 **0.1.0 开发实现，尚未发布到 npm**。D1–D5 已交付源码/产物校验、只读归档 inspect、CLI、Vite Node alias、握手 bootstrap、浏览器类型适配，以及可复现且不覆盖已有文件的 `.aplg` pack。init 模板、浏览器 testing 和 CI 发布仍在 D6–D9，不要把这些目标当作现成功能。
+> 当前为 **0.1.0 开发实现，尚未发布到 npm**。D1–D6 已交付源码/产物校验、只读归档 inspect、CLI、Vite Node alias、握手 bootstrap、浏览器类型适配、可复现且不覆盖已有文件的 `.aplg` pack，以及无副作用的 `vanilla-ts` init 模板。浏览器 testing 和 CI 发布仍在 D7–D9，不要把这些目标当作现成功能。
 
 ## 使用已构建的本地包
 
@@ -12,6 +12,7 @@ APLG 插件的 Node 开发工具包。单向依赖 `@ai-switch/tauri-plugin-runt
 pnpm install --frozen-lockfile
 pnpm aplg:devkit:build
 node packages/tauri-plugin-devkit/dist/cli.js --help
+node packages/tauri-plugin-devkit/dist/cli.js init ./my-plugin --id io.github.example.demo --name "Demo"
 node packages/tauri-plugin-devkit/dist/cli.js validate /path/to/plugin --json
 node packages/tauri-plugin-devkit/dist/cli.js pack /path/to/plugin --out-dir ./release --json
 ```
@@ -19,7 +20,14 @@ node packages/tauri-plugin-devkit/dist/cli.js pack /path/to/plugin --out-dir ./r
 根目录的 build/test 入口会先构建 runtime，确保 devkit 消费真实公共出口，而非源码 alias。直接在 devkit 目录运行前也需先完成 runtime build。
 
 ```ts
-import { packProject, validateProject } from "@ai-switch/tauri-plugin-devkit";
+import { initProject, packProject, validateProject } from "@ai-switch/tauri-plugin-devkit";
+
+const initialized = await initProject("./my-plugin", {
+  id: "io.github.example.demo",
+  name: "Demo",
+  template: "vanilla-ts",
+});
+console.log(initialized.directory, initialized.files);
 
 const report = await validateProject("./my-plugin", {
   stage: "source", // 默认 source
@@ -72,7 +80,7 @@ aplg --help
 aplg --version
 ```
 
-`--stage=source` 与 `--out-dir=./release` 也支持；`--` 后只作为目录参数解析。默认项目目录为当前工作目录，pack 默认输出到项目根的 `.aplg-output`。重复选项、未知选项或多余位置参数直接失败，不猜测执行其他操作。
+`--stage=source`、`--out-dir=./release`、`--id=...`、`--name=...` 和 `--template=vanilla-ts` 都支持；`--` 后只作为目录参数解析。默认项目目录为当前工作目录，pack 默认输出到项目根的 `.aplg-output`。重复选项、未知选项或多余位置参数直接失败，不猜测执行其他操作。
 
 - **0**：成功。
 - **1**：参数/内容/路径/兼容性校验失败。缺少项目、必需元数据、已有同名输出，或者请求尚未实现的命令也返回 1。
@@ -80,7 +88,7 @@ aplg --version
 
 指定 `--json` 时 stdout 只有一个 `ProjectReport`、`PackageInspection` 或 pack 成功对象；pack 的 `path` 只返回最终文件名，不回显绝对输出目录。stderr 可有简洁提示。报告中的 manifest 是作者提供的元数据，请勿将敏感信息写入清单。人类可读诊断会转义终端控制字符。
 
-`--stage dist` 检查已有 dist、源清单与构建记录；缺少记录或产物时明确失败，不隐式运行 build。`pack` 只消费已经通过该检查的产物，仍不解包、不隐式 build；`init` 暂时返回 `E_COMMAND_UNAVAILABLE`。后续 D6–D9 完成前不发布此开发切片。
+`init` 只渲染包内固定的 `vanilla-ts` 模板，目标必须不存在或为空，不安装依赖、不运行脚本、不创建 Git 仓库；首次生成项目不会写入虚假 lockfile。`--json` 成功结果只返回目标目录名和生成文件相对路径。`--stage dist` 检查已有 dist、源清单与构建记录；缺少记录或产物时明确失败，不隐式运行 build。`pack` 只消费已经通过该检查的产物，仍不解包、不隐式 build。后续 D7–D9 完成前不发布此开发切片。
 
 ## D2 的只读归档检查
 
@@ -225,6 +233,18 @@ D4 浏览器验收在两个 loopback 来源与不允许 unsafe-inline/unsafe-eva
 - 先在最终 outDir 以 exclusive create 写唯一 `.staged.aplg`，关闭后调用 `inspectPackage` 自检，并逐项比对快照 hash/size。随后只用同文件系统 hard-link 建立最终路径，平台不支持原子 no-clobber 时返回 `E_OUTPUT_PUBLISH`，禁止退化为覆盖式 rename。失败会按文件 identity 回滚本次 stage/已建立的 final link。
 - `inspectPackage` 自检仍只是结构与内容校验，`signature` 仍为 `not-verified`；它不代表签名信任、恶意代码沙箱、权限批准或商店审核。
 
+## D6 的无副作用 vanilla-ts 模板
+
+`initProject(directory, options)` 和 `aplg init` 只使用 devkit 自带模板，不 import 或执行用户项目配置，不调用 npm/pnpm、git、gh 或任何安装/构建命令。
+
+- `id` 必须是小写命名空间标识，`name` 是非空、无控制字符且不超过 160 个 Unicode 字符的显示名；模板选择首期固定为 `vanilla-ts`。JSON 使用 `JSON.stringify`，HTML 使用实体转义，模板不会把名称拼接成路径或 shell 片段。
+- 目标必须是普通目录且为空，或由 init 安全创建；目标及祖先的 symlink/junction 会被拒绝。初始化先用独占 `.aplg-init.lock` 取得目录归属，再逐文件 exclusive create；并发调用只有一个成功。
+- 生成项目固定为 `private: true`，包含 `aplg.json`、Vite 配置、浏览器 `src/main.ts`/CSS、可独立测试的 `src/example.js`、Node 测试、浏览器/Node 分离的两个 tsconfig、README、LICENSE、`.gitignore` 和只读 GitHub CI。不会生成 `node_modules`、`.git` 或虚假 `pnpm-lock.yaml`。
+- 生成 README 指向 `ai-switch/plugin-store` 的公开 PR 流程，说明首次 `pnpm install`、固定源码 commit/manifest SHA 和权限边界；CI action 使用固定 commit，不含 `pull_request_target`、发布凭据、写权限或自动发布。
+- 写入失败只删除本次创建且 identity 未改变的文件/空目录；如果目标身份发生变化则停止清理，避免递归删除用户内容。
+
+模板已随 npm tarball 的 `templates/` 发布。由于包管理器可能忽略源模板目录中的隐藏文件，仓库中以 `templates/vanilla-ts/gitignore` 保存源文件，init 渲染时输出目标项目的 `.gitignore`。
+
 ## 开发验证
 
 从仓库根目录；首次浏览器测试需先安装 Chromium/WebKit：
@@ -241,7 +261,7 @@ pnpm --dir packages/tauri-plugin-devkit test:built
 pnpm --dir packages/tauri-plugin-devkit test:browser
 ```
 
-`test` 会先构建 devkit，以便新 checkout 的公共类型消费者测试有真实 dist。测试包括真实临时目录、无副作用配置反例、部分读取/截断/改写、JSON 歧义、恶意 ZIP/解压预算/句柄回收、真实 yazl 输出、私有快照竞态、mtime/时区可复现性、并发 no-clobber/发布回滚、CLI stdout/exit codes、构建后 Node import/CLI 和公共类型。不修改开发者项目；测试临时目录在 finally 中复核路径/身份/所有权后删除。
+`test` 会先构建 devkit，以便新 checkout 的公共类型消费者测试有真实 dist。测试包括真实临时目录、无副作用配置反例、部分读取/截断/改写、JSON 歧义、恶意 ZIP/解压预算/句柄回收、真实 yazl 输出、私有快照竞态、mtime/时区可复现性、并发 no-clobber/发布回滚、init 覆盖保护/转义/并发/失败清理、CLI stdout/exit codes、构建后 Node import/CLI 和公共类型。另有外部 tarball 消费测试实际运行生成模板的 test/typecheck/build/validate/pack。不修改开发者项目；测试临时目录在 finally 中复核路径/身份/所有权后删除。
 
 `vite:^8.3.0` 为 optional peer，纯 CLI 不要求安装 Vite。其余计划依赖已按固定版本写入锁文件，D1 使用 runtime 与 jsonc-parser，D2 增加 yauzl 流式读取，D3 的 `/vite` 入口使用 Vite 8.3 的解析器；D4 的静态检查使用已声明的 HTML/CSS/module parser 与 Acorn。devkit 构建将 registry 依赖保持 external，不把 Node 工具代码混入 runtime 浏览器图。
 

@@ -1,4 +1,4 @@
-import { packProject, validateProject, type PackFile, type PackProjectOptions, type PackResult, type ProjectReport, type ValidateProjectOptions } from "@ai-switch/tauri-plugin-devkit";
+import { initProject, packProject, validateProject, type InitProjectOptions, type InitProjectResult, type PackFile, type PackProjectOptions, type PackResult, type ProjectReport, type ValidateProjectOptions } from "@ai-switch/tauri-plugin-devkit";
 import type { Manifest, Diagnostic } from "@ai-switch/tauri-plugin-runtime/protocol";
 
 const options: ValidateProjectOptions = { stage: "source", profile: "web-v1" };
@@ -23,6 +23,16 @@ validateProject(".", { stage: "build" });
 validateProject(".", { execute: true });
 // @ts-expect-error URI roots and arbitrary objects are not filesystem strings.
 validateProject(new URL("file:///tmp/plugin"));
+
+const initOptions: InitProjectOptions = { id: "io.github.example.demo", name: "Demo", template: "vanilla-ts" };
+const initialized: InitProjectResult = await initProject("./demo", initOptions);
+const initializedDirectory: string = initialized.directory;
+const initializedFiles: string[] = initialized.files;
+void [initializedDirectory, initializedFiles];
+// @ts-expect-error only the built-in template is currently available.
+initProject("./demo", { id: "io.github.example.demo", name: "Demo", template: "react" });
+// @ts-expect-error init options are required; init never guesses an ID or name.
+initProject("./demo");
 
 const packOptions: PackProjectOptions = { outDir: "./packages", profile: "web-v1" };
 const packed: PackResult = await packProject(".", packOptions);

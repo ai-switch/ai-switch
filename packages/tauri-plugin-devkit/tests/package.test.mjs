@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -18,9 +19,10 @@ test("public Node import never runs the CLI, reads a project or imports browser/
     for(const name of ['window','document']) Object.defineProperty(globalThis,name,{get(){throw new Error('DOM access on import');}});
     fs.open = async () => { throw new Error('project read on import'); };
     const api = await import('@ai-switch/tauri-plugin-devkit');
-    assert.deepEqual(Object.keys(api), ['inspectPackage', 'packProject', 'validateProject']);
+    assert.deepEqual(Object.keys(api), ['initProject', 'inspectPackage', 'packProject', 'validateProject']);
     assert.equal(typeof api.validateProject, 'function');
     assert.equal(typeof api.packProject, 'function');
+    assert.equal(typeof api.initProject, 'function');
     for(const path of ['/testing','/node-types','/src/index.ts','/dist/cli.js']) await assert.rejects(import('@ai-switch/tauri-plugin-devkit'+path),{code:'ERR_PACKAGE_PATH_NOT_EXPORTED'});
   `], { cwd: root, encoding: "utf8", timeout: 10000, windowsHide: true });
   assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout, "");
@@ -78,6 +80,36 @@ test("built inspect CLI succeeds with a real ZIP without writing or claiming a t
     if (actual !== directory || dirname(actual) !== parent || current.isSymbolicLink() || current.ino !== initial.ino || current.dev !== initial.dev) throw new Error("Refusing unowned CLI fixture cleanup");
     await rm(actual, { recursive: true, force: true });
   }
+});
+test("built init resolves the packaged template files without running install or build", async () => {
+  const parent = await realpath(tmpdir()); const directory = await mkdtemp(join(parent, "aplg-init-bin-"));
+  const initial = await lstat(directory);
+  try {
+    const { initProject } = await import("@ai-switch/tauri-plugin-devkit");
+    const result = await initProject(join(directory, "generated"), { id: "io.github.example.demo", name: "Demo" });
+    assert.equal(result.files.includes("templates"), false);
+    assert.equal(result.files.includes("vite.config.ts"), true);
+    assert.equal(JSON.parse(await readFile(join(directory, "generated", "aplg.json"), "utf8")).id, "io.github.example.demo");
+    assert.equal((await readFile(join(directory, "generated", "README.md"), "utf8")).includes("pnpm install"), true);
+  } finally {
+    const actual = await realpath(directory); const current = await lstat(directory);
+    if (actual !== directory || dirname(actual) !== parent || current.isSymbolicLink() || current.ino !== initial.ino || current.dev !== initial.dev) throw new Error("Refusing unowned init fixture cleanup");
+    await rm(actual, { recursive: true, force: true });
+  }
+});
+test("npm pack retains the non-hidden template source files", () => {
+  const executable = process.execPath;
+  const candidates = [
+    process.env.npm_execpath,
+    join(dirname(executable), "node_modules/npm/bin/npm-cli.js"),
+    join(dirname(executable), "../lib/node_modules/npm/bin/npm-cli.js"),
+  ].filter((value) => value && /npm(?:-cli)?\.js$/i.test(value) && existsSync(value));
+  const command = candidates.length ? [executable, candidates[0]] : ["npm"];
+  const result = spawnSync(command[0], [...command.slice(1), "pack", "--dry-run", "--json", "--ignore-scripts", "--loglevel=error"], { cwd: root, encoding: "utf8", timeout: 30000, windowsHide: true });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const files = JSON.parse(result.stdout)[0].files.map((file) => file.path);
+  assert.ok(files.includes("templates/vanilla-ts/gitignore"));
+  assert.ok(!files.includes("templates/vanilla-ts/.gitignore"));
 });
 test("public Vite entry is separate from the Node CLI and node-types is declarations only", () => {
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", `

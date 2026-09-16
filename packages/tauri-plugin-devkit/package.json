@@ -8,7 +8,7 @@
   "engines": { "node": "^22.12.0 || ^24.0.0 || >=26.0.0" },
   "packageManager": "pnpm@10.12.4",
   "bin": { "aplg": "./dist/cli.js" },
-  "files": ["dist", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],
+  "files": ["dist", "templates", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],
   "publishConfig": { "access": "public" },
   "exports": {
     ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },

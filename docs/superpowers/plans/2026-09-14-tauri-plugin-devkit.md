@@ -12,7 +12,7 @@
 
 **Prerequisite plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-runtime.md`。R1/R2 的导出/契约是唯一权威，本文只引用，不维护复制的 manifest/wire schema。
 
-**状态：** D1–D5 项目源码/产物校验、归档检查、CLI、Vite Node alias、握手 bootstrap、浏览器 ambient 类型与可复现 no-clobber `.aplg` 打包已实施并通过 Windows 本地验证；D6–D9 待实施。所有 npm 包仍未发布。未实施部分的方法、CLI 和代码片段仍是目标契约。
+**状态：** D1–D6 项目源码/产物校验、归档检查、CLI、Vite Node alias、握手 bootstrap、浏览器 ambient 类型、可复现 no-clobber `.aplg` 打包与无副作用 init 模板已实施并通过 Windows 本地验证；D7–D9 待实施。所有 npm 包仍未发布。未实施部分的方法、CLI 和代码片段仍是目标契约。
 
 ## Global Constraints
 
@@ -492,7 +492,7 @@ git commit -m "feat(devkit): 可复现且不覆盖的 APLG 打包"
 
 **Interfaces:** initProject 第 3.1 节签名；同一模板被 CLI 与 plugin-example 联调使用，不额外发布 generator 包。`aplgVite` 保留原生 HTML/CSS/JS 默认体验；模板选择 TS 只是新项目默认，不强迫现有 JS 示例改为 TS。固定生成 `private:true` 的用户项目，不把作者插件当 npm 公共库。
 
-- [ ] **Step 1：写覆盖保护和未执行脚本测试。**
+- [x] **Step 1：写覆盖保护和未执行脚本测试。**
 
 ```ts
 import { readFile } from "node:fs/promises";
@@ -510,8 +510,8 @@ test("initialization refuses a nonempty directory without changing its files", a
 });
 ```
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit exec vitest run tests/init.test.ts`。
-- [ ] **Step 3：生成显式、最小项目。** 校验 ID/name，字符串通过 JSON.stringify / HTML escaping 插入，不将 name 当 shell/path。只使用内置模板，目标必须不存在或为空且不为 link；逐文件 exclusive create，失败只清理本次已创建文件，不递归删除用户目标目录。
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit exec vitest run tests/init.test.ts`；初始 14 项测试因 `initProject is not a function`/CLI unavailable 按预期失败。
+- [x] **Step 3：生成显式、最小项目。** 校验 ID/name，字符串通过 JSON.stringify / HTML escaping 插入，不将 name 当 shell/path。只使用内置模板，目标必须不存在或为空且不为 link；逐文件 exclusive create，失败只清理本次已创建文件，不递归删除用户目标目录。
 
 模板 package scripts：`dev:vite`、`typecheck:tsc --noEmit`、`test:node --test tests/*.test.mjs`、`build:pnpm typecheck && vite build`、`plugin:validate:aplg validate --stage dist`、`plugin:pack:aplg pack`。模板还应包含 `tests/example.test.mjs` 和 `src/example.js` 的最小纯逻辑例子，避免生成一个会因没有测试文件而失败的 test script；它们列入模板文件清单。默认清单无权限，不自动使用 filesystem/network。模板的 `node-types` 声明由 types-only 出口加载，不产生 JS import。模板 browser tsconfig 为 ES2022/DOM、ESNext/Bundler、strict、allowJs/checkJs、上述 node-types；只 include src，测试与 Vite 配置使用独立 Node 配置，避免全量 Node 声明污染插件。
 
@@ -519,8 +519,8 @@ test("initialization refuses a nonempty directory without changing its files", a
 
 生成 `.gitignore` 排除 dist/node_modules/.aplg-output/*.aplg/.env。README 清楚说明虚拟文件能力由宿主提供，模板与真实权限没有自动关系；投稿指向 plugin-store 的固定源码 commit、manifest SHA 和维护者核验流程。模板 `.github/workflows/ci.yml` 从 `templates/github/ci.yml` 生成；只读 CI template 固定 action 提交，不含签名、商店 token、`pull_request_target` 或自动批准 PR。
 
-- [ ] **Step 4：GREEN。** 测试 Unicode 名称、恶意 HTML/name/ID、目标已有文件、symlink 根、并发 init、输出树不含 node_modules/.git、版本一致、生成项目真实安装后 typecheck/test/build/validate/pack 通过（在 D8 tarball 验收集中运行）。
-- [ ] **Step 5：提交。**
+- [x] **Step 4：GREEN。** `init.test.ts` 14 项覆盖 Unicode/恶意 HTML、ID/name/template 校验、覆盖保护、symlink、并发、失败清理、只读 CI；CLI 与既有回归通过。模板 tarball 实际包含 `gitignore` 源文件并由 bundled init 输出 `.gitignore`；外部 runtime/devkit tarball 使用 pnpm override 安装后，生成项目的 test/typecheck/typecheck:node/build/validate/pack 全部通过。
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-devkit/src/init packages/tauri-plugin-devkit/src/cli packages/tauri-plugin-devkit/src/index.ts packages/tauri-plugin-devkit/templates packages/tauri-plugin-devkit/tests/init.test.ts
@@ -755,4 +755,17 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 - 包内 **12 文件 / 410 项**测试（相对 D3 增加 76 项）通过；typecheck、Node/浏览器公共类型、生成物校验、build 与构建后 **5 项**通过。无框架真实宿主/独立 runtime tarball、严格 CSP、两来源 opaque iframe 的 **7 场景 × Chromium/WebKit = 14 项**通过，覆盖握手门控、无重复副作用、拒绝连接、业务异常、无宿主、静态 HTML、挂载清理。审查发现“静态 HTML 完全不注入客户端”会使 R5 mount 等待到超时，先补实际浏览器失败测试后改为 handshake-only bootstrap，验证静态页也能正常挂载。
 - 首轮 RED 的未受保护输出配置曾写入本 worktree 的 packages/outside 两个测试资产，已核对内容并按精确文件/空目录删除。初版 Playwright webServer 在 Windows 强制终止时未执行 finally，遗留一次外部 fixture 目录；后续改为资产入内存后、宣布 ready 前清理，复跑不再创建残留。对早期外部临时目录的递归清理命令被工具策略拒绝，不绕过限制；残留路径为 `C:\Users\Admin\AppData\Local\Temp\aplg-tarball-10URSa`，与工作树代码无关。
 - runtime **26 文件 / 364 项**、typecheck 和独立 tarball **8 项 Chromium/WebKit**复验通过；主应用 typecheck 与 **74 文件 / 803 项**回归通过。测试工具和业务构建均为 Windows Node 22.22.2，Linux/Node24 的既有验收缺口仍保留。
-- README、第三方许可和整体设计状态同步；本任务只本地提交，不运行 Cargo、不新建 target、不推送/tag/npm publish、不修改远程 plugin-example/plugin-store。D5 可复现打包、D6 init、D7 模拟宿主、D8 双包消费与 D9 授权发布未提前交付。
+- README、第三方许可和整体设计状态同步；本任务只本地提交，不运行 Cargo、不新建 target、不推送/tag/npm publish、不修改远程 plugin-example/plugin-store。D5 可复现打包与 D6 init 已交付；D7 模拟宿主、D8 双包消费与 D9 授权发布仍未交付。
+
+### D5（2026-09-16）
+
+- 已完成可复现且不覆盖的 `.aplg` pack：私有稳定快照、固定 ZIP 元数据、自检、hard-link no-clobber、并发/竞态回滚和 CLI pack；提交 `d22b74c`。
+- D5 核心、CLI、全量 devkit 回归和公共类型验证已通过；后续 D6 全量测试总数为 **15 个文件 / 443 项 Vitest**。
+
+### D6（2026-09-16）
+
+- 按 TDD 先写 14 项 init 测试并观察缺失 API 的 RED，再实现 `src/init/{index,render}.ts`、内置 `vanilla-ts` 模板和 CLI init；公共根入口新增 `initProject` 及 `InitProjectOptions/InitProjectResult`。
+- 初始化不执行 npm/pnpm、git/gh、Vite config 或构建；目标通过逐级路径检查和独占 `.aplg-init.lock` 归属，文件逐一 exclusive create。并发只有一个成功；失败只按 identity 清理本次创建内容。
+- 模板包含私有 package、manifest、Vite/aplgVite、浏览器/Node 分离 tsconfig、纯 JS 单元测试、README、LICENSE、`.gitignore` 和固定 commit 的只读 GitHub CI；不生成 lockfile/node_modules/.git。源模板使用 `gitignore` 避免 npm 忽略隐藏文件，渲染目标仍为 `.gitignore`。
+- 外部 tarball 消费验证在 Windows Node 22.22.2 通过：安装 runtime/devkit 本地 tarball override，使用已安装 devkit CLI init，再运行生成项目的 test、typecheck、Node config typecheck、build、validate、pack；devkit 全量 **15 文件 / 443 项 Vitest**、built package **7 项**、公共类型、browser types、node-types 和 Chromium/WebKit **14 项**均通过。npm dry-run 文件清单确认 `templates/vanilla-ts/gitignore` 随包发布。
+- 本机 Docker 不可用且 WSL Ubuntu VHD 无法挂载，未虚假声明 Linux 验收；不调用 Cargo、不推送/tag/npm publish、不修改远程 plugin-example/plugin-store。

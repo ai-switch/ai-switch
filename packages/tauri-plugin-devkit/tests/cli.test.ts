@@ -75,10 +75,10 @@ describe("aplg CLI", () => {
       expect(open).not.toHaveBeenCalled();
     } finally { open.mockRestore(); }
   });
-  test("not-yet-implemented init exits 1 without creating files", async () => {
+  test("init requires its project metadata before creating files", async () => {
     await withProject({}, async (root) => {
       const out = output(); expect(await runCli(["init", "target", "--json"], out.io, { cwd: root })).toBe(1);
-      expect(JSON.parse(out.stdout)).toMatchObject({ valid: false, diagnostics: [expect.objectContaining({ code: "E_COMMAND_UNAVAILABLE" })] });
+      expect(JSON.parse(out.stdout)).toMatchObject({ valid: false, diagnostics: [expect.objectContaining({ code: "E_CLI_ARGUMENTS" })] });
       await expect(fs.access(join(root, "target"))).rejects.toMatchObject({ code: "ENOENT" });
     });
   });
