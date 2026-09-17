@@ -539,6 +539,9 @@ async fn claude_group_save_preserves_pool_managed_lifecycle_fields() {
     payload["models"][0]["syncState"] = json!("active");
     payload["models"][0]["managedByPool"] = json!(false);
     payload["models"][0]["lastSeenAt"] = json!(null);
+    // Leave the model disabled so this case isolates lifecycle ownership: the
+    // client must not be able to claim (or clear) pool management.
+    payload["models"][0]["enabled"] = json!(false);
     admin(&pool, "groups.save", payload).await.unwrap();
 
     let row: (bool, String, bool) = sqlx::query_as(
@@ -549,4 +552,26 @@ async fn claude_group_save_preserves_pool_managed_lifecycle_fields() {
     .await
     .unwrap();
     assert_eq!(row, (false, "pending_pricing".to_string(), true));
+}
+#[tokio::test]
+async fn admin_can_promote_a_pending_model_by_pricing_and_enabling_it() {
+    let pool = repository::test_pool().await;
+    repository::insert_claude_sync_fixture(&pool).await;
+    admin(&pool, "groups.sync", json!({"groupId":"claude-saas"}))
+        .await
+        .unwrap();
+
+    let mut payload = repository::claude_group_payload();
+    payload["models"][0]["enabled"] = json!(true);
+    payload["models"][0]["syncState"] = json!("pending_pricing");
+    admin(&pool, "groups.save", payload).await.unwrap();
+
+    let row: (bool, String) = sqlx::query_as(
+        "SELECT enabled,sync_state FROM saas_group_models
+         WHERE group_id='claude-saas' AND model='provider-sonnet'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (true, "active".to_string()));
 }

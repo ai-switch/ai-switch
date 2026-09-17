@@ -626,13 +626,18 @@ pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> 
         .map_err(db_error)?;
     for model in input.models {
         let previous = existing_models.iter().find(|row| row.model == model.model);
-        let sync_state = previous
-            .map(|row| row.sync_state.as_str())
-            .or_else(|| match model.sync_state.as_str() {
-                "pending_pricing" | "stale" => Some(model.sync_state.as_str()),
-                _ => None,
-            })
-            .unwrap_or("active");
+        // A pending model becomes active only when the administrator explicitly
+        // enables it; that is how an auto-discovered model is priced and opened
+        // for billing. A stale model stays stale regardless of the payload: the
+        // pool no longer advertises it, so enabling it would serve nothing.
+        let sync_state = match previous.map(|row| row.sync_state.as_str()) {
+            Some("pending_pricing") if model.enabled => "active",
+            Some(state) => state,
+            None => match model.sync_state.as_str() {
+                "pending_pricing" | "stale" => model.sync_state.as_str(),
+                _ => "active",
+            },
+        };
         let managed_by_pool = previous
             .map(|row| row.managed_by_pool)
             .unwrap_or(model.managed_by_pool);
