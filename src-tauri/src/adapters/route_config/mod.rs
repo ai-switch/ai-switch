@@ -1,3 +1,4 @@
+mod client_home;
 mod codex;
 mod deepseek_harness;
 mod hermes;
@@ -175,6 +176,8 @@ impl TargetAdapterRegistry {
                 Arc::new(DeepSeekHarnessAdapter::claude()),
                 Arc::new(WorkBuddyAdapter::codex()),
                 Arc::new(WorkBuddyAdapter::claude()),
+                Arc::new(WorkBuddyAdapter::workbuddy_ai_codex()),
+                Arc::new(WorkBuddyAdapter::workbuddy_ai_claude()),
                 Arc::new(WorkBuddyAdapter::codebuddy_codex()),
                 Arc::new(WorkBuddyAdapter::codebuddy_claude()),
                 Arc::new(QoderCliAdapter::codex()),
@@ -736,6 +739,7 @@ api_key = "legacy-key"
                 "zcode",
                 "deepseek_harness",
                 "workbuddy",
+                "workbuddy_ai",
                 "codebuddy_cli",
                 "qoder_cli"
             ]
@@ -766,6 +770,7 @@ api_key = "legacy-key"
                 "zcode",
                 "deepseek_harness",
                 "workbuddy",
+                "workbuddy_ai",
                 "codebuddy_cli",
                 "qoder_cli"
             ]

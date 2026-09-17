@@ -1,6 +1,6 @@
 use super::{
-    base_url_root, base_url_with_v1, existing_text, generated_invalid, invalid_existing_config,
-    ClientModel, RouteConfigInput, TargetAdapter, TargetInspection,
+    base_url_root, base_url_with_v1, client_home, existing_text, generated_invalid,
+    invalid_existing_config, ClientModel, RouteConfigInput, TargetAdapter, TargetInspection,
 };
 use crate::{error::AppError, models::platform::PlatformId};
 use serde_json::{json, Map, Value};
@@ -149,8 +149,19 @@ impl TargetAdapter for ZCodeAdapter {
         self.platform
     }
 
+    /// ZCode resolves its data root as: runtime override →
+    /// `ZCODE_DATA_BASE_DIR` → homedir ponyfill (`HOME` first). Third-party
+    /// software (Cadence SPB 16.6 was observed) exports a global `HOME`, which
+    /// silently moves the client's config to e.g.
+    /// `%APPDATA%\SPB_16.6\.zcode\v2` while `BaseDirs::home_dir()` stays on the
+    /// profile dir — so the base path alone is wrong whenever `HOME` is
+    /// redirected. Re-derive the client's own resolution instead of scanning
+    /// for install-shaped directories.
     fn resolve_path(&self, home: &Path) -> PathBuf {
-        home.join(".zcode").join("v2").join("config.json")
+        client_home::zcode_base_for(home)
+            .join(".zcode")
+            .join("v2")
+            .join("config.json")
     }
 
     fn render(

@@ -1,6 +1,6 @@
 use super::{
-    existing_text, generated_invalid, invalid_existing_config, ClientModel, RouteConfigInput,
-    TargetAdapter, TargetInspection,
+    client_home, existing_text, generated_invalid, invalid_existing_config, ClientModel,
+    RouteConfigInput, TargetAdapter, TargetInspection,
 };
 use crate::{error::AppError, models::platform::PlatformId};
 use serde_json::{json, Map, Value};
@@ -26,9 +26,24 @@ use std::path::{Path, PathBuf};
 ///
 /// The desktop app and the CLI are the same code reading different data dirs:
 /// the desktop injects `CODEBUDDY_CONFIG_DIR`/`WORKBUDDY_CONFIG_DIR` pointing at
-/// `~/.workbuddy`, while a bare `codebuddy` invocation resolves `~/.codebuddy`.
-/// They are separate install targets, so each gets its own client rather than one
-/// write pretending to cover both.
+/// its own data folder, while a bare `codebuddy` invocation resolves
+/// `~/.codebuddy`. They are separate install targets, so each gets its own client
+/// rather than one write pretending to cover both.
+///
+/// The data folder itself is not fixed: `getUserConfigPath()` falls back to
+/// `path.join(os.homedir(), productJson.dataFolderName, "models.json")`, and the
+/// mainland and overseas builds ship different `product.json` files. Verified on
+/// disk for 5.5.6 and 5.5.2:
+///
+/// | build | `productName` | `applicationName` | `dataFolderName` |
+/// | --- | --- | --- | --- |
+/// | mainland | `WorkBuddy` | `WorkBuddy` | `.workbuddy` |
+/// | overseas | `WorkBuddy AI` | `workbuddy-ai` | `.workbuddy-ai` |
+///
+/// Both can be installed side by side — they are two separate products in the
+/// uninstall registry — so they are two clients with two files, exactly like the
+/// desktop/CLI split above. Matching on `productName` would have collapsed them:
+/// `"WorkBuddy AI".toLowerCase().includes("workbuddy")` is true.
 pub(super) struct WorkBuddyAdapter {
     target_key: &'static str,
     client_key: &'static str,
@@ -57,6 +72,31 @@ impl WorkBuddyAdapter {
             client_key: "workbuddy",
             client_display_name: "WorkBuddy",
             config_dir: ".workbuddy",
+            platform: PlatformId::Claude,
+            display_name_prefix: "AI Switch Claude",
+        }
+    }
+
+    /// The overseas build ("WorkBuddy AI") ships `dataFolderName:
+    /// ".workbuddy-ai"`, so it reads a different `models.json` than the mainland
+    /// build. Same code, same file shape, different folder.
+    pub(super) const fn workbuddy_ai_codex() -> Self {
+        Self {
+            target_key: "workbuddy_ai_codex",
+            client_key: "workbuddy_ai",
+            client_display_name: "WorkBuddy AI",
+            config_dir: ".workbuddy-ai",
+            platform: PlatformId::Codex,
+            display_name_prefix: "AI Switch Codex",
+        }
+    }
+
+    pub(super) const fn workbuddy_ai_claude() -> Self {
+        Self {
+            target_key: "workbuddy_ai_claude",
+            client_key: "workbuddy_ai",
+            client_display_name: "WorkBuddy AI",
+            config_dir: ".workbuddy-ai",
             platform: PlatformId::Claude,
             display_name_prefix: "AI Switch Claude",
         }
@@ -199,8 +239,24 @@ impl TargetAdapter for WorkBuddyAdapter {
         self.platform
     }
 
+    /// The desktop app and its bundled CLI both call an `os-homedir` ponyfill
+    /// (`HOME` first, then the profile dir), so a global `HOME` exported by
+    /// other software — Cadence SPB 16.6 sets it to `%APPDATA%\SPB_16.6` —
+    /// moves this file to the redirected root too. `home` here is the profile
+    /// dir from `BaseDirs`, which is only the ponyfill's fallback; resolve
+    /// through the same chain the client uses.
+    ///
+    /// `self.config_dir` is the build's own `product.json#dataFolderName`, so the
+    /// mainland and overseas clients land on the file each of them actually
+    /// reads. `WORKBUDDY_CONFIG_DIR`/`CODEBUDDY_CONFIG_DIR` take precedence over
+    /// that folder in `getUserConfigPath()`, but a process-local injection is how
+    /// the desktop points its own CLI child at the same folder — it never makes
+    /// the two builds disagree about which folder is theirs, so it is not
+    /// overridden here.
     fn resolve_path(&self, home: &Path) -> PathBuf {
-        home.join(self.config_dir).join("models.json")
+        client_home::ponyfill_base_for(home)
+            .join(self.config_dir)
+            .join("models.json")
     }
 
     fn render(
@@ -402,6 +458,43 @@ mod tests {
         assert_eq!(
             codex_adapter().resolve_path(home),
             home.join(".workbuddy").join("models.json")
+        );
+    }
+
+    /// The overseas build reads `.workbuddy-ai`, not `.workbuddy`. Matching the
+    /// product name would have been wrong — "WorkBuddy AI" contains
+    /// "workbuddy" — so the folder comes from each build's `product.json`.
+    #[test]
+    fn the_overseas_build_reads_its_own_data_folder() {
+        let registry = TargetAdapterRegistry::new();
+        let home = Path::new("/home/user");
+
+        for (platform, target_key) in [
+            (PlatformId::Codex, "workbuddy_ai_codex"),
+            (PlatformId::Claude, "workbuddy_ai_claude"),
+        ] {
+            let adapter = registry
+                .by_client_and_platform("workbuddy_ai", platform)
+                .expect("workbuddy ai adapter");
+            assert_eq!(adapter.target_key(), target_key);
+            assert_eq!(adapter.client_display_name(), "WorkBuddy AI");
+            assert_eq!(
+                adapter.resolve_path(home),
+                home.join(".workbuddy-ai").join("models.json")
+            );
+        }
+
+        // Two installs, two files: configuring one must never be mistaken for
+        // configuring the other.
+        assert_ne!(
+            registry
+                .by_client_and_platform("workbuddy", PlatformId::Codex)
+                .expect("workbuddy")
+                .resolve_path(home),
+            registry
+                .by_client_and_platform("workbuddy_ai", PlatformId::Codex)
+                .expect("workbuddy ai")
+                .resolve_path(home)
         );
     }
 

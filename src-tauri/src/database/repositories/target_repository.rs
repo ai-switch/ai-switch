@@ -27,6 +27,11 @@ impl TargetRepository {
             ),
             ("workbuddy_codex", "codex", "WorkBuddy (Codex)"),
             ("workbuddy_claude", "claude", "WorkBuddy (Claude)"),
+            // The overseas build ships `dataFolderName: ".workbuddy-ai"`, so it
+            // is a second install with a second config file rather than the same
+            // client under another name.
+            ("workbuddy_ai_codex", "codex", "WorkBuddy AI (Codex)"),
+            ("workbuddy_ai_claude", "claude", "WorkBuddy AI (Claude)"),
             ("codebuddy_cli_codex", "codex", "CodeBuddy CLI (Codex)"),
             ("codebuddy_cli_claude", "claude", "CodeBuddy CLI (Claude)"),
             ("qoder_cli_codex", "codex", "Qoder CLI (Codex)"),
