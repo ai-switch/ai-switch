@@ -710,7 +710,7 @@ assert.equal(validateManifest({ manifestVersion: 99 }).ok, false);
 
 演示宿主提供只在内存的 `aplg.storage`、一个仅在 requires 声明 storage 且不申请系统文件/网络权限的插件和明确“模拟宿主，仅内存数据”的标识；真实 `aplg.fs` 不可用，不伪造磁盘能力。静态页面通过 R5 的 transport 接入，验证 iframe mount、存储、清理。示例 package 使用独立 Vite 8，不升级主应用 Vite 5。
 
-- [ ] **Step 4：执行完整验收。** Windows 本地验收已通过，Linux 仍待实测（见 R8 执行记录），此项保留未勾选。
+- [ ] **Step 4：执行完整验收。** Windows 本地验收已通过；Linux 仍待实测（WSL Ubuntu 与 podman machine 均因 `ext4.vhdx` 缺失无法启动），此项保留未勾选。
 
 ```powershell
 pnpm --dir packages/tauri-plugin-runtime run check:generated

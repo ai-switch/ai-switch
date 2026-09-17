@@ -1,7 +1,7 @@
 # APLG 通用插件运行时与 ai-switch 双模式接入设计
 
 - 日期：2026-09-13
-- 状态：总体方向、npm 包名和公开 PR 发布入口已确认；本文同步 `ai-switch/plugin-store` 的职责与信任边界，并已拆分 runtime/devkit 两份实施计划。已创建远程仓库及贡献文档；runtime R1–R8 的协议、桥、Node 客户端、独立 npm tarball 与无框架示例已实现，Windows Node/Chromium/WebKit 验收通过，Linux 因本机 WSL VHD 缺失待补验。devkit D1–D4 的源码/产物校验、归档检查、CLI、Vite Node alias、握手 bootstrap 与类型适配已实施，D5–D9、真实 Rust/Tauri/Web 宿主接入与自动发布流水线尚未实施，所有 npm 包均未发布。
+- 状态：总体方向、npm 包名和公开 PR 发布入口已确认；本文同步 `ai-switch/plugin-store` 的职责与信任边界，并已拆分 runtime/devkit 两份实施计划。runtime R1–R8 与 devkit D1–D9 已在 Windows Node 22.22.2 本地实现并通过测试；协调 CI 与受控发布入口已准备，但 Linux/Node 24 未在本机复验，npm scope/trusted publisher 与真实发布仍未启用。真实 Rust/Tauri/Web 宿主接入、plugin-store 审核构建/签名/索引和原生扩展 profile 尚未实施，所有 npm 包均未发布。
 - 工作树：`D:\Repos\worktree\ai-switch-plugin-design`
 - 分支：`docs/plugin-architecture`
 - ai-switch 调研基线：`a8387b5`。

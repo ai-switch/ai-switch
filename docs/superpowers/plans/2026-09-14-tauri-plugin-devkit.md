@@ -12,7 +12,7 @@
 
 **Prerequisite plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-runtime.md`。R1/R2 的导出/契约是唯一权威，本文只引用，不维护复制的 manifest/wire schema。
 
-**状态：** D1–D8 项目源码/产物校验、归档检查、CLI、Vite Node alias、握手 bootstrap、浏览器 ambient 类型、可复现 no-clobber `.aplg` 打包、无副作用 init 模板、显式内存测试宿主、开发预览与双 tarball 外部验收已实施并通过 Windows 本地验证；D9 待实施。所有 npm 包仍未发布。未实施部分的方法、CLI 和代码片段仍是目标契约。
+**状态：** D1–D9 已实施并通过 Windows 本地验证；协调 CI 与受控发布入口已准备，但 Linux/Node 24 未在本机复验，npm scope/trusted publisher 与真实发布仍未启用。所有 npm 包仍未发布。
 
 ## Global Constraints
 
@@ -575,7 +575,7 @@ git commit -m "feat(devkit): 提供显式内存测试宿主与开发预览"
 
 **Interfaces:** runtime R8 的 tarball 与 devkit tarball；验收消费者不读取 packages/src、不共享 pnpm workspace symlink。`verify-pair.mjs` 的 CLI 为 `node scripts/aplg/verify-pair.mjs --runtime <runtime.tgz> --devkit <devkit.tgz>`，退出 0 表示安装、构建、打包与浏览器夹具通过。
 
-- [ ] **Step 1：先写真实子进程 CLI 测试。** 将 root 外临时目录作为 cwd，安装两个 tarball（通过 pnpm overrides 将 devkit 的 runtime 精确依赖指向本地 runtime tgz），运行 bin，而非直接 import 源码函数。
+- [x] **Step 1：先写真实子进程 CLI 测试。** 将 root 外临时目录作为 cwd，安装两个 tarball（通过 pnpm overrides 将 devkit 的 runtime 精确依赖指向本地 runtime tgz），运行 bin，而非直接 import 源码函数。
 
 ```ts
 import { expect, test } from "vitest";
@@ -761,6 +761,12 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 
 - 已完成可复现且不覆盖的 `.aplg` pack：私有稳定快照、固定 ZIP 元数据、自检、hard-link no-clobber、并发/竞态回滚和 CLI pack；提交 `d22b74c`。
 - D5 核心、CLI、全量 devkit 回归和公共类型验证已通过；后续 D6 全量测试总数为 **15 个文件 / 443 项 Vitest**。
+
+### D9 后续状态（2026-09-18）
+
+- D9 已本地提交，devkit 计划 D1–D9 全部实施完成。Windows Node 22.22.2 下两包 typecheck/test/build/pack、`verify-pair`、Chromium/WebKit、发布计划与假 registry 演练均通过。
+- Linux/Node 24 仍未在本机复验：WSL Ubuntu 与 podman-machine-default 都因 `ext4.vhdx` 缺失无法启动，返回 `Wsl/Service/CreateInstance/MountDisk/HCS/ERROR_FILE_NOT_FOUND`。这不影响 Windows 结论，但不宣称跨平台全通过。
+- npm scope、trusted publisher、GitHub environment `aplg-npm-release` 与真实 npm/GitHub Release 尚未配置或执行；`publish-npm` 默认 dry-run，未推送、未打 tag、未发布。
 
 ### D9（2026-09-18）
 
