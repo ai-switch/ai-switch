@@ -36,10 +36,10 @@ use crate::services::route_credential_activity::{
 use crate::services::route_failure_scope::is_account_scoped_failure;
 use crate::services::route_model_capability::{
     advertised_model_catalog_entries, catalog_members, codex_effective_context_window,
-    codex_reasoning_metadata, known_upstream_models, model_state_key, parse_model_capability,
-    parse_model_capability_value, requested_model_from_body, resolve_mapping_target,
-    supports_requested_capability, supports_requested_model, CatalogMemberInput, ModelCapability,
-    ModelMatchMode,
+    codex_reasoning_metadata, known_upstream_models, model_matches, model_state_key_with_mode,
+    parse_model_capability, parse_model_capability_value, requested_model_from_body,
+    resolve_mapping_target, supports_requested_capability_with_mode, supports_requested_model,
+    CatalogMemberInput, ModelCapability, ModelMatchMode,
 };
 use crate::services::route_pool_model_mode::{
     accepted_prefixes, is_official_model_prefix, split_prefixed_model, PoolModelMode,
@@ -284,6 +284,7 @@ impl RouteProxyInner {
 pub(crate) struct ProxyAppState {
     pool: SqlitePool,
     access_scope: Option<Arc<ProxyAccessScope>>,
+    model_match_mode: ModelMatchMode,
     key_cache: Arc<Mutex<RouteProxyKeyCache>>,
     activity: RouteCredentialActivityRegistry,
     live_log: RouteProxyLiveLog,
@@ -310,6 +311,11 @@ impl ProxyAppState {
             platform,
             credential_ids,
         }));
+        self
+    }
+
+    pub(crate) fn with_model_match_mode(mut self, mode: ModelMatchMode) -> Self {
+        self.model_match_mode = mode;
         self
     }
 
@@ -382,6 +388,7 @@ pub(crate) fn build_proxy_state(
     ProxyAppState {
         pool,
         access_scope: None,
+        model_match_mode: ModelMatchMode::ClientFacing,
         key_cache: Arc::new(Mutex::new(RouteProxyKeyCache::default())),
         activity: runtime.activity.clone(),
         live_log: runtime.live_log.clone(),
@@ -903,13 +910,19 @@ pub(crate) async fn forward_request(
     // asks for decides which cooldown applies, so an account cannot be judged
     // before its model key is known. It also means the all-cooling probe below
     // is now scoped to accounts that can actually serve this model.
-    let candidates = filter_candidates_for_model(&platform, candidates, requested_model.as_deref());
+    let candidates = filter_candidates_for_model_with_mode(
+        &platform,
+        candidates,
+        requested_model.as_deref(),
+        state.model_match_mode,
+    );
     let candidates = if let Some(capability) = requested_image_capability(&path) {
-        filter_candidates_for_capability(
+        filter_candidates_for_capability_with_mode(
             &platform,
             candidates,
             requested_model.as_deref(),
             capability,
+            state.model_match_mode,
         )
     } else {
         candidates
@@ -1082,6 +1095,7 @@ pub(crate) async fn forward_request(
             &body_bytes,
             Some(&state.codex_history),
             TurnReminderMode::Apply,
+            state.model_match_mode,
         );
         let BuiltUpstreamRequest {
             target_url,
@@ -3434,6 +3448,20 @@ fn filter_candidates_for_model(
     candidates: Vec<PoolCandidate>,
     requested_model: Option<&str>,
 ) -> Vec<PoolCandidate> {
+    filter_candidates_for_model_with_mode(
+        platform,
+        candidates,
+        requested_model,
+        ModelMatchMode::ClientFacing,
+    )
+}
+
+fn filter_candidates_for_model_with_mode(
+    platform: &str,
+    candidates: Vec<PoolCandidate>,
+    requested_model: Option<&str>,
+    mode: ModelMatchMode,
+) -> Vec<PoolCandidate> {
     let Some(requested_model) = requested_model else {
         return candidates;
     };
@@ -3442,14 +3470,15 @@ fn filter_candidates_for_model(
         .into_iter()
         .filter_map(|mut candidate| {
             let capability = candidate_capability(&candidate);
-            if !supports_requested_model(platform, &capability, Some(requested_model)) {
+            if !model_matches(platform, &capability, Some(requested_model), mode) {
                 return None;
             }
-            candidate.model_key = Some(model_state_key(
+            candidate.model_key = Some(model_state_key_with_mode(
                 platform,
                 &capability,
                 &candidate.credential.kind,
                 requested_model,
+                mode,
             ));
             Some(candidate)
         })
@@ -3470,14 +3499,31 @@ fn filter_candidates_for_capability(
     requested_model: Option<&str>,
     requested_capability: &str,
 ) -> Vec<PoolCandidate> {
+    filter_candidates_for_capability_with_mode(
+        platform,
+        candidates,
+        requested_model,
+        requested_capability,
+        ModelMatchMode::ClientFacing,
+    )
+}
+
+fn filter_candidates_for_capability_with_mode(
+    platform: &str,
+    candidates: Vec<PoolCandidate>,
+    requested_model: Option<&str>,
+    requested_capability: &str,
+    mode: ModelMatchMode,
+) -> Vec<PoolCandidate> {
     candidates
         .into_iter()
         .filter(|candidate| {
-            supports_requested_capability(
+            supports_requested_capability_with_mode(
                 platform,
                 &candidate_capability(candidate),
                 requested_model,
                 requested_capability,
+                mode,
             )
         })
         .collect()
@@ -3545,6 +3591,14 @@ pub fn apply_responses_custom_tool_compat(body: &[u8]) -> Vec<u8> {
 }
 
 pub fn apply_model_mappings(body: &[u8], mappings: &[ModelMapping]) -> Vec<u8> {
+    apply_model_mappings_with_mode(body, mappings, ModelMatchMode::ClientFacing)
+}
+
+pub(crate) fn apply_model_mappings_with_mode(
+    body: &[u8],
+    mappings: &[ModelMapping],
+    mode: ModelMatchMode,
+) -> Vec<u8> {
     if mappings.is_empty() {
         return body.to_vec();
     }
@@ -3552,11 +3606,11 @@ pub fn apply_model_mappings(body: &[u8], mappings: &[ModelMapping]) -> Vec<u8> {
     let Ok(mut value) = serde_json::from_slice::<Value>(body) else {
         return body.to_vec();
     };
-    rewrite_model_value(&mut value, mappings);
+    rewrite_model_value(&mut value, mappings, mode);
     serde_json::to_vec(&value).unwrap_or_else(|_| body.to_vec())
 }
 
-fn rewrite_model_value(value: &mut Value, mappings: &[ModelMapping]) {
+fn rewrite_model_value(value: &mut Value, mappings: &[ModelMapping], mode: ModelMatchMode) {
     match value {
         Value::Object(object) => {
             if let Some(model) = object
@@ -3564,19 +3618,17 @@ fn rewrite_model_value(value: &mut Value, mappings: &[ModelMapping]) {
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
             {
-                if let Some(target) =
-                    resolve_mapping_target(mappings, &model, ModelMatchMode::ClientFacing)
-                {
+                if let Some(target) = resolve_mapping_target(mappings, &model, mode) {
                     object.insert("model".to_string(), Value::String(target));
                 }
             }
             for child in object.values_mut() {
-                rewrite_model_value(child, mappings);
+                rewrite_model_value(child, mappings, mode);
             }
         }
         Value::Array(items) => {
             for child in items {
-                rewrite_model_value(child, mappings);
+                rewrite_model_value(child, mappings, mode);
             }
         }
         _ => {}
@@ -3784,6 +3836,7 @@ pub fn build_upstream_request(
         body,
         None,
         TurnReminderMode::Apply,
+        ModelMatchMode::ClientFacing,
     )?;
     Ok((request.target_url, request.headers, request.body))
 }
@@ -3819,6 +3872,7 @@ pub(crate) fn build_upstream_request_with_bridge(
         body,
         None,
         turn_reminder,
+        ModelMatchMode::ClientFacing,
     )
 }
 
@@ -3831,6 +3885,7 @@ fn build_upstream_request_internal(
     body: &[u8],
     codex_history: Option<&CodexReasoningCache>,
     turn_reminder: TurnReminderMode,
+    model_match_mode: ModelMatchMode,
 ) -> Result<BuiltUpstreamRequest, String> {
     let secret = parse_json_object(&credential.secret_payload_json, "secret")?;
     let config = parse_json_object(&credential.config_json, "config")?;
@@ -3847,6 +3902,7 @@ fn build_upstream_request_internal(
             &config,
             codex_history,
             turn_reminder,
+            model_match_mode,
         )
     } else {
         build_official_upstream_request(
@@ -3858,6 +3914,7 @@ fn build_upstream_request_internal(
             body,
             &secret,
             &config,
+            model_match_mode,
         )
     }
 }
@@ -3873,6 +3930,7 @@ fn build_api_upstream_request(
     config: &Value,
     codex_history: Option<&CodexReasoningCache>,
     turn_reminder: TurnReminderMode,
+    model_match_mode: ModelMatchMode,
 ) -> Result<BuiltUpstreamRequest, String> {
     let platform = PlatformId::parse(platform).map_err(format_app_error)?;
     PlatformCapabilityService::require(platform, PlatformOperation::GenericApiRouting)
@@ -3905,7 +3963,7 @@ fn build_api_upstream_request(
     let interface_format = dialect.as_str();
     let mappings = parse_model_capability_value(config).mappings;
     let upstream_path = normalize_api_upstream_path(interface_format, path);
-    let mut rewritten_body = apply_model_mappings(body, &mappings);
+    let mut rewritten_body = apply_model_mappings_with_mode(body, &mappings, model_match_mode);
     // Codex's `tools[].type = "custom"` and the `custom_tool_call` items that
     // follow it exist only in the Responses schema, so every bridge that leaves
     // that schema needs them spelled as plain function tools — a `custom` tool
@@ -4060,12 +4118,13 @@ fn build_official_upstream_request(
     body: &[u8],
     secret: &Value,
     config: &Value,
+    model_match_mode: ModelMatchMode,
 ) -> Result<BuiltUpstreamRequest, String> {
     let platform = PlatformId::parse(platform).map_err(format_app_error)?;
     PlatformCapabilityService::require(platform, PlatformOperation::OfficialAccountRouting)
         .map_err(format_app_error)?;
     let mappings = parse_model_capability_value(config).mappings;
-    let mut rewritten_body = apply_model_mappings(body, &mappings);
+    let mut rewritten_body = apply_model_mappings_with_mode(body, &mappings, model_match_mode);
     // Apply credential-provided headers first (CPA may ship extra headers).
     apply_config_headers(headers, config)?;
 
@@ -10830,6 +10889,62 @@ mod tests {
     }
 
     #[test]
+    fn saas_upstream_mode_does_not_rewrite_b_when_another_mapping_uses_b_as_from() {
+        let mappings = vec![
+            ModelMapping {
+                from: "A".to_string(),
+                to: "B".to_string(),
+                ..Default::default()
+            },
+            ModelMapping {
+                from: "B".to_string(),
+                to: "C".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let body = br#"{"model":"B","messages":[]}"#;
+        let mapped = apply_model_mappings_with_mode(body, &mappings, ModelMatchMode::SaasUpstream);
+        let value: Value = serde_json::from_slice(&mapped).expect("json");
+        assert_eq!(value.pointer("/model").and_then(Value::as_str), Some("B"));
+    }
+
+    #[test]
+    fn saas_upstream_mode_only_uses_fallback_for_unmatched_models() {
+        let mappings = vec![
+            ModelMapping {
+                from: "claude-model".to_string(),
+                to: "catch-all".to_string(),
+                ..Default::default()
+            },
+            ModelMapping {
+                from: "A".to_string(),
+                to: "B".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let mapped = apply_model_mappings_with_mode(
+            br#"{"model":"B"}"#,
+            &mappings,
+            ModelMatchMode::SaasUpstream,
+        );
+        let value: Value = serde_json::from_slice(&mapped).expect("json");
+        assert_eq!(value.pointer("/model").and_then(Value::as_str), Some("B"));
+
+        let mapped = apply_model_mappings_with_mode(
+            br#"{"model":"unknown-model"}"#,
+            &mappings,
+            ModelMatchMode::SaasUpstream,
+        );
+        let value: Value = serde_json::from_slice(&mapped).expect("json");
+        assert_eq!(
+            value.pointer("/model").and_then(Value::as_str),
+            Some("catch-all")
+        );
+    }
+
+    #[test]
     fn build_upstream_request_ignores_placeholder_model_mapping() {
         let mut credential = api_credential("placeholder", "openai");
         credential.config_json = serde_json::json!({
@@ -11707,6 +11822,7 @@ data: [DONE]\n\n";
         let state = ProxyAppState {
             pool,
             access_scope: None,
+            model_match_mode: ModelMatchMode::ClientFacing,
             key_cache: Arc::new(Mutex::new(RouteProxyKeyCache::default())),
             activity: RouteCredentialActivityRegistry::default(),
             live_log: RouteProxyLiveLog::default(),
@@ -11740,6 +11856,7 @@ data: [DONE]\n\n";
         let state = ProxyAppState {
             pool,
             access_scope: None,
+            model_match_mode: ModelMatchMode::ClientFacing,
             key_cache: Arc::new(Mutex::new(RouteProxyKeyCache::default())),
             activity: RouteCredentialActivityRegistry::default(),
             live_log: RouteProxyLiveLog::default(),
@@ -11768,6 +11885,7 @@ data: [DONE]\n\n";
         let state = ProxyAppState {
             pool,
             access_scope: None,
+            model_match_mode: ModelMatchMode::ClientFacing,
             key_cache: Arc::new(Mutex::new(RouteProxyKeyCache::default())),
             activity: RouteCredentialActivityRegistry::default(),
             live_log: RouteProxyLiveLog::default(),

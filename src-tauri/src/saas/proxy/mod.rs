@@ -4,6 +4,7 @@ use crate::app_state::AppState;
 use crate::error::AppError;
 use crate::models::platform::PlatformId;
 use crate::saas::{billing, domain::groups, logs::LogRecord, repository, SaasRuntime};
+use crate::services::route_model_capability::ModelMatchMode;
 use crate::services::route_proxy_service::{
     build_proxy_state, extract_inbound_api_key, proxy_handler, ProxyAppState,
 };
@@ -186,10 +187,12 @@ async fn execute(
         status: StatusCode::BAD_GATEWAY.as_u16(),
         observer: UsageObserver::new(streaming, anthropic),
     };
-    let proxy = proxy.with_access_scope(
-        PlatformId::parse(&reservation.platform)?,
-        reservation.credential_ids.into_iter().collect(),
-    );
+    let proxy = proxy
+        .with_access_scope(
+            PlatformId::parse(&reservation.platform)?,
+            reservation.credential_ids.into_iter().collect(),
+        )
+        .with_model_match_mode(ModelMatchMode::SaasUpstream);
     headers.remove(header::COOKIE);
     headers.remove("x-saas-csrf");
     headers.remove("x-ai-switch-test-trace-id");
@@ -282,10 +285,12 @@ async fn execute_image_request(
     let request_id = reservation.request_id.clone();
     let deadline =
         tokio::time::Instant::now() + Duration::from_secs(reservation.timeout_seconds as u64);
-    let proxy = proxy.with_access_scope(
-        PlatformId::parse(&reservation.platform)?,
-        reservation.credential_ids.into_iter().collect(),
-    );
+    let proxy = proxy
+        .with_access_scope(
+            PlatformId::parse(&reservation.platform)?,
+            reservation.credential_ids.into_iter().collect(),
+        )
+        .with_model_match_mode(ModelMatchMode::SaasUpstream);
     headers.remove(header::COOKIE);
     headers.remove("x-saas-csrf");
     headers.remove("x-ai-switch-test-trace-id");

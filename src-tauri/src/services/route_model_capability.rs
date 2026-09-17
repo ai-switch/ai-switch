@@ -436,7 +436,7 @@ pub(crate) fn supports_requested_model(
     capability: &ModelCapability,
     requested_model: Option<&str>,
 ) -> bool {
-    model_matches(
+    supports_requested_model_with_mode(
         platform,
         capability,
         requested_model,
@@ -444,11 +444,36 @@ pub(crate) fn supports_requested_model(
     )
 }
 
+pub(crate) fn supports_requested_model_with_mode(
+    platform: &str,
+    capability: &ModelCapability,
+    requested_model: Option<&str>,
+    mode: ModelMatchMode,
+) -> bool {
+    model_matches(platform, capability, requested_model, mode)
+}
+
 pub(crate) fn supports_requested_capability(
     platform: &str,
     capability: &ModelCapability,
     requested_model: Option<&str>,
     requested_capability: &str,
+) -> bool {
+    supports_requested_capability_with_mode(
+        platform,
+        capability,
+        requested_model,
+        requested_capability,
+        ModelMatchMode::ClientFacing,
+    )
+}
+
+pub(crate) fn supports_requested_capability_with_mode(
+    platform: &str,
+    capability: &ModelCapability,
+    requested_model: Option<&str>,
+    requested_capability: &str,
+    mode: ModelMatchMode,
 ) -> bool {
     let Some(requested_model) = requested_model
         .map(str::trim)
@@ -461,17 +486,14 @@ pub(crate) fn supports_requested_capability(
         return false;
     }
 
-    specific_mapping_for_request(
-        &capability.mappings,
-        requested_model,
-        ModelMatchMode::ClientFacing,
-    )
-    .is_some_and(|mapping| {
-        mapping
-            .capabilities
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(requested_capability))
-    }) && supports_requested_model(platform, capability, Some(requested_model))
+    specific_mapping_for_request(&capability.mappings, requested_model, mode).is_some_and(
+        |mapping| {
+            mapping
+                .capabilities
+                .iter()
+                .any(|value| value.trim().eq_ignore_ascii_case(requested_capability))
+        },
+    ) && supports_requested_model_with_mode(platform, capability, Some(requested_model), mode)
 }
 
 /// Picks the upstream model for a request according to the vocabulary used by
@@ -525,18 +547,30 @@ fn specific_mapping_for_request<'a>(
 pub(crate) fn model_state_key(
     platform: &str,
     capability: &ModelCapability,
+    kind: &str,
+    requested_model: &str,
+) -> String {
+    model_state_key_with_mode(
+        platform,
+        capability,
+        kind,
+        requested_model,
+        ModelMatchMode::ClientFacing,
+    )
+}
+
+pub(crate) fn model_state_key_with_mode(
+    platform: &str,
+    capability: &ModelCapability,
     _kind: &str,
     requested_model: &str,
+    mode: ModelMatchMode,
 ) -> String {
     let requested = strip_one_m_suffix_for_route_lookup(requested_model);
     let _ = platform;
-    resolve_mapping_target(
-        &capability.mappings,
-        requested,
-        ModelMatchMode::ClientFacing,
-    )
-    .map(|target| strip_one_m_suffix_for_route_lookup(&target).to_string())
-    .unwrap_or_else(|| requested.to_string())
+    resolve_mapping_target(&capability.mappings, requested, mode)
+        .map(|target| strip_one_m_suffix_for_route_lookup(&target).to_string())
+        .unwrap_or_else(|| requested.to_string())
 }
 
 /// Map an upstream model key back to a client-facing alias, for places that must
