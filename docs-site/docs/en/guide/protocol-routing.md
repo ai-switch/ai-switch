@@ -179,7 +179,7 @@ The same mapping has two names depending on who reads it:
 
 Claude SaaS is a billed product catalog, so it **always uses the bare `to` and never exposes an account prefix**: one real model has one price, and renaming or adding accounts does not change the model ID users see. Account prefixes exist only in the third-party client's precise mode (`{account prefix}/{to}`).
 
-Models discovered by automatic synchronization start in a **pending-pricing** state: **an unpriced or stale model never appears in SaaS `/v1/models` and never creates a billing reservation**. An administrator has to price and enable it explicitly before it becomes public.
+Models discovered by automatic synchronization start in a **pending-pricing** state: **an unpriced or stale model never appears in SaaS `/v1/models` and never creates a billing reservation**. An administrator has to price and enable it explicitly before it becomes public. When a model temporarily leaves the compute pool it turns **stale** and keeps its historical price, then recovers automatically once it reappears; an administrator can also delete a stale row's historical price in the admin panel, which clears only the SaaS price record and never touches the compute pool.
 
 ## The full order of one forward
 
