@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SaasAdmin, SaasSettings } from "../../src/saas";
-import { config, group, page, recharge, user } from "./fixtures";
+import { claudeGroup, config, group, page, recharge, user } from "./fixtures";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("../../src/lib/transport", () => ({ getTransport: () => ({ call: invoke }), isDesktop: () => true }));
@@ -224,8 +224,9 @@ describe("SaaS administrator", () => {
     expect(screen.getByLabelText(/cache price/i)).toHaveAttribute("required");
     expect(screen.getByLabelText(/output price/i)).toHaveAttribute("required");
     await actor.click(screen.getByRole("button",{name:/save settings/i}));
-    await waitFor(()=>expect(invoke).toHaveBeenCalledWith("saas_admin",{operation:"groups.save",payload:expect.objectContaining({id:group.id,models:group.models})}));
+    await waitFor(()=>expect(invoke).toHaveBeenCalledWith("saas_admin",{operation:"groups.save",payload:expect.objectContaining({id:group.id})}));
     const payload = invoke.mock.calls.find(([,request])=>request?.operation==="groups.save")?.[1].payload;
+    expect(payload.models).toEqual(expect.arrayContaining([expect.objectContaining({model:"gpt-test",upstreamModel:"gpt-test",inputPriceMicros:2000000,cachePriceMicros:200000,outputPriceMicros:8000000})]));
     expect(payload).not.toHaveProperty("name");
     expect(payload).not.toHaveProperty("batchIds");
     expect(payload).not.toHaveProperty("platform");
@@ -241,6 +242,42 @@ describe("SaaS administrator", () => {
     await actor.click(screen.getByRole("button", { name: /configure pricing/i }));
     expect(await screen.findByRole("dialog", { name: /add saas group/i })).toBeInTheDocument();
     expect(screen.getByLabelText(/agent group/i)).toHaveValue("New Codex · codex");
+  });
+
+  it("shows the synchronized Claude upstream model and its pending state", async () => {
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command, request) => {
+      if (request?.operation === "groups.list") return page([claudeGroup]);
+      if (request?.operation === "catalog") return { platforms: ["codex", "claude"], platform: "claude", groupId: claudeGroup.id, name: claudeGroup.name, models: ["provider-sonnet", "provider-opus"], availableAccountCount: 2, accounts: [] };
+      return original(command, request);
+    });
+    const actor = userEvent.setup();
+    render(<SaasAdmin />);
+    await actor.click(screen.getByRole("button", { name: /^groups & pricing$/i }));
+    expect(await screen.findByText((content) => content.includes("provider-sonnet"))).toBeInTheDocument();
+    expect(screen.queryByText((content) => content.includes("claude-sonnet-alias"))).not.toBeInTheDocument();
+    expect(screen.getByText(/pending pricing/i)).toBeInTheDocument();
+    await actor.click(screen.getByRole("button", { name: /^edit saas settings$/i }));
+    // The row is selectable in the catalog, but it must not be enabled for
+    // billing until an administrator prices it explicitly.
+    expect(await screen.findByRole("checkbox", { name: "Enabled 1" })).not.toBeChecked();
+    expect(screen.getAllByText(/pending pricing/i).length).toBeGreaterThan(0);
+  });
+
+  it("retries Claude model synchronization and reloads the group list", async () => {
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command, request) => {
+      if (request?.operation === "groups.list") return page([claudeGroup]);
+      if (request?.operation === "groups.sync") return { changed: true, sourceFingerprint: "abc", lastSuccessAt: null, lastError: null, models: claudeGroup.models };
+      return original(command, request);
+    });
+    const actor = userEvent.setup();
+    render(<SaasAdmin />);
+    await actor.click(screen.getByRole("button", { name: /^groups & pricing$/i }));
+    await actor.click(await screen.findByRole("button", { name: /resync|重新同步/i }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("saas_admin", { operation: "groups.sync", payload: { groupId: claudeGroup.id } }));
+    const listCalls = invoke.mock.calls.filter(([, request]) => request?.operation === "groups.list");
+    expect(listCalls.length).toBeGreaterThanOrEqual(2);
   });
 
   it("shows both currencies and rate snapshot before approving a recharge", async () => {

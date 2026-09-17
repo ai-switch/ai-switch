@@ -3,7 +3,7 @@ export type SaasEndpoint = "codex" | "claude" | "gemini";
 export interface SaasHostProps { onConfigChanged?: () => void }
 export interface PageResult<Item> { items: Item[]; total: number; page?: number; pageSize?: number }
 export interface SaasErrorEnvelope { code: string; message: string; details?: unknown }
-export type AdminOperation = "statistics" | "subscriptions.list" | "subscriptions.cancel" | "activation.status" | "activation.unlock" | "config.get" | "config.save" | "overview" | "catalog" | "users.list" | "users.create" | "users.update" | "users.credit" | "users.status" | "groups.list" | "groups.available" | "groups.save" | "subscriptions.plans.list" | "subscriptions.plans.save" | "subscriptions.grant" | "invites.codes.list" | "invites.codes.create" | "invites.codes.disable" | "invites.rewards.list" | "invites.rewards.review" | "recharges.list" | "recharges.review" | "codes.list" | "codes.create" | "codes.disable" | "ledger.list" | "ledger.reconcile" | "logs.query";
+export type AdminOperation = "statistics" | "subscriptions.list" | "subscriptions.cancel" | "activation.status" | "activation.unlock" | "config.get" | "config.save" | "overview" | "catalog" | "users.list" | "users.create" | "users.update" | "users.credit" | "users.status" | "groups.list" | "groups.available" | "groups.save" | "groups.sync" | "subscriptions.plans.list" | "subscriptions.plans.save" | "subscriptions.grant" | "invites.codes.list" | "invites.codes.create" | "invites.codes.disable" | "invites.rewards.list" | "invites.rewards.review" | "recharges.list" | "recharges.review" | "codes.list" | "codes.create" | "codes.disable" | "ledger.list" | "ledger.reconcile" | "logs.query";
 export type UserOperation = "overview" | "usage" | "groups" | "subscriptions.list" | "subscriptions.plans" | "subscriptions.purchase" | "checkin" | "invites.overview" | "invites.rewards" | "external-key.status" | "external-key.rotate" | "external-key.revoke" | "keys.list" | "keys.create" | "keys.update" | "keys.rotate" | "recharges.list" | "recharges.create" | "recharges.cancel" | "redeem" | "logs.query";
 
 export interface SaasPublicConfig {
@@ -103,7 +103,8 @@ export interface AdminOverview {
   month: UsageTotals;
 }
 
-export interface ModelPrice { model: string; upstreamModel: string; inputPriceMicros: number; cachePriceMicros: number; outputPriceMicros: number; imagePriceMicros?: number }
+export type SaasModelSyncState = "active" | "pending_pricing" | "stale";
+export interface ModelPrice { model: string; upstreamModel: string; inputPriceMicros: number; cachePriceMicros: number; outputPriceMicros: number; imagePriceMicros?: number; enabled?: boolean; syncState?: SaasModelSyncState; managedByPool?: boolean; lastSeenAt?: number | null; updatedAt?: number }
 export interface SaasGroup {
   id: string;
   name: string;
@@ -120,6 +121,9 @@ export interface SaasGroup {
   maxOutputTokens: number;
   allowSubscription?: boolean;
   allowBalance?: boolean;
+  sourceFingerprint?: string | null;
+  lastSyncAt?: string | null;
+  lastSyncError?: string | null;
 }
 export interface SaasCatalog {
   platforms: SaasEndpoint[];
