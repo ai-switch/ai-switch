@@ -648,3 +648,38 @@ async fn image_billing_reserves_per_image_and_refunds_failed_units() {
             .unwrap();
     assert_eq!(user, (950_000, 0));
 }
+#[tokio::test]
+async fn pending_or_stale_saas_model_cannot_create_a_reservation() {
+    let pool = repository::test_pool().await;
+    let principal = repository::claude_principal(&pool).await;
+    sqlx::query(
+        "INSERT INTO saas_group_models
+           (group_id,model,upstream_model,input_price_micros,cache_price_micros,
+            output_price_micros,image_price_micros,version,enabled,sync_state,
+            managed_by_pool,last_seen_at,updated_at)
+         VALUES('claude-saas','provider-sonnet','provider-sonnet',1000,100,2000,0,
+                1,1,'pending_pricing',1,NULL,0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let error = reserve(&pool, &principal, "provider-sonnet", 10, 10)
+        .await
+        .expect_err("pending model must fail closed");
+    assert_eq!(error.code(), "saas.model_not_allowed");
+
+    sqlx::query("UPDATE route_pool_members SET enabled=0 WHERE group_id='claude-saas'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let error = reserve(&pool, &principal, "provider-sonnet", 10, 10)
+        .await
+        .expect_err("stale model must fail closed");
+    assert_eq!(error.code(), "saas.model_not_allowed");
+
+    let error = reserve(&pool, &principal, "claude-sonnet-alias", 10, 10)
+        .await
+        .expect_err("alias is not a public SaaS model");
+    assert_eq!(error.code(), "saas.model_not_allowed");
+}

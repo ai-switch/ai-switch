@@ -193,3 +193,114 @@ async fn dropped_response_is_pending_review_instead_of_silently_refunded() {
     runtime.logs.shutdown().await.unwrap();
     task.abort();
 }
+#[tokio::test]
+async fn claude_models_only_include_active_enabled_models_with_accounts() {
+    let pool = repository::test_pool().await;
+    let (_principal, plaintext) = repository::claude_principal_and_key(&pool).await;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {plaintext}").parse().unwrap(),
+    );
+    let runtime = SaasRuntime::default();
+    let proxy = build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default());
+
+    let pending = execute(
+        &pool,
+        &runtime,
+        proxy.clone(),
+        Method::GET,
+        headers.clone(),
+        "/v1/models".parse().unwrap(),
+        Body::empty(),
+    )
+    .await
+    .unwrap();
+    let pending_body = axum::body::to_bytes(pending.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let pending: Value = serde_json::from_slice(&pending_body).unwrap();
+    assert_eq!(pending["data"].as_array().map(Vec::len), Some(0));
+
+    sqlx::query("UPDATE saas_group_models SET sync_state='active',enabled=1,input_price_micros=1000,cache_price_micros=100,output_price_micros=2000 WHERE group_id='claude-saas' AND model='provider-sonnet'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let active = execute(
+        &pool,
+        &runtime,
+        proxy.clone(),
+        Method::GET,
+        headers.clone(),
+        "/v1/models".parse().unwrap(),
+        Body::empty(),
+    )
+    .await
+    .unwrap();
+    let active_body = axum::body::to_bytes(active.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let active: Value = serde_json::from_slice(&active_body).unwrap();
+    assert_eq!(active["data"][0]["id"], "provider-sonnet");
+
+    sqlx::query("UPDATE saas_group_models SET enabled=0 WHERE group_id='claude-saas'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let disabled = execute(
+        &pool,
+        &runtime,
+        proxy,
+        Method::GET,
+        headers,
+        "/v1/models".parse().unwrap(),
+        Body::empty(),
+    )
+    .await
+    .unwrap();
+    let disabled_body = axum::body::to_bytes(disabled.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let disabled: Value = serde_json::from_slice(&disabled_body).unwrap();
+    assert_eq!(disabled["data"].as_array().map(Vec::len), Some(0));
+}
+
+#[tokio::test]
+async fn claude_responses_is_allowed_but_chat_completions_is_rejected() {
+    let pool = repository::test_pool().await;
+    let (_principal, plaintext) = repository::claude_principal_and_key(&pool).await;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {plaintext}").parse().unwrap(),
+    );
+    let runtime = SaasRuntime::default();
+    let proxy = build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default());
+
+    let responses = execute(
+        &pool,
+        &runtime,
+        proxy.clone(),
+        Method::POST,
+        headers.clone(),
+        "/v1/responses".parse().unwrap(),
+        Body::from(json!({"model":"provider-sonnet","input":"hi"}).to_string()),
+    )
+    .await;
+    if let Err(error) = responses {
+        assert_ne!(error.code(), "saas.endpoint_not_allowed");
+    }
+
+    let chat = execute(
+        &pool,
+        &runtime,
+        proxy,
+        Method::POST,
+        headers,
+        "/v1/chat/completions".parse().unwrap(),
+        Body::from(json!({"model":"provider-sonnet","messages":[]}).to_string()),
+    )
+    .await;
+    assert!(chat.is_err());
+    assert_eq!(chat.unwrap_err().code(), "saas.endpoint_not_allowed");
+}

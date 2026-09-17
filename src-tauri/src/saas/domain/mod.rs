@@ -30,6 +30,10 @@ pub async fn admin(pool: &SqlitePool, operation: &str, payload: Value) -> Result
         "groups.list" => groups::list(pool, payload, false).await,
         "groups.available" => groups::available(pool, payload).await,
         "groups.save" => groups::save(pool, payload).await,
+        "groups.sync" => {
+            let group_id = repository::text(&payload, "groupId")?;
+            model_sync::sync_group(pool, group_id).await
+        }
         "subscriptions.plans.list" => growth::admin_plans(pool, payload).await,
         "subscriptions.plans.save" => growth::save_plan(pool, payload).await,
         "subscriptions.grant" => growth::grant(pool, payload).await,

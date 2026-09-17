@@ -78,6 +78,14 @@ struct GroupSettings {
     version: i64,
 }
 
+#[derive(Debug, Clone, FromRow)]
+struct ExistingModelState {
+    model: String,
+    sync_state: String,
+    managed_by_pool: bool,
+    last_seen_at: Option<i64>,
+}
+
 #[derive(FromRow)]
 struct Account {
     id: String,
@@ -85,6 +93,27 @@ struct Account {
     kind: String,
     display_name: String,
     config_json: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct SyncMetadata {
+    source_fingerprint: String,
+    last_success_at: Option<i64>,
+    last_error: Option<String>,
+}
+
+async fn sync_metadata(
+    connection: &mut SqliteConnection,
+    group_id: &str,
+) -> Result<Option<SyncMetadata>, AppError> {
+    sqlx::query_as(
+        "SELECT source_fingerprint,last_success_at,last_error
+         FROM saas_group_model_sync WHERE group_id=?",
+    )
+    .bind(group_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(db_error)
 }
 
 async fn core_group(
@@ -189,7 +218,8 @@ pub(crate) async fn permitted_accounts_connection(
     }
     let upstream_model = if let Some(model) = model {
         let allowed: Option<String> = sqlx::query_scalar(
-            "SELECT upstream_model FROM saas_group_models WHERE group_id=? AND model=?",
+            "SELECT upstream_model FROM saas_group_models
+             WHERE group_id=? AND model=? AND sync_state='active' AND enabled=1",
         )
         .bind(group_id)
         .bind(model)
@@ -264,7 +294,8 @@ pub(crate) async fn permitted_accounts_for_capability_connection(
         return Ok(Vec::new());
     }
     let upstream_model: Option<String> = sqlx::query_scalar(
-        "SELECT upstream_model FROM saas_group_models WHERE group_id=? AND model=?",
+        "SELECT upstream_model FROM saas_group_models
+         WHERE group_id=? AND model=? AND sync_state='active' AND enabled=1",
     )
     .bind(group_id)
     .bind(model)
@@ -306,6 +337,7 @@ async fn group_json(connection: &mut SqliteConnection, group_id: &str) -> Result
         .await?
         .ok_or_else(|| invalid("saas.group_not_found", "Core group is unavailable"))?;
     let group_settings = settings(&mut *connection, group_id).await?;
+    let sync = sync_metadata(&mut *connection, group_id).await?;
     let group_models = models(&mut *connection, group_id).await?;
     let account_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM route_pool_members pm
@@ -341,6 +373,15 @@ async fn group_json(connection: &mut SqliteConnection, group_id: &str) -> Result
         version: 0,
     };
     let values = group_settings.unwrap_or(defaults);
+    let (source_fingerprint, last_sync_at, last_sync_error) = sync
+        .map(|value| {
+            (
+                Some(value.source_fingerprint),
+                value.last_success_at.map(repository::timestamp),
+                value.last_error,
+            )
+        })
+        .unwrap_or((None, None, None));
     Ok(json!({
         "id": group.id,
         "name": group.name,
@@ -357,11 +398,14 @@ async fn group_json(connection: &mut SqliteConnection, group_id: &str) -> Result
         "allowSubscription": values.allow_subscription,
         "allowBalance": values.allow_balance,
         "version": values.version,
+        "sourceFingerprint": source_fingerprint,
+        "lastSyncAt": last_sync_at,
+        "lastSyncError": last_sync_error,
         "models": model_values,
     }))
 }
 
-pub async fn list(pool: &SqlitePool, payload: Value, _user_only: bool) -> Result<Value, AppError> {
+pub async fn list(pool: &SqlitePool, payload: Value, user_only: bool) -> Result<Value, AppError> {
     let (limit, offset) = repository::page(&payload)?;
     let platform = payload.get("platform").and_then(Value::as_str);
     if let Some(platform) = platform {
@@ -396,7 +440,17 @@ pub async fn list(pool: &SqlitePool, payload: Value, _user_only: bool) -> Result
 
     let mut items = Vec::new();
     for row in rows {
-        let value = group_json(&mut *connection, &row.id).await?;
+        crate::saas::domain::model_sync::reconcile_group_connection(&mut *connection, &row.id)
+            .await?;
+        let mut value = group_json(&mut *connection, &row.id).await?;
+        if user_only {
+            if let Some(models) = value.get_mut("models").and_then(Value::as_array_mut) {
+                models.retain(|model| {
+                    model.get("syncState").and_then(Value::as_str) == Some("active")
+                        && model.get("enabled").and_then(Value::as_bool) == Some(true)
+                });
+            }
+        }
         if value["isInternal"].as_bool() == Some(false)
             && value["configured"].as_bool() == Some(true)
         {
@@ -438,6 +492,7 @@ pub async fn available(pool: &SqlitePool, payload: Value) -> Result<Value, AppEr
 pub async fn catalog(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> {
     let group_id = repository::text(&payload, "groupId")?;
     let mut connection = pool.acquire().await.map_err(db_error)?;
+    crate::saas::domain::model_sync::reconcile_group_connection(&mut *connection, group_id).await?;
     let group = core_group(&mut *connection, group_id)
         .await?
         .ok_or_else(|| invalid("saas.group_not_found", "Core group is unavailable"))?;
@@ -513,10 +568,29 @@ pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> 
     let group = core_group(&mut *transaction, &identifier)
         .await?
         .ok_or_else(|| invalid("saas.group_not_found", "Core group is unavailable"))?;
+    if group.platform == "claude"
+        && input
+            .models
+            .iter()
+            .any(|model| model.model != model.upstream_model)
+    {
+        return Err(invalid(
+            "saas.validation",
+            "Claude SaaS public model must equal its upstream model",
+        ));
+    }
     let version = settings(&mut *transaction, &identifier)
         .await?
         .map(|values| values.version + 1)
         .unwrap_or(1);
+    let existing_models: Vec<ExistingModelState> = sqlx::query_as(
+        "SELECT model,sync_state,managed_by_pool,last_seen_at
+         FROM saas_group_models WHERE group_id=?",
+    )
+    .bind(&identifier)
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(db_error)?;
     let now = repository::now();
     sqlx::query(
         "INSERT INTO saas_group_settings
@@ -551,10 +625,27 @@ pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> 
         .await
         .map_err(db_error)?;
     for model in input.models {
+        let previous = existing_models.iter().find(|row| row.model == model.model);
+        let sync_state = previous
+            .map(|row| row.sync_state.as_str())
+            .or_else(|| match model.sync_state.as_str() {
+                "pending_pricing" | "stale" => Some(model.sync_state.as_str()),
+                _ => None,
+            })
+            .unwrap_or("active");
+        let managed_by_pool = previous
+            .map(|row| row.managed_by_pool)
+            .unwrap_or(model.managed_by_pool);
+        let last_seen_at = previous
+            .and_then(|row| row.last_seen_at)
+            .or(model.last_seen_at);
+        let enabled = model.enabled && sync_state == "active";
         sqlx::query(
             "INSERT INTO saas_group_models
-               (group_id,model,upstream_model,input_price_micros,cache_price_micros,output_price_micros,image_price_micros,version)
-             VALUES(?,?,?,?,?,?,?,?)",
+               (group_id,model,upstream_model,input_price_micros,cache_price_micros,
+                output_price_micros,image_price_micros,version,enabled,sync_state,
+                managed_by_pool,last_seen_at,updated_at)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&identifier)
         .bind(model.model)
@@ -564,6 +655,11 @@ pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> 
         .bind(model.output_price_micros)
         .bind(model.image_price_micros)
         .bind(version)
+        .bind(enabled)
+        .bind(sync_state)
+        .bind(managed_by_pool)
+        .bind(last_seen_at)
+        .bind(now)
         .execute(&mut *transaction)
         .await
         .map_err(db_error)?;

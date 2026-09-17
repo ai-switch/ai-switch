@@ -136,7 +136,12 @@ pub async fn reserve_image(
         .bind(&principal.key_id).bind(&principal.user_id).bind(&principal.group_id).bind(&principal.platform).bind(repository::now()).fetch_optional(&mut *transaction).await.map_err(db_error)?;
     let limits =
         limits.ok_or_else(|| invalid("saas.invalid_key", "API key is no longer available"))?;
-    let priced: Option<(i64, String)> = sqlx::query_as("SELECT image_price_micros,upstream_model FROM saas_group_models WHERE group_id=? AND model=?")
+    crate::saas::domain::model_sync::reconcile_group_connection(
+        &mut *transaction,
+        &principal.group_id,
+    )
+    .await?;
+    let priced: Option<(i64, String)> = sqlx::query_as("SELECT image_price_micros,upstream_model FROM saas_group_models WHERE group_id=? AND model=? AND sync_state='active' AND enabled=1")
         .bind(&principal.group_id).bind(model).fetch_optional(&mut *transaction).await.map_err(db_error)?;
     let (image_price_micros, upstream_model) =
         priced.filter(|(price, _)| *price > 0).ok_or_else(|| {
@@ -206,7 +211,12 @@ pub async fn reserve(
             "Requested output exceeds the group limit",
         ));
     }
-    let model_price: Option<(i64,i64,i64,String)> = sqlx::query_as("SELECT input_price_micros,cache_price_micros,output_price_micros,upstream_model FROM saas_group_models WHERE group_id=? AND model=?")
+    crate::saas::domain::model_sync::reconcile_group_connection(
+        &mut *transaction,
+        &principal.group_id,
+    )
+    .await?;
+    let model_price: Option<(i64,i64,i64,String)> = sqlx::query_as("SELECT input_price_micros,cache_price_micros,output_price_micros,upstream_model FROM saas_group_models WHERE group_id=? AND model=? AND sync_state='active' AND enabled=1")
         .bind(&principal.group_id).bind(model).fetch_optional(&mut *transaction).await.map_err(db_error)?;
     let (input_price_micros, cache_price_micros, output_price_micros, upstream_model) = model_price
         .ok_or_else(|| {

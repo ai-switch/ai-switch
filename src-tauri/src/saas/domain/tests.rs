@@ -495,3 +495,58 @@ async fn statistics_separates_cash_from_credits_and_groups_months() {
     assert_eq!(daily["items"].as_array().unwrap().len(), 59);
     assert_eq!(daily["totals"], monthly["totals"]);
 }
+#[tokio::test]
+async fn claude_group_rejects_an_alias_public_model() {
+    let pool = repository::test_pool().await;
+    repository::insert_claude_sync_fixture(&pool).await;
+    let mut payload = repository::claude_group_payload();
+    payload["models"][0]["model"] = json!("claude-sonnet-alias");
+    payload["models"][0]["upstreamModel"] = json!("provider-sonnet");
+
+    let error = admin(&pool, "groups.save", payload)
+        .await
+        .expect_err("alias must fail");
+    assert_eq!(error.code(), "saas.validation");
+}
+
+#[tokio::test]
+async fn groups_sync_returns_claude_state_and_rejects_unknown_group() {
+    let pool = repository::test_pool().await;
+    repository::insert_claude_sync_fixture(&pool).await;
+
+    let synced = admin(&pool, "groups.sync", json!({"groupId":"claude-saas"}))
+        .await
+        .expect("sync group");
+    assert_eq!(synced["changed"], true);
+    assert_eq!(synced["models"][0]["model"], "provider-sonnet");
+    assert_eq!(synced["models"][0]["syncState"], "pending_pricing");
+
+    let error = admin(&pool, "groups.sync", json!({"groupId":"missing-group"}))
+        .await
+        .expect_err("unknown group must fail");
+    assert_eq!(error.code(), "saas.group_not_found");
+}
+#[tokio::test]
+async fn claude_group_save_preserves_pool_managed_lifecycle_fields() {
+    let pool = repository::test_pool().await;
+    repository::insert_claude_sync_fixture(&pool).await;
+    let synced = admin(&pool, "groups.sync", json!({"groupId":"claude-saas"}))
+        .await
+        .unwrap();
+    assert_eq!(synced["models"][0]["managedByPool"], true);
+
+    let mut payload = repository::claude_group_payload();
+    payload["models"][0]["syncState"] = json!("active");
+    payload["models"][0]["managedByPool"] = json!(false);
+    payload["models"][0]["lastSeenAt"] = json!(null);
+    admin(&pool, "groups.save", payload).await.unwrap();
+
+    let row: (bool, String, bool) = sqlx::query_as(
+        "SELECT enabled,sync_state,managed_by_pool FROM saas_group_models
+         WHERE group_id='claude-saas' AND model='provider-sonnet'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (false, "pending_pricing".to_string(), true));
+}

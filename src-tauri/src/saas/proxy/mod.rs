@@ -55,8 +55,10 @@ async fn execute(
         .await?;
     let path = uri.path().trim_end_matches('/').to_string();
     if matches!(path.as_str(), "/v1/models" | "/models") && method == Method::GET {
+        crate::saas::domain::model_sync::ensure_group_current(pool, &principal.group_id).await?;
         let models: Vec<String> = sqlx::query_scalar(
-            "SELECT model FROM saas_group_models WHERE group_id=? ORDER BY model",
+            "SELECT model FROM saas_group_models
+             WHERE group_id=? AND sync_state='active' AND enabled=1 ORDER BY model",
         )
         .bind(&principal.group_id)
         .fetch_all(pool)
@@ -82,7 +84,7 @@ async fn execute(
     );
     if method != Method::POST
         || !(anthropic || responses || chat || images)
-        || (principal.platform == "claude" && !anthropic)
+        || (principal.platform == "claude" && !(anthropic || responses))
         || (principal.platform == "gemini" && !images)
         || (principal.platform == "codex" && anthropic)
     {

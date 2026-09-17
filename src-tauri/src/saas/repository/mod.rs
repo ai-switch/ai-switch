@@ -310,6 +310,62 @@ pub(crate) async fn insert_claude_sync_fixture(pool: &SqlitePool) {
 }
 
 #[cfg(test)]
+pub(crate) fn claude_group_payload() -> Value {
+    serde_json::json!({"id":"claude-saas","multiplierMicros":1_000_000,"maxOutputTokens":4096,"timeoutSeconds":120,"maxConcurrency":10,"models":[{"model":"provider-sonnet","upstreamModel":"provider-sonnet","inputPriceMicros":1_000_000,"cachePriceMicros":100_000,"outputPriceMicros":2_000_000,"enabled":true}]})
+}
+
+#[cfg(test)]
+pub(crate) async fn claude_principal_and_key(
+    pool: &SqlitePool,
+) -> (crate::saas::billing::ApiPrincipal, String) {
+    test_enable(pool).await;
+    insert_claude_sync_fixture(pool).await;
+    let current = now();
+    let user_id = uuid::Uuid::new_v4().to_string();
+    let key_id = uuid::Uuid::new_v4().to_string();
+    let plaintext = random_secret("sk-saas-");
+    sqlx::query("INSERT INTO saas_users(id,github_id,login,github_created_at,created_at,updated_at) VALUES(?,?,'claude-tester','2020-01-01T00:00:00Z',?,?)")
+        .bind(&user_id)
+        .bind(&user_id)
+        .bind(current)
+        .bind(current)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE saas_users SET balance_micros=1000000 WHERE id=?")
+        .bind(&user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO saas_group_settings(group_id,multiplier_micros,max_output_tokens,timeout_seconds,max_concurrency,allow_subscription,allow_balance,version,created_at,updated_at) VALUES('claude-saas',1000000,4096,120,10,1,1,1,?,?)")
+        .bind(current)
+        .bind(current)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO saas_api_keys(id,user_id,group_id,name,token_hash,prefix,suffix,status,spent_micros,frozen_micros,created_at,updated_at) VALUES(?,?,'claude-saas','claude-test',?,?,?,'active',0,0,?,?)")
+        .bind(&key_id)
+        .bind(&user_id)
+        .bind(hash_secret(&plaintext))
+        .bind(&plaintext[..16])
+        .bind(&plaintext[plaintext.len()-4..])
+        .bind(current)
+        .bind(current)
+        .execute(pool)
+        .await
+        .unwrap();
+    let principal = crate::saas::billing::authenticate_key(pool, &plaintext)
+        .await
+        .unwrap();
+    (principal, plaintext)
+}
+
+#[cfg(test)]
+pub(crate) async fn claude_principal(pool: &SqlitePool) -> crate::saas::billing::ApiPrincipal {
+    claude_principal_and_key(pool).await.0
+}
+
+#[cfg(test)]
 pub(crate) fn test_group_payload() -> Value {
     serde_json::json!({"id":"saas-test-group","multiplierMicros":1_000_000,"maxOutputTokens":4096,"timeoutSeconds":120,"maxConcurrency":10,"models":[{"model":"gpt-test","inputPriceMicros":1_000_000,"cachePriceMicros":100_000,"outputPriceMicros":2_000_000}]})
 }
