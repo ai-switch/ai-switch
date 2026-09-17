@@ -2,7 +2,7 @@
 
 APLG 插件的 Node 开发工具包。单向依赖 `@ai-switch/tauri-plugin-runtime` 公共协议入口，不依赖 AI Switch 应用源码或 Tauri。
 
-> 当前为 **0.1.0 开发实现，尚未发布到 npm**。D1–D7 已交付源码/产物校验、只读归档 inspect、CLI、Vite Node alias、握手 bootstrap、浏览器类型适配、可复现且不覆盖已有文件的 `.aplg` pack、无副作用的 `vanilla-ts` init 模板，以及显式内存测试宿主和仅 loopback 的开发预览。D8 双包外部验收与 D9 CI 发布仍未交付，不要把这些目标当作现成功能。
+> 当前为 **0.1.0 开发实现，尚未发布到 npm**。D1–D8 已交付源码/产物校验、只读归档 inspect、CLI、Vite Node alias、握手 bootstrap、浏览器类型适配、可复现且不覆盖已有文件的 `.aplg` pack、无副作用的 `vanilla-ts` init 模板，以及显式内存测试宿主和仅 loopback 的开发预览。D9 CI 发布仍未交付，不要把这些目标当作现成功能。
 
 ## 使用已构建的本地包
 
@@ -267,6 +267,18 @@ const host = createTestHost({
 `aplgVite({ preview: true })` 在 `vite serve` 时提供 `/__aplg_preview__/` 开发壳。它只绑定 loopback、校验 Host 头、关闭 iframe HMR 和 Vite client 注入，并在沙箱 iframe（不授予 `allow-same-origin`）中通过真实 runtime 桥完成握手。页面明确显示“模拟宿主 / 内存数据”；需要文件能力时通过 `memoryFiles` 显式提供固定内存快照。生产 build 不包含 preview 路由、`/testing` mock 或内存数据。
 
 本地浏览器验收覆盖 Chromium 和 WebKit：真实握手与业务启动、disconnect/reconnect、重新挂载产生新会话、无 `memoryFiles` 时明确 `E_CAPABILITY_UNAVAILABLE`、显式内存文件读写、非 loopback Host 拒绝，以及生产产物不含 preview/mock。
+
+## D8 的双 tarball 外部验收
+
+`pnpm --dir packages/tauri-plugin-devkit verify:tarball` 会把 runtime 与 devkit 分别用 `pnpm pack` 生成真实 tarball，在 `os.tmpdir()` 的独立消费者中安装（不共享 workspace symlink），再用打包后的 CLI 执行 `init → install → Vite build → validate --stage dist → pack → inspect`。发布元数据断言确保 `workspace:` 协议不会进入 tarball。
+
+根仓库的 `scripts/aplg/verify-pair.mjs` 接受两个已构建 tarball：
+
+```sh
+node scripts/aplg/verify-pair.mjs --runtime <runtime.tgz> --devkit <devkit.tgz>
+```
+
+它在外部消费者中保留 `fixtures/aplg/plugin-example` 的来源与 7 个上游行为测试，完成上述闭环后，解包经 inspect 校验的 `.aplg`，在受控 loopback host 中以真实 runtime `createPluginHost` 加载，并运行 Chromium/WebKit 的握手、文本统计行为、不透明 iframe 与父页面/存储隔离验收。`inspect` 仍是 `not-verified`，不表示签名、安装或商店审核已实现。
 
 ## 开发验证
 

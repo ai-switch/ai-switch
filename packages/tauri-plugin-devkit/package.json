@@ -34,7 +34,8 @@
     "build": "node scripts/build.mjs",
     "generate:node-types": "node scripts/generate-node-types.mjs",
     "check:node-types": "node scripts/generate-node-types.mjs --check",
-    "test:types:browser": "tsc --noEmit -p tsconfig.browser-type-tests.json"
+    "test:types:browser": "tsc --noEmit -p tsconfig.browser-type-tests.json",
+    "verify:tarball": "vitest run --config vitest.e2e.config.ts"
   },
   "dependencies": {
     "@ai-switch/tauri-plugin-runtime": "workspace:0.1.0",

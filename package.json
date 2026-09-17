@@ -23,7 +23,8 @@
     "aplg:runtime:test": "pnpm --dir packages/tauri-plugin-runtime test",
     "aplg:runtime:build": "pnpm --dir packages/tauri-plugin-runtime run build",
     "aplg:devkit:test": "pnpm --dir packages/tauri-plugin-runtime run build && pnpm --dir packages/tauri-plugin-devkit test",
-    "aplg:devkit:build": "pnpm --dir packages/tauri-plugin-runtime run build && pnpm --dir packages/tauri-plugin-devkit run build"
+    "aplg:devkit:build": "pnpm --dir packages/tauri-plugin-runtime run build && pnpm --dir packages/tauri-plugin-devkit run build",
+    "aplg:verify-pair": "node scripts/aplg/verify-pair.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.51.1",

@@ -12,7 +12,7 @@
 
 **Prerequisite plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-runtime.md`。R1/R2 的导出/契约是唯一权威，本文只引用，不维护复制的 manifest/wire schema。
 
-**状态：** D1–D6 项目源码/产物校验、归档检查、CLI、Vite Node alias、握手 bootstrap、浏览器 ambient 类型、可复现 no-clobber `.aplg` 打包与无副作用 init 模板已实施并通过 Windows 本地验证；D7–D9 待实施。所有 npm 包仍未发布。未实施部分的方法、CLI 和代码片段仍是目标契约。
+**状态：** D1–D8 项目源码/产物校验、归档检查、CLI、Vite Node alias、握手 bootstrap、浏览器 ambient 类型、可复现 no-clobber `.aplg` 打包、无副作用 init 模板、显式内存测试宿主、开发预览与双 tarball 外部验收已实施并通过 Windows 本地验证；D9 待实施。所有 npm 包仍未发布。未实施部分的方法、CLI 和代码片段仍是目标契约。
 
 ## Global Constraints
 
@@ -596,7 +596,7 @@ test("published CLI JSON is consumable without workspace dependencies", async ()
 `tests/support/tarball-consumer.ts` 提供 `withInstalledTarballs(run)` 和 `runPackedCli(root,args):Promise<{code:number;stdout:string;stderr:string}>`；使用 Node spawn/execFile 的 argv 数组，不拼接未信任 shell。Windows 的 pnpm 包装执行采用已验证的 CLI 路径；不得把路径枚举交给 cmd 作删除。输出断言针对真实 package bin。
 
 - [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit run verify:tarball`；消费者的 Node resolve 不可回退应用 node_modules，否则验收无效。
-- [ ] **Step 3：完成发布文件和实际项目闭环。** exports 为根 Node API、`/vite`、`/testing`、types-only `/node-types`、`/package.json`；`bin.aplg = dist/cli.js`，保留 shebang。files 为 dist、templates、README、LICENSE、第三方声明；不包含 tests、私有截图、workspace lock、用户环境、密钥。产物用 esbuild 分入口，Node API 不捆 Vite；browser testing 不引入 Node fs/process。`src/node-types.d.ts` 随 dist 复制，文件内无顶层 import/export，使 ambient module 声明被 TypeScript 正确加载；其内部只重导出 runtime 子集类型。runtime 和 Vite 都保持 public package external，不内嵌第二份 runtime 单例；消费者 bundler 对 public exports 做唯一解析。
+- [x] **Step 3：完成发布文件和实际项目闭环。** exports 为根 Node API、`/vite`、`/testing`、types-only `/node-types`、`/package.json`；`bin.aplg = dist/cli.js`，保留 shebang。files 为 dist、templates、README、LICENSE、第三方声明；不包含 tests、私有截图、workspace lock、用户环境、密钥。产物用 esbuild 分入口，Node API 不捆 Vite；browser testing 不引入 Node fs/process。`src/node-types.d.ts` 随 dist 复制，文件内无顶层 import/export，使 ambient module 声明被 TypeScript 正确加载；其内部只重导出 runtime 子集类型。runtime 和 Vite 都保持 public package external，不内嵌第二份 runtime 单例；消费者 bundler 对 public exports 做唯一解析。
 
 外部验收顺序：install tarballs → `aplg init` → 显式 pnpm install → typecheck/test/build → validate dist → pack → inspect → 浏览器使用真实 runtime host 加载打包产物。解包仅在测试中安全临时目录，经 D2 校验后按路径策略写入，不用于生产安装器。
 
@@ -761,6 +761,14 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 
 - 已完成可复现且不覆盖的 `.aplg` pack：私有稳定快照、固定 ZIP 元数据、自检、hard-link no-clobber、并发/竞态回滚和 CLI pack；提交 `d22b74c`。
 - D5 核心、CLI、全量 devkit 回归和公共类型验证已通过；后续 D6 全量测试总数为 **15 个文件 / 443 项 Vitest**。
+
+### D8（2026-09-18）
+
+- 按 TDD 新增真实双 tarball 外部消费者：`pnpm pack` 生成 runtime/devkit 发布包，在 `os.tmpdir()` 安装，断言无 workspace symlink、devkit 发布元数据无 `workspace:`，并运行打包后的 CLI `init → install → Vite build → validate --stage dist → pack → inspect`。
+- 修复 devkit 发布元数据契约：`pnpm pack` 会把 `workspace:0.1.0` 解析为 `0.1.0`，测试已锁定这一行为；外部消费者不再依赖未发布的 registry 版本。
+- 新增 `fixtures/aplg/plugin-example`，来自固定上游 commit `c30cd40d8d6fafba15acbeb0b866f72fff0229c1`，保留 LICENSE、manifest、源码和 7 个文本行为测试；仅本地迁移 Vite 配置、公共依赖和 `plugin:validate`/`plugin:pack` 脚本，不修改远程仓库。
+- 新增 `scripts/aplg/verify-pair.mjs` 与 `packaged-example-runner.mjs`：外部安装两个 tarball、跑上游测试、aplgVite 构建、dist 校验、pack、inspect；解包经 inspect 校验的产物，在受控 loopback host 中用真实 runtime host 加载，并在 Chromium/WebKit 验证握手、文本统计、不透明 iframe 与父页面/存储隔离。
+- Windows Node 22.22.2 本地完整 `verify-pair` 通过：runtime/devkit 两个真实 tarball、7 个上游行为测试、4 个 Chromium/WebKit 打包产物浏览器测试；不调用 Cargo、不推送/tag/npm publish、不修改远程 plugin-example/plugin-store。
 
 ### D7（2026-09-18）
 

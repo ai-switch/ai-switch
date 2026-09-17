@@ -41,6 +41,22 @@ test("built bin preserves the shebang, metadata version and actual process exit 
   assert.ok(!pack.stdout.includes("E_COMMAND_UNAVAILABLE"));
 });
 
+test("the published metadata replaces workspace protocols with exact registry versions", async () => {
+  const packed = spawnSync(process.execPath, [process.env.npm_execpath ?? join(dirname(process.execPath), "node_modules/corepack/dist/pnpm.js"), "pack", "--json", "--pack-destination", root, "--loglevel=error"], { cwd: root, encoding: "utf8", timeout: 120000, windowsHide: true });
+  assert.equal(packed.status, 0, packed.stderr);
+  const entry = JSON.parse(packed.stdout);
+  assert.ok(entry?.filename?.endsWith(".tgz"), "pnpm pack did not produce a tarball");
+  const archive = entry.filename;
+  try {
+    const result = spawnSync("tar", ["-xOf", archive, "package/package.json"], { cwd: root, encoding: "utf8", timeout: 30000, windowsHide: true });
+    assert.equal(result.status, 0, result.stderr);
+    const published = JSON.parse(result.stdout);
+    assert.equal(published.dependencies["@ai-switch/tauri-plugin-runtime"], "0.1.0");
+    assert.equal(JSON.stringify(published).includes("workspace:"), false);
+  } finally { await rm(archive, { force: true }); }
+  assert.equal(metadata.dependencies["@ai-switch/tauri-plugin-runtime"], "workspace:0.1.0");
+});
+
 test("building clears stale generated artifacts without shipping source aliases", async () => {
   const sentinel = new URL("../dist/D1-stale.js", import.meta.url);
   const { writeFile } = await import("node:fs/promises");
