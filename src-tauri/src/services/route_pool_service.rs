@@ -173,6 +173,7 @@ impl RoutePoolService {
             PoolModelMode::parse(&input.mode),
         )
         .await?;
+        best_effort_sync(pool, platform.as_str()).await;
         Self::state(
             pool,
             platform.as_str(),
@@ -254,6 +255,7 @@ impl RoutePoolService {
             &account_ids,
         )
         .await?;
+        best_effort_sync(pool, platform.as_str()).await;
         Self::state(
             pool,
             platform.as_str(),
@@ -278,6 +280,7 @@ impl RoutePoolService {
             &input.account_ids,
         )
         .await?;
+        best_effort_sync(pool, platform.as_str()).await;
         Self::state_for_group(
             pool,
             platform.as_str(),
@@ -623,6 +626,18 @@ fn non_negative(value: i64, field: &'static str) -> Result<i64, AppError> {
         });
     }
     Ok(value)
+}
+
+/// Best-effort SaaS catalog refresh after a route-pool mutation committed.
+///
+/// Never fails the caller: the pool change is already durable, and the next
+/// read or billing path re-runs the same reconciliation anyway.
+async fn best_effort_sync(pool: &SqlitePool, platform: &str) {
+    if let Err(error) =
+        crate::saas::domain::model_sync::best_effort_sync_platform(pool, platform).await
+    {
+        eprintln!("Claude SaaS model sync failed for {platform}: {error}");
+    }
 }
 
 #[cfg(test)]
@@ -1547,5 +1562,45 @@ mod tests {
             }
             _ => panic!("expected validation error"),
         }
+    }
+
+    #[tokio::test]
+    async fn removing_pool_members_marks_claude_saas_models_stale() {
+        let pool = crate::saas::repository::test_pool().await;
+        crate::saas::repository::insert_claude_sync_fixture(&pool).await;
+        crate::saas::domain::model_sync::sync_group(&pool, "claude-saas")
+            .await
+            .expect("initial sync");
+        sqlx::query(
+            "UPDATE saas_group_models SET enabled=1,sync_state='active',
+                    input_price_micros=1000,cache_price_micros=100,output_price_micros=2000
+             WHERE group_id='claude-saas' AND model='provider-sonnet'",
+        )
+        .execute(&pool)
+        .await
+        .expect("price row");
+
+        RoutePoolService::set_group_members(
+            &pool,
+            SetRoutePoolGroupMembersInput {
+                platform: "claude".to_string(),
+                group_id: "claude-saas".to_string(),
+                account_ids: Vec::new(),
+            },
+        )
+        .await
+        .expect("remove members");
+
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT model,sync_state,input_price_micros FROM saas_group_models
+             WHERE group_id='claude-saas' ORDER BY model",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "provider-sonnet");
+        assert_eq!(rows[0].1, "stale");
+        assert_eq!(rows[0].2, 1000);
     }
 }

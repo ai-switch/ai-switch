@@ -270,6 +270,32 @@ pub async fn ensure_group_current(pool: &SqlitePool, group_id: &str) -> Result<(
     Ok(())
 }
 
+/// Best-effort refresh of every Claude SaaS group bound to `platform`.
+///
+/// Called after a route-pool mutation has committed. Only Claude groups are
+/// managed by the pool; other platforms return success without touching any
+/// hand-configured model rows. Errors are returned so callers can log them, but
+/// callers must not fail the primary operation because of a sync problem.
+pub async fn best_effort_sync_platform(pool: &SqlitePool, platform: &str) -> Result<(), AppError> {
+    if platform != "claude" {
+        return Ok(());
+    }
+    let group_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM route_pool_groups
+         WHERE platform='claude' AND deleted_at IS NULL
+         ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db_error)?;
+    for group_id in group_ids {
+        if let Err(error) = sync_group(pool, &group_id).await {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 async fn source_members(
     connection: &mut SqliteConnection,
     group_id: &str,

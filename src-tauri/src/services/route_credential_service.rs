@@ -193,7 +193,7 @@ impl RouteCredentialService {
             RoutePreviewService::generate(&platform, "api", &secret_payload_json, &config_json)
         });
 
-        RouteCredentialRepository::create(
+        let created = RouteCredentialRepository::create(
             pool,
             &platform,
             "api",
@@ -205,7 +205,9 @@ impl RouteCredentialService {
             &config_json,
             &preview_json,
         )
-        .await
+        .await?;
+        best_effort_sync(pool, platform).await;
+        Ok(created)
     }
 
     pub async fn import_official_text(
@@ -224,6 +226,7 @@ impl RouteCredentialService {
                 .push(create_batch_credential(pool, platform, batch_id.clone(), credential).await?);
         }
 
+        best_effort_sync(pool, platform).await;
         Ok(RouteCredentialImportResult {
             imported,
             failed: Vec::new(),
@@ -269,6 +272,7 @@ impl RouteCredentialService {
             }
         }
 
+        best_effort_sync(pool, platform).await;
         Ok(RouteCredentialImportResult { imported, failed })
     }
 
@@ -292,7 +296,11 @@ impl RouteCredentialService {
                 .await?
                 .secret_payload_json;
         }
-        RouteCredentialRepository::update(pool, &id, &input).await
+        let updated = RouteCredentialRepository::update(pool, &id, &input).await?;
+        if let Ok(platform) = RouteCredentialRepository::platform_of(pool, &id).await {
+            best_effort_sync(pool, &platform).await;
+        }
+        Ok(updated)
     }
 
     pub async fn copy(pool: &SqlitePool, id: String) -> Result<RouteCredential, AppError> {
@@ -392,19 +400,33 @@ impl RouteCredentialService {
             .await?;
         }
 
+        best_effort_sync(pool, target_platform.as_str()).await;
         Ok(created)
     }
 
     pub async fn delete(pool: &SqlitePool, id: String) -> Result<(), AppError> {
-        RouteCredentialRepository::delete(pool, &id).await
+        let platform = RouteCredentialRepository::platform_of(pool, &id).await?;
+        RouteCredentialRepository::delete(pool, &id).await?;
+        best_effort_sync(pool, &platform).await;
+        Ok(())
     }
 
     pub async fn archive(pool: &SqlitePool, ids: Vec<String>) -> Result<(), AppError> {
-        RouteCredentialRepository::set_archived(pool, &ids, true).await
+        let platforms = platforms_of(pool, &ids).await;
+        RouteCredentialRepository::set_archived(pool, &ids, true).await?;
+        for platform in platforms {
+            best_effort_sync(pool, &platform).await;
+        }
+        Ok(())
     }
 
     pub async fn restore(pool: &SqlitePool, ids: Vec<String>) -> Result<(), AppError> {
-        RouteCredentialRepository::set_archived(pool, &ids, false).await
+        let platforms = platforms_of(pool, &ids).await;
+        RouteCredentialRepository::set_archived(pool, &ids, false).await?;
+        for platform in platforms {
+            best_effort_sync(pool, &platform).await;
+        }
+        Ok(())
     }
 
     pub async fn set_statuses(
@@ -412,7 +434,12 @@ impl RouteCredentialService {
         ids: Vec<String>,
         status: String,
     ) -> Result<(), AppError> {
-        RouteCredentialRepository::set_statuses(pool, &ids, &status).await
+        let platforms = platforms_of(pool, &ids).await;
+        RouteCredentialRepository::set_statuses(pool, &ids, &status).await?;
+        for platform in platforms {
+            best_effort_sync(pool, &platform).await;
+        }
+        Ok(())
     }
 
     pub async fn set_model_status(
@@ -1182,6 +1209,30 @@ fn parse_fetched_models_json(value: Option<&str>) -> Result<Vec<FetchedRouteMode
             .filter(|owned_by| !owned_by.is_empty());
     }
     Ok(models)
+}
+
+/// Best-effort SaaS catalog refresh after a route-pool mutation committed.
+///
+/// Never fails the caller: the pool change is already durable, and the next
+/// read or billing path re-runs the same reconciliation anyway.
+async fn best_effort_sync(pool: &SqlitePool, platform: &str) {
+    if let Err(error) =
+        crate::saas::domain::model_sync::best_effort_sync_platform(pool, platform).await
+    {
+        eprintln!("Claude SaaS model sync failed for {platform}: {error}");
+    }
+}
+
+async fn platforms_of(pool: &SqlitePool, ids: &[String]) -> Vec<String> {
+    let mut platforms = Vec::new();
+    for id in ids {
+        if let Ok(platform) = RouteCredentialRepository::platform_of(pool, id).await {
+            if !platforms.contains(&platform) {
+                platforms.push(platform);
+            }
+        }
+    }
+    platforms
 }
 
 #[cfg(test)]
@@ -2863,5 +2914,76 @@ mod tests {
             .find(|state| state.model_key == "upstream-sol")
             .expect("model row");
         assert!(parked.cooldown_until.is_some());
+    }
+
+    #[tokio::test]
+    async fn updating_a_claude_mapping_refreshes_the_saas_catalog() {
+        let pool = crate::saas::repository::test_pool().await;
+        crate::saas::repository::insert_claude_sync_fixture(&pool).await;
+        // Keep a single account so the mapping change is unambiguous.
+        sqlx::query("DELETE FROM route_pool_members WHERE route_credential_id='claude-sync-opus'")
+            .execute(&pool)
+            .await
+            .expect("drop second member");
+        sqlx::query("DELETE FROM route_credentials WHERE id='claude-sync-opus'")
+            .execute(&pool)
+            .await
+            .expect("drop second credential");
+
+        // Seed an enabled, priced provider-sonnet row via the sync service.
+        crate::saas::domain::model_sync::sync_group(&pool, "claude-saas")
+            .await
+            .expect("initial sync");
+        sqlx::query(
+            "UPDATE saas_group_models SET enabled=1,sync_state='active',
+                    input_price_micros=1000,cache_price_micros=100,output_price_micros=2000
+             WHERE group_id='claude-saas' AND model='provider-sonnet'",
+        )
+        .execute(&pool)
+        .await
+        .expect("price row");
+
+        let current = RouteCredentialRepository::get(&pool, "claude-sync-sonnet")
+            .await
+            .expect("credential");
+        RouteCredentialService::update(
+            &pool,
+            current.id.clone(),
+            UpdateRouteCredentialInput {
+                display_name: current.display_name.clone(),
+                email: current.email.clone(),
+                status: current.status.clone(),
+                route_priority: current.route_priority,
+                max_concurrency: current.max_concurrency,
+                secret_payload_json: current.secret_payload_json.clone(),
+                config_json: serde_json::json!({
+                    "model_mappings": [
+                        {"from": "claude-sonnet-alias", "to": "provider-opus", "supports_1m": true}
+                    ]
+                })
+                .to_string(),
+                preview_json: current.preview_json.clone(),
+            },
+        )
+        .await
+        .expect("update");
+
+        let stale: String = sqlx::query_scalar(
+            "SELECT sync_state FROM saas_group_models
+             WHERE group_id='claude-saas' AND model='provider-sonnet'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("stale row");
+        assert_eq!(stale, "stale");
+
+        let pending: String = sqlx::query_scalar(
+            "SELECT sync_state FROM saas_group_models
+             WHERE group_id='claude-saas' AND model='provider-opus'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("new row");
+        assert_eq!(pending, "pending_pricing");
     }
 }
