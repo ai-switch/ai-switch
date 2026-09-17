@@ -152,6 +152,10 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), AppError> {
             include_str!("../migrations/0004_daily_subscription.sql"),
         ),
         (5_i64, include_str!("../migrations/0005_image_billing.sql")),
+        (
+            6_i64,
+            include_str!("../migrations/0006_claude_model_sync.sql"),
+        ),
     ];
     let applied: Vec<(i64, String)> =
         sqlx::query_as("SELECT version,checksum FROM saas_schema_migrations ORDER BY version")
@@ -254,6 +258,54 @@ pub(crate) async fn test_host(pool: &SqlitePool) {
         };
         sqlx::query("INSERT OR IGNORE INTO route_pool_members(id,platform,route_credential_id,enabled,group_id,created_at,updated_at) VALUES(?,?,?,?,?,'2026-01-01','2026-01-01')")
             .bind(identifier).bind(platform).bind(identifier).bind(enabled).bind(group_id).execute(pool).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn insert_claude_sync_fixture(pool: &SqlitePool) {
+    crate::database::run_migrations(pool).await.unwrap();
+    sqlx::query(
+        "INSERT OR IGNORE INTO route_pool_groups
+           (id,platform,name,sort_order,is_internal,is_active,created_at,updated_at)
+         VALUES('claude-saas','claude','Claude SaaS',20,0,0,'2026-09-16','2026-09-16')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    for (id, display_name, config_json) in [
+        (
+            "claude-sync-sonnet",
+            "Claude Sonnet relay",
+            r#"{"model_mappings":[{"from":"claude-sonnet-alias","to":"provider-sonnet","supports_1m":true}]}"#,
+        ),
+        (
+            "claude-sync-opus",
+            "Claude Opus relay",
+            r#"{"model_mappings":[{"from":"claude-opus-alias","to":"provider-sonnet","supports_1m":true}]}"#,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO route_credentials
+               (id,platform,kind,display_name,status,config_json,created_at,updated_at)
+             VALUES(?,'claude','api',?,'ok',?,'2026-09-16','2026-09-16')",
+        )
+        .bind(id)
+        .bind(display_name)
+        .bind(config_json)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO route_pool_members
+               (id,platform,route_credential_id,enabled,group_id,created_at,updated_at)
+             VALUES(?,'claude',?,1,'claude-saas','2026-09-16','2026-09-16')",
+        )
+        .bind(format!("member-{id}"))
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 }
 

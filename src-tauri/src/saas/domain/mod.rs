@@ -3,6 +3,7 @@ pub mod groups;
 pub mod growth;
 pub mod invites;
 pub mod keys;
+pub mod model_sync;
 pub mod statistics;
 
 use crate::error::AppError;

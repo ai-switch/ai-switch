@@ -23,6 +23,16 @@ pub struct GroupModel {
     pub output_price_micros: i64,
     #[serde(default)]
     pub image_price_micros: i64,
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+    #[serde(default = "active_sync_state")]
+    pub sync_state: String,
+    #[serde(default)]
+    pub managed_by_pool: bool,
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+    #[serde(default)]
+    pub updated_at: i64,
 }
 
 #[derive(Deserialize)]
@@ -42,6 +52,10 @@ struct GroupInput {
 
 fn enabled_by_default() -> bool {
     true
+}
+
+fn active_sync_state() -> String {
+    "active".to_string()
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -107,7 +121,8 @@ async fn models(
     group_id: &str,
 ) -> Result<Vec<GroupModel>, AppError> {
     sqlx::query_as(
-        "SELECT model,upstream_model,input_price_micros,cache_price_micros,output_price_micros,image_price_micros
+        "SELECT model,upstream_model,input_price_micros,cache_price_micros,output_price_micros,
+                image_price_micros,enabled,sync_state,managed_by_pool,last_seen_at,updated_at
          FROM saas_group_models WHERE group_id=? ORDER BY model",
     )
     .bind(group_id)
