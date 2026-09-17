@@ -1929,7 +1929,11 @@ function ModelMappingsEditor({
     ? [
         ...claudeRoleTemplates.map((template) => {
           const existing = value.find((mapping) => mapping.from.trim() === template.value);
+          // Spread the existing row so capability fields the editor does not
+          // render here (supports_image_input, capabilities, ...) survive the
+          // template rebuild instead of being dropped on the next save.
           return {
+            ...existing,
             from: template.value,
             to: existing?.to ?? "",
             label: template.editableLabel ? existing?.label ?? template.label : null,

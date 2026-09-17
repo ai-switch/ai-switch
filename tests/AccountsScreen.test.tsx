@@ -3935,6 +3935,43 @@ describe("AccountsScreen", () => {
     );
   });
 
+  it("keeps Claude template image capabilities when editing a mapping", async () => {
+    const api = {
+      ...credentialsFixture[1],
+      platform: "claude" as const,
+      display_name: "Claude Capability API",
+      config_json: JSON.stringify({
+        base_url: "https://api.anthropic.test",
+        interface_format: "anthropic",
+        model_mappings: [
+          {
+            from: "claude-sonnet-alias",
+            to: "provider-sonnet",
+            label: "Sonnet",
+            supports_image_input: false,
+            capabilities: ["image.generate"],
+          },
+        ],
+      }),
+    };
+    vi.mocked(listRouteCredentials).mockResolvedValue([api]);
+    vi.mocked(updateRouteCredential).mockResolvedValue(api);
+
+    renderScreen("claude");
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 Claude Capability API" }));
+    // Toggle a field that triggers the template-row rebuild.
+    await userEvent.click(screen.getByLabelText("声明支持 1M 1"));
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
+    const config = JSON.parse(vi.mocked(updateRouteCredential).mock.calls[0][1].config_json);
+    const mapping = config.model_mappings[0];
+    expect(mapping.from).toBe("claude-sonnet-alias");
+    expect(mapping.to).toBe("provider-sonnet");
+    expect(mapping.supports_image_input).toBe(false);
+    expect(mapping.capabilities).toEqual(["image.generate"]);
+  });
+
   it("does not persist Claude role templates when the upstream models are empty", async () => {
     renderScreen("claude");
 

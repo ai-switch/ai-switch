@@ -13,10 +13,9 @@ use std::path::{Path, PathBuf};
 /// the whole adapter and are worth stating because both contradict the usual
 /// assumption that this is a Claude Code fork:
 ///
-/// - The wire protocol is **OpenAI Chat Completions**, not Anthropic Messages.
-///   `/v1/messages` never appears in the bundle; the model class is
-///   `OpenAIChatCompletionsModel`. So both platforms ride the proxy's chat
-///   bridge and the URL always ends in `/chat/completions`.
+/// - Codex models use **OpenAI Chat Completions** (`/v1/chat/completions`);
+///   Claude models use the **Responses** endpoint (`/v1/responses`). The proxy
+///   bridges whichever dialect each account actually speaks.
 /// - It reads `CODEBUDDY_*` env keys only — `ANTHROPIC_BASE_URL` and friends have
 ///   zero hits — so there is no env-block shortcut like Claude Code's.
 ///
@@ -124,14 +123,26 @@ impl WorkBuddyAdapter {
         }
     }
 
-    /// WorkBuddy's `normalizeChatCompletionsUrl` appends exactly one
-    /// `/chat/completions` and de-duplicates a suffix that is already there, so
-    /// writing the full path is safe and makes the target unambiguous.
+    /// The upstream URL one model record points at.
+    ///
+    /// Codex keeps the OpenAI Chat Completions path. Claude goes through the
+    /// proxy's Responses endpoint: WorkBuddy/CodeBuddy's Claude models talk the
+    /// Responses protocol, and the proxy bridges it to each account's dialect.
     fn model_url(&self, base_url: &str) -> String {
+        let suffix = if self.platform == PlatformId::Claude {
+            "/responses"
+        } else {
+            "/chat/completions"
+        };
         let trimmed = base_url.trim().trim_end_matches('/');
-        if trimmed.ends_with("/chat/completions") {
+        if trimmed.ends_with(suffix) {
             return trimmed.to_string();
         }
+        // Drop a legacy sibling suffix so an old base URL cannot double up.
+        let trimmed = trimmed
+            .strip_suffix("/chat/completions")
+            .or_else(|| trimmed.strip_suffix("/responses"))
+            .unwrap_or(trimmed);
         let with_version = if trimmed
             .rsplit('/')
             .next()
@@ -141,7 +152,7 @@ impl WorkBuddyAdapter {
         } else {
             format!("{trimmed}/v1")
         };
-        format!("{with_version}/chat/completions")
+        format!("{with_version}{suffix}")
     }
 
     /// Whether this record is one of ours: either it carries our marker for this
@@ -163,11 +174,37 @@ impl WorkBuddyAdapter {
         }
 
         let expected_url = self.model_url(&input.base_url);
+        // A Claude record written before this change points at the legacy Chat
+        // Completions URL. Accept it as ours so the next write replaces it in
+        // place instead of appending a duplicate record.
+        let legacy_claude_url = (self.platform == PlatformId::Claude)
+            .then(|| input.base_url.trim().trim_end_matches('/'))
+            .map(|base| {
+                let base = base
+                    .strip_suffix("/chat/completions")
+                    .or_else(|| base.strip_suffix("/responses"))
+                    .unwrap_or(base);
+                let with_version = if base
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|segment| segment.eq_ignore_ascii_case("v1"))
+                {
+                    base.to_string()
+                } else {
+                    format!("{base}/v1")
+                };
+                format!("{with_version}/chat/completions")
+            });
         let url_matches = entry
             .get("url")
             .and_then(Value::as_str)
             .map(|value| value.trim().trim_end_matches('/'))
-            .is_some_and(|value| value == expected_url);
+            .is_some_and(|value| {
+                value == expected_url
+                    || legacy_claude_url
+                        .as_deref()
+                        .is_some_and(|legacy| value == legacy)
+            });
         let api_key = entry
             .get("apiKey")
             .and_then(Value::as_str)
@@ -519,11 +556,17 @@ mod tests {
                 adapter.resolve_path(home),
                 home.join(".codebuddy").join("models.json")
             );
-            // Same file shape and same wire protocol as the desktop app.
+            // Same file shape as the desktop app; the endpoint follows the
+            // platform's wire protocol (Codex chat, Claude responses).
             let json = render(adapter.as_ref(), None, &["gpt-5.6-sol"]);
+            let expected_suffix = if platform == PlatformId::Claude {
+                "/v1/responses"
+            } else {
+                "/v1/chat/completions"
+            };
             assert_eq!(
                 json["models"][0]["url"],
-                "http://127.0.0.1:19527/v1/chat/completions"
+                format!("http://127.0.0.1:19527{expected_suffix}")
             );
         }
 
@@ -541,16 +584,18 @@ mod tests {
     }
 
     #[test]
-    fn both_platforms_write_a_chat_completions_url_because_the_wire_protocol_is_openai() {
-        // Not Anthropic Messages: `/v1/messages` has zero hits in the bundle, so
-        // the claude platform rides the proxy's chat bridge just like codex.
-        for adapter in [codex_adapter(), claude_adapter()] {
-            let json = render(adapter.as_ref(), None, &["gpt-5.6-sol"]);
-            assert_eq!(
-                json["models"][0]["url"],
-                "http://127.0.0.1:19527/v1/chat/completions"
-            );
-        }
+    fn claude_workbuddy_uses_responses_but_codex_keeps_chat_completions() {
+        let claude_json = render(claude_adapter().as_ref(), None, &["provider-sonnet"]);
+        assert_eq!(
+            claude_json["models"][0]["url"],
+            format!("{BASE_URL}/v1/responses")
+        );
+
+        let codex_json = render(codex_adapter().as_ref(), None, &["gpt-5.6-sol"]);
+        assert_eq!(
+            codex_json["models"][0]["url"],
+            format!("{BASE_URL}/v1/chat/completions")
+        );
     }
 
     #[test]
