@@ -11,6 +11,13 @@ pub(crate) struct ModelCapability {
     pub(crate) mappings: Vec<ModelMapping>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelMatchMode {
+    NativeAlias,
+    ClientFacing,
+    SaasUpstream,
+}
+
 /// One pool member as the catalog sees it: its parsed mappings plus the prefix
 /// its entries carry in precise mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +119,9 @@ pub(crate) struct AdvertisedModel {
     /// Whether every account serving this alias accepts image input. The merge is
     /// conservative: one text-only source must not silently receive an image.
     pub(crate) supports_image_input: bool,
+    /// `Some` only for Claude third-party catalog entries. It is kept while
+    /// folding contributions so the 1M claim can use conservative AND semantics.
+    supports_one_m: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +152,7 @@ pub(crate) const CODEX_DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
 /// Claude 1M tier, and reusing it would make a Codex row come back from a round
 /// trip looking like one.
 pub(crate) const CODEX_ONE_M_CONTEXT_WINDOW: u32 = 1_000_000;
+const CLAUDE_ONE_M_CONTEXT_WINDOW: u32 = 1_000_000;
 
 /// Upstream model families that really serve 1M context, matched on the start of
 /// the mapped-to name so every dated or sized variant is covered
@@ -397,10 +408,11 @@ pub(crate) fn parse_model_capability_value(config: &Value) -> ModelCapability {
     ModelCapability { mappings }
 }
 
-pub(crate) fn supports_requested_model(
+pub(crate) fn model_matches(
     platform: &str,
     capability: &ModelCapability,
     requested_model: Option<&str>,
+    mode: ModelMatchMode,
 ) -> bool {
     let Some(requested_model) = requested_model
         .map(str::trim)
@@ -415,9 +427,21 @@ pub(crate) fn supports_requested_model(
             .any(|model| model.eq_ignore_ascii_case(requested_model));
     }
 
-    capability.mappings.iter().any(|mapping| {
-        is_fallback_mapping(mapping) || model_mapping_matches(&mapping.from, &mapping.to, requested_model)
-    })
+    specific_mapping_for_request(&capability.mappings, requested_model, mode).is_some()
+        || capability.mappings.iter().any(is_fallback_mapping)
+}
+
+pub(crate) fn supports_requested_model(
+    platform: &str,
+    capability: &ModelCapability,
+    requested_model: Option<&str>,
+) -> bool {
+    model_matches(
+        platform,
+        capability,
+        requested_model,
+        ModelMatchMode::ClientFacing,
+    )
 }
 
 pub(crate) fn supports_requested_capability(
@@ -437,32 +461,58 @@ pub(crate) fn supports_requested_capability(
         return false;
     }
 
-    capability.mappings.iter().any(|mapping| {
-        !is_fallback_mapping(mapping)
-            && model_mapping_matches(&mapping.from, &mapping.to, requested_model)
-            && mapping
-                .capabilities
-                .iter()
-                .any(|value| value.trim().eq_ignore_ascii_case(requested_capability))
+    specific_mapping_for_request(
+        &capability.mappings,
+        requested_model,
+        ModelMatchMode::ClientFacing,
+    )
+    .is_some_and(|mapping| {
+        mapping
+            .capabilities
+            .iter()
+            .any(|value| value.trim().eq_ignore_ascii_case(requested_capability))
     }) && supports_requested_model(platform, capability, Some(requested_model))
 }
 
-/// Picks the upstream model for a request: the first *specific* match wins, and
-/// the fallback entry is consulted only when nothing specific matched. Two
-/// passes rather than one `.find()` so the fallback loses regardless of where it
-/// sits in the array — a hand-edited config can put it first.
-pub(crate) fn resolve_mapping_target<'a>(
+/// Picks the upstream model for a request according to the vocabulary used by
+/// the caller. A specific match always beats the catch-all fallback, regardless
+/// of the fallback row's position in a hand-edited mapping list.
+pub(crate) fn resolve_mapping_target(
+    mappings: &[ModelMapping],
+    requested_model: &str,
+    mode: ModelMatchMode,
+) -> Option<String> {
+    specific_mapping_for_request(mappings, requested_model, mode)
+        .or_else(|| mappings.iter().find(|mapping| is_fallback_mapping(mapping)))
+        .map(|mapping| mapping.to.trim().to_string())
+}
+
+fn specific_mapping_for_request<'a>(
     mappings: &'a [ModelMapping],
     requested_model: &str,
-) -> Option<&'a str> {
-    mappings
-        .iter()
-        .find(|mapping| {
-            !is_fallback_mapping(mapping)
-                && model_mapping_matches(&mapping.from, &mapping.to, requested_model)
-        })
-        .or_else(|| mappings.iter().find(|mapping| is_fallback_mapping(mapping)))
-        .map(|mapping| mapping.to.as_str())
+    mode: ModelMatchMode,
+) -> Option<&'a ModelMapping> {
+    let requested_model = requested_model.trim();
+    match mode {
+        ModelMatchMode::NativeAlias => mappings.iter().find(|mapping| {
+            !is_fallback_mapping(mapping) && mapping_from_matches(&mapping.from, requested_model)
+        }),
+        ModelMatchMode::ClientFacing => mappings
+            .iter()
+            .find(|mapping| {
+                !is_fallback_mapping(mapping)
+                    && mapping_from_matches(&mapping.from, requested_model)
+            })
+            .or_else(|| {
+                mappings.iter().find(|mapping| {
+                    !is_fallback_mapping(mapping)
+                        && mapping_to_matches(&mapping.to, requested_model)
+                })
+            }),
+        ModelMatchMode::SaasUpstream => mappings.iter().find(|mapping| {
+            !is_fallback_mapping(mapping) && mapping_to_matches(&mapping.to, requested_model)
+        }),
+    }
 }
 
 /// The key a `(account, model)` failure state is recorded under.
@@ -480,9 +530,13 @@ pub(crate) fn model_state_key(
 ) -> String {
     let requested = strip_one_m_suffix_for_route_lookup(requested_model);
     let _ = platform;
-    resolve_mapping_target(&capability.mappings, requested)
-        .map(|target| strip_one_m_suffix_for_route_lookup(target).to_string())
-        .unwrap_or_else(|| requested.to_string())
+    resolve_mapping_target(
+        &capability.mappings,
+        requested,
+        ModelMatchMode::ClientFacing,
+    )
+    .map(|target| strip_one_m_suffix_for_route_lookup(&target).to_string())
+    .unwrap_or_else(|| requested.to_string())
 }
 
 /// Map an upstream model key back to a client-facing alias, for places that must
@@ -596,6 +650,7 @@ pub(crate) fn advertised_model_catalog_entries(
                     upstream_model: fallback_target.unwrap_or(model),
                     context_window: None,
                     reasoning_levels: None,
+                    supports_one_m: None,
                     supports_image_input: default_supports_image_input(
                         fallback_target.unwrap_or(model),
                     ),
@@ -627,6 +682,7 @@ pub(crate) fn advertised_model_catalog_entries(
                 upstream_model: to,
                 context_window: mapping.context_window,
                 reasoning_levels: mapping.reasoning_levels.as_deref(),
+                supports_one_m: None,
                 supports_image_input: mapping
                     .supports_image_input
                     .unwrap_or_else(|| default_supports_image_input(to)),
@@ -709,6 +765,8 @@ pub(crate) fn client_facing_model_catalog_entries(
                     upstream_model: to,
                     context_window: mapping.context_window,
                     reasoning_levels: mapping.reasoning_levels.as_deref(),
+                    supports_one_m: (platform == "claude")
+                        .then_some(mapping.supports_1m == Some(true)),
                     supports_image_input: mapping
                         .supports_image_input
                         .unwrap_or_else(|| default_supports_image_input(to)),
@@ -764,6 +822,7 @@ struct ModelContribution<'a> {
     context_window: Option<u32>,
     reasoning_levels: Option<&'a [String]>,
     supports_image_input: bool,
+    supports_one_m: Option<bool>,
 }
 
 /// One source's claim on this alias's window, with the Codex per-upstream
@@ -784,6 +843,9 @@ fn contribution_context_window(
     contribution: &ModelContribution<'_>,
 ) -> Option<u32> {
     let declared = contribution.context_window.filter(|window| *window > 0);
+    if let Some(supports_one_m) = contribution.supports_one_m {
+        return supports_one_m.then_some(CLAUDE_ONE_M_CONTEXT_WINDOW);
+    }
     if platform != "codex" {
         return declared;
     }
@@ -814,6 +876,7 @@ fn push_unique_model(
             context_window: claimed_window,
             reasoning_levels: contribution.reasoning_levels.map(<[String]>::to_vec),
             supports_image_input: contribution.supports_image_input,
+            supports_one_m: contribution.supports_one_m,
         });
     } else if let Some(existing) = models
         .iter_mut()
@@ -840,15 +903,24 @@ fn push_unique_model(
             existing.upstream_model = contribution.upstream_model.trim().to_string();
         }
         // Two accounts can advertise one alias, and routing alternates between
-        // them. When they disagree about the window the *largest* claim wins.
+        // them. Claude third-party 1M claims merge conservatively (AND); every
+        // other context window keeps the existing largest-claim behavior.
         // Reconciling downward instead capped the alias at the smallest account
         // in the pool, so adding one 128K relay silently shrank a 1M model on
         // every turn — a permanent cost, paid whichever account the request
         // lands on. Going up costs a turn that overflows the smaller account and
         // comes back 400, which points at the account whose window needs fixing.
-        existing.context_window = match (existing.context_window, claimed_window) {
-            (Some(current), Some(incoming)) => Some(current.max(incoming)),
+        existing.supports_one_m = match (existing.supports_one_m, contribution.supports_one_m) {
+            (Some(current), Some(incoming)) => Some(current && incoming),
             (current, incoming) => current.or(incoming),
+        };
+        existing.context_window = if let Some(supports_one_m) = existing.supports_one_m {
+            supports_one_m.then_some(CLAUDE_ONE_M_CONTEXT_WINDOW)
+        } else {
+            match (existing.context_window, claimed_window) {
+                (Some(current), Some(incoming)) => Some(current.max(incoming)),
+                (current, incoming) => current.or(incoming),
+            }
         };
         existing.supports_image_input =
             existing.supports_image_input && contribution.supports_image_input;
@@ -881,17 +953,10 @@ fn is_placeholder_model(value: &str) -> bool {
     value.is_empty() || value == "upstream-model"
 }
 
-fn model_mapping_matches(mapping_from: &str, mapping_to: &str, requested_model: &str) -> bool {
+fn mapping_from_matches(mapping_from: &str, requested_model: &str) -> bool {
     let mapping_from = mapping_from.trim();
-    let mapping_to = mapping_to.trim();
     let requested_model = requested_model.trim();
     if mapping_from == requested_model {
-        return true;
-    }
-    // A third-party client may send the upstream model name (`to`) directly
-    // instead of the alias (`from`) the proxy rewrites.  Match it so the
-    // request routes to accounts that can serve that upstream model.
-    if !mapping_to.is_empty() && mapping_to.eq_ignore_ascii_case(requested_model) {
         return true;
     }
 
@@ -902,6 +967,11 @@ fn model_mapping_matches(mapping_from: &str, mapping_to: &str, requested_model: 
         (Some(left), Some(right)) => left == right,
         _ => false,
     }
+}
+
+fn mapping_to_matches(mapping_to: &str, requested_model: &str) -> bool {
+    let mapping_to = mapping_to.trim();
+    !mapping_to.is_empty() && mapping_to.eq_ignore_ascii_case(requested_model.trim())
 }
 
 fn claude_route_lookup_model(model: &str) -> Option<&str> {
@@ -936,10 +1006,11 @@ mod tests {
     use super::{
         alias_for_model_key, catalog_members, codex_default_context_window,
         codex_effective_context_window, codex_reasoning_levels, codex_reasoning_metadata,
-        codex_reasoning_profile, known_upstream_models, model_state_key, parse_model_capability,
-        requested_model_from_body, resolve_mapping_target, supports_requested_capability,
-        supports_requested_model, AdvertisedModel, CatalogMemberInput, ModelCapability,
-        ModelCatalogMember, CODEX_ONE_M_CONTEXT_WINDOW,
+        codex_reasoning_profile, known_upstream_models, model_matches, model_state_key,
+        parse_model_capability, requested_model_from_body, resolve_mapping_target,
+        supports_requested_capability, supports_requested_model, AdvertisedModel,
+        CatalogMemberInput, ModelCapability, ModelCatalogMember, ModelMatchMode,
+        CODEX_ONE_M_CONTEXT_WINDOW,
     };
     use crate::models::route_credential::{ModelMapping, FALLBACK_MODEL_ALIAS};
     use crate::services::route_pool_model_mode::PoolModelMode;
@@ -1682,16 +1753,24 @@ mod tests {
         let mappings = &capability.mappings;
 
         assert_eq!(
-            resolve_mapping_target(mappings, "claude-sonnet-alias"),
-            Some("sonnet-upstream")
+            resolve_mapping_target(
+                mappings,
+                "claude-sonnet-alias",
+                ModelMatchMode::ClientFacing
+            ),
+            Some("sonnet-upstream".to_string())
         );
         assert_eq!(
-            resolve_mapping_target(mappings, "claude-haiku-alias"),
-            Some("fallback-upstream")
+            resolve_mapping_target(mappings, "claude-haiku-alias", ModelMatchMode::ClientFacing),
+            Some("fallback-upstream".to_string())
         );
         assert_eq!(
-            resolve_mapping_target(mappings, "claude-sonnet-alias[1m]"),
-            Some("sonnet-upstream")
+            resolve_mapping_target(
+                mappings,
+                "claude-sonnet-alias[1m]",
+                ModelMatchMode::ClientFacing
+            ),
+            Some("sonnet-upstream".to_string())
         );
     }
 
@@ -1702,7 +1781,11 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_mapping_target(&capability.mappings, "claude-haiku-alias"),
+            resolve_mapping_target(
+                &capability.mappings,
+                "claude-haiku-alias",
+                ModelMatchMode::ClientFacing,
+            ),
             None
         );
     }
@@ -1734,8 +1817,12 @@ mod tests {
                 Some(requested)
             ));
             assert_eq!(
-                resolve_mapping_target(&capability.mappings, requested),
-                Some("fallback-upstream"),
+                resolve_mapping_target(
+                    &capability.mappings,
+                    requested,
+                    ModelMatchMode::ClientFacing,
+                ),
+                Some("fallback-upstream".to_string()),
                 "requested={requested}"
             );
         }
@@ -1794,8 +1881,12 @@ mod tests {
             Some("claude-subagent")
         ));
         assert_eq!(
-            resolve_mapping_target(&capability.mappings, "claude-subagent"),
-            Some("provider-haiku")
+            resolve_mapping_target(
+                &capability.mappings,
+                "claude-subagent",
+                ModelMatchMode::ClientFacing,
+            ),
+            Some("provider-haiku".to_string())
         );
     }
 
@@ -2148,7 +2239,141 @@ mod tests {
         assert!(ids.is_empty());
     }
 
-    // --- model_mapping_matches `to` matching tests ---
+    #[test]
+    fn native_alias_does_not_treat_an_upstream_to_as_a_client_alias() {
+        let capability = parse_model_capability(r#"{"model_mappings":[{"from":"A","to":"B"}]}"#);
+
+        assert!(model_matches(
+            "claude",
+            &capability,
+            Some("A"),
+            ModelMatchMode::NativeAlias,
+        ));
+        assert!(!model_matches(
+            "claude",
+            &capability,
+            Some("B"),
+            ModelMatchMode::NativeAlias,
+        ));
+        assert_eq!(
+            resolve_mapping_target(&capability.mappings, "B", ModelMatchMode::NativeAlias),
+            None
+        );
+    }
+
+    #[test]
+    fn client_facing_prefers_explicit_from_over_an_earlier_to_match() {
+        let capability = parse_model_capability(
+            r#"{"model_mappings":[
+                {"from":"A","to":"B"},
+                {"from":"B","to":"C"}
+            ]}"#,
+        );
+
+        assert_eq!(
+            resolve_mapping_target(&capability.mappings, "B", ModelMatchMode::ClientFacing,),
+            Some("C".to_string())
+        );
+    }
+
+    #[test]
+    fn saas_upstream_preserves_a_real_to_and_only_uses_fallback_when_needed() {
+        let capability = parse_model_capability(
+            r#"{"model_mappings":[
+                {"from":"A","to":"B"},
+                {"from":"claude-model","to":"catch-all"}
+            ]}"#,
+        );
+
+        assert!(model_matches(
+            "claude",
+            &capability,
+            Some("B"),
+            ModelMatchMode::SaasUpstream,
+        ));
+        assert_eq!(
+            resolve_mapping_target(&capability.mappings, "B", ModelMatchMode::SaasUpstream,),
+            Some("B".to_string())
+        );
+        assert_eq!(
+            resolve_mapping_target(
+                &capability.mappings,
+                "unknown-model",
+                ModelMatchMode::SaasUpstream,
+            ),
+            Some("catch-all".to_string())
+        );
+    }
+
+    #[test]
+    fn client_facing_one_m_context_requires_every_aggregate_contributor() {
+        let supporting = member(
+            "id-one",
+            "Grox",
+            "api",
+            r#"{"model_mappings":[{"from":"claude-sonnet-alias","to":"provider-sonnet","supports_1m":true}]}"#,
+        );
+        let supporting_too = member(
+            "id-two",
+            "Kan",
+            "api",
+            r#"{"model_mappings":[{"from":"claude-opus-alias","to":"provider-sonnet","supports_1m":true}]}"#,
+        );
+        let text_window_only = member(
+            "id-three",
+            "Sink",
+            "api",
+            r#"{"model_mappings":[{"from":"claude-fable-alias","to":"provider-sonnet","supports_1m":false}]}"#,
+        );
+
+        let all_support = super::client_facing_model_catalog_entries(
+            "claude",
+            &[supporting.clone(), supporting_too],
+            PoolModelMode::Aggregate,
+        );
+        assert_eq!(all_support.len(), 1);
+        assert_eq!(all_support[0].id, "provider-sonnet");
+        assert_eq!(all_support[0].context_window, Some(1_000_000));
+        assert!(!all_support[0].id.contains("[1m]"));
+
+        let mixed = super::client_facing_model_catalog_entries(
+            "claude",
+            &[supporting, text_window_only],
+            PoolModelMode::Aggregate,
+        );
+        assert_eq!(mixed.len(), 1);
+        assert_eq!(mixed[0].context_window, None);
+    }
+
+    #[test]
+    fn client_facing_precise_mode_keeps_one_m_context_per_member() {
+        let supporting = member(
+            "id-one",
+            "Grox",
+            "api",
+            r#"{"model_mappings":[{"from":"claude-sonnet-alias","to":"provider-sonnet","supports_1m":true}]}"#,
+        );
+        let standard = member(
+            "id-two",
+            "Kan",
+            "api",
+            r#"{"model_mappings":[{"from":"claude-opus-alias","to":"provider-sonnet","supports_1m":false}]}"#,
+        );
+
+        let entries = super::client_facing_model_catalog_entries(
+            "claude",
+            &[supporting, standard],
+            PoolModelMode::Precise,
+        );
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, "Grox/provider-sonnet");
+        assert_eq!(entries[0].context_window, Some(1_000_000));
+        assert_eq!(entries[1].id, "Kan/provider-sonnet");
+        assert_eq!(entries[1].context_window, None);
+    }
+
+    // --- client-facing `to` matching tests ---
 
     #[test]
     fn supports_requested_model_matches_upstream_to_name() {
@@ -2184,11 +2409,19 @@ mod tests {
 
         // When the client sends the upstream name, the target is the same
         // upstream name — no rewrite needed.
-        let target = resolve_mapping_target(&capability.mappings, "deepseek-v4.1");
-        assert_eq!(target, Some("deepseek-v4.1"));
+        let target = resolve_mapping_target(
+            &capability.mappings,
+            "deepseek-v4.1",
+            ModelMatchMode::ClientFacing,
+        );
+        assert_eq!(target, Some("deepseek-v4.1".to_string()));
 
         // The alias still resolves to the upstream model.
-        let target = resolve_mapping_target(&capability.mappings, "claude-sonnet-alias");
-        assert_eq!(target, Some("deepseek-v4.1"));
+        let target = resolve_mapping_target(
+            &capability.mappings,
+            "claude-sonnet-alias",
+            ModelMatchMode::ClientFacing,
+        );
+        assert_eq!(target, Some("deepseek-v4.1".to_string()));
     }
 }

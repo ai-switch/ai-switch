@@ -39,6 +39,7 @@ use crate::services::route_model_capability::{
     codex_reasoning_metadata, known_upstream_models, model_state_key, parse_model_capability,
     parse_model_capability_value, requested_model_from_body, resolve_mapping_target,
     supports_requested_capability, supports_requested_model, CatalogMemberInput, ModelCapability,
+    ModelMatchMode,
 };
 use crate::services::route_pool_model_mode::{
     accepted_prefixes, is_official_model_prefix, split_prefixed_model, PoolModelMode,
@@ -3563,8 +3564,10 @@ fn rewrite_model_value(value: &mut Value, mappings: &[ModelMapping]) {
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
             {
-                if let Some(target) = resolve_mapping_target(mappings, &model) {
-                    object.insert("model".to_string(), Value::String(target.to_string()));
+                if let Some(target) =
+                    resolve_mapping_target(mappings, &model, ModelMatchMode::ClientFacing)
+                {
+                    object.insert("model".to_string(), Value::String(target));
                 }
             }
             for child in object.values_mut() {
