@@ -1,6 +1,6 @@
 # Claude 真实上游模型与 SaaS 自动同步 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 让 Claude Code 继续使用 alias 槽位，同时让 Claude 第三方客户端和 Claude SaaS 统一对外暴露真实上游 `to` 模型，并在算力池变化后安全同步 SaaS 模型目录。
 
@@ -61,7 +61,7 @@
 - Keeps `client_facing_model_catalog_entries(platform, members, mode)` as the only third-party Claude directory entry point。
 - `supports_requested_model`、`supports_requested_capability` 等旧调用点改为通过 `ClientFacing` wrapper，避免非 Claude 调用点失去原有行为。
 
-- [ ] **Step 1: 写失败测试，先覆盖匹配优先级和 SaaS 上游语义**
+- [x] **Step 1: 写失败测试，先覆盖匹配优先级和 SaaS 上游语义**
 
 在现有测试 helper 旁新增以下测试；测试使用当前 `parse_model_capability` 和 `member`/`capability` helper，不新造测试专用生产逻辑：
 
@@ -108,7 +108,7 @@ fn saas_upstream_preserves_a_real_to_and_only_uses_fallback_when_needed() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认它因接口/行为缺失而失败**
+- [x] **Step 2: 运行测试确认它因接口/行为缺失而失败**
 
 Run from `src-tauri`:
 
@@ -119,7 +119,7 @@ cargo test --lib services::route_model_capability
 
 Expected: FAIL because `ModelMatchMode` and the mode-aware matching functions do not yet exist, or because the current combined `from/to` lookup returns `B` instead of `C`。
 
-- [ ] **Step 3: 实现最小匹配上下文和目标解析**
+- [x] **Step 3: 实现最小匹配上下文和目标解析**
 
 在 `route_model_capability.rs` 中：
 
@@ -131,7 +131,7 @@ Expected: FAIL because `ModelMatchMode` and the mode-aware matching functions do
 6. 为目录贡献增加 Claude 1M 能力的内部聚合字段：聚合模式使用 AND，精确模式按单成员计算；只有全体贡献支持 1M 时才把第三方上下文窗口写成 `1_000_000`。
 7. `supports_image_input` 继续使用现有 AND 合并；Codex 的 context-window 最大值规则不变。
 
-- [ ] **Step 4: 运行纯模型测试确认通过并检查格式**
+- [x] **Step 4: 运行纯模型测试确认通过并检查格式**
 
 ```powershell
 $env:CARGO_TARGET_DIR = 'target-codex'
@@ -141,7 +141,7 @@ cargo fmt --check
 
 Expected: 新增测试及该模块原有测试 PASS。若 `cargo fmt --check` 报告提交前已存在的无关文件差异，只记录，不在本任务扩大格式化范围；本任务修改的文件必须格式通过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src-tauri/src/services/route_model_capability.rs
@@ -167,7 +167,7 @@ git commit -m "fix: 区分 Claude 模型 alias 与上游匹配上下文"
 - Produces `ensure_group_current(pool, group_id) -> Result<(), AppError>` 和 `sync_group(pool, group_id) -> Result<Value, AppError>`。
 - `source_fingerprint` 由排序后的成员 ID、成员 `config_json`、账号状态/归档状态和平台模式组成，使用仓库已有 `sha2` 依赖计算 SHA-256。
 
-- [ ] **Step 1: 写 migration 和同步服务的失败测试**
+- [x] **Step 1: 写 migration 和同步服务的失败测试**
 
 先在测试中准备一个 Claude 核心分组和两个账号：一个映射 `claude-sonnet-alias → provider-sonnet`，另一个映射 `claude-opus-alias → provider-sonnet`；将两个账号放进同一分组。测试以下行为：
 
@@ -205,7 +205,7 @@ async fn claude_sync_preserves_price_and_reactivates_a_returning_to() {
 
 The second test must contain concrete SQL setup and assertions for all three price columns; it must not only assert a row count.
 
-- [ ] **Step 2: 运行同步测试确认失败**
+- [x] **Step 2: 运行同步测试确认失败**
 
 ```powershell
 $env:CARGO_TARGET_DIR = 'target-codex'
@@ -214,7 +214,7 @@ cargo test --lib saas::domain::model_sync
 
 Expected: FAIL because migration columns, Claude fixture helper, and `model_sync` module are absent。
 
-- [ ] **Step 3: 添加 `0006` migration 和数据结构**
+- [x] **Step 3: 添加 `0006` migration 和数据结构**
 
 `0006_claude_model_sync.sql` 必须创建：
 
@@ -237,7 +237,7 @@ CREATE TABLE saas_group_model_sync (
 
 在 `GroupModel` 和 SQL 查询中增加对应列；所有新插入/更新记录都写 `updated_at=repository::now()`。测试 fixture 增加 Claude 核心分组、成员和映射，不能复用 Codex 的 `gpt-test` 映射来伪造 Claude 行。
 
-- [ ] **Step 4: 实现 `model_sync` 的 desired-state reconciliation**
+- [x] **Step 4: 实现 `model_sync` 的 desired-state reconciliation**
 
 实现顺序固定为：
 
@@ -250,7 +250,7 @@ CREATE TABLE saas_group_model_sync (
 7. 写入 `saas_group_model_sync` 成功指纹和时间；失败时记录 `last_error` 并返回错误；
 8. 同步不能覆盖管理员价格或显式 enabled 状态。
 
-- [ ] **Step 5: 运行同步测试和 migration 测试**
+- [x] **Step 5: 运行同步测试和 migration 测试**
 
 ```powershell
 $env:CARGO_TARGET_DIR = 'target-codex'
@@ -260,7 +260,7 @@ cargo test --lib database::test_support
 
 Expected: 新增的 pending/stale/恢复/价格保留测试 PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add src-tauri/src/saas/migrations/0006_claude_model_sync.sql src-tauri/src/saas/domain/model_sync.rs src-tauri/src/saas/domain/mod.rs src-tauri/src/saas/domain/groups.rs src-tauri/src/saas/repository/mod.rs
@@ -286,7 +286,7 @@ git commit -m "feat: 增加 Claude SaaS 模型自动同步状态"
 - `group_json` 返回 `syncState`、`enabled`、`managedByPool`、`lastSeenAt`，并返回 `sourceFingerprint`、`lastSyncAt`、`lastSyncError`。
 - `billing::reserve`/`reserve_image` 在查询价格前确保分组同步，并只查询 `sync_state='active' AND enabled=1`。
 
-- [ ] **Step 1: 写失败测试，覆盖 Claude SaaS 的公开身份和 fail-closed**
+- [x] **Step 1: 写失败测试，覆盖 Claude SaaS 的公开身份和 fail-closed**
 
 在 `saas/domain/tests.rs` 增加：
 
@@ -320,7 +320,7 @@ async fn pending_or_stale_saas_model_cannot_create_a_reservation() {
 
 在 `saas/proxy/tests.rs` 增加对 `/v1/models` 的断言：pending/stale 不出现在 `data`，active/enabled 且有可用账号的裸 `to` 出现。
 
-- [ ] **Step 2: 运行 SaaS 测试确认失败**
+- [x] **Step 2: 运行 SaaS 测试确认失败**
 
 ```powershell
 $env:CARGO_TARGET_DIR = 'target-codex'
@@ -331,7 +331,7 @@ cargo test --lib saas::proxy
 
 Expected: FAIL，因为 `groups.sync`、状态字段、Claude 模型校验和 active/enabled 查询还不存在。
 
-- [ ] **Step 3: 实现 SaaS domain 接口和模型过滤**
+- [x] **Step 3: 实现 SaaS domain 接口和模型过滤**
 
 1. 在 `domain::admin` 增加 `"groups.sync"` 分支。
 2. `groups.list`/`groups.catalog`/普通用户 `groups` 进入前调用 `ensure_group_current`；管理员保留 pending/stale，普通用户只序列化 active+enabled。
@@ -339,7 +339,7 @@ Expected: FAIL，因为 `groups.sync`、状态字段、Claude 模型校验和 ac
 4. `groups.save` 在保存价格时保留同步字段，新增模型只有 payload 明确 `enabled=true` 且状态允许时才启用。
 5. 删除 stale 记录只删除该组的历史价格行，不触碰 route pool。
 
-- [ ] **Step 4: 接入计费和 `/v1/models`**
+- [x] **Step 4: 接入计费和 `/v1/models`**
 
 在 `billing::reserve` 和 `reserve_image` 中先调用同一数据库连接上的 `reconcile_group_connection`，然后用以下条件查询价格：
 
@@ -354,7 +354,7 @@ WHERE group_id=?
 
 入口条件改为：Claude 允许 `anthropic || responses`，仍拒绝 Claude 的 Chat Completions；Codex/Gemini 原有条件不变。
 
-- [ ] **Step 5: 运行 SaaS 测试确认通过**
+- [x] **Step 5: 运行 SaaS 测试确认通过**
 
 ```powershell
 $env:CARGO_TARGET_DIR = 'target-codex'
@@ -365,7 +365,7 @@ cargo test --lib saas::proxy
 
 Expected: 现有账务、图片计费、模型白名单和新增 Claude 状态测试全部 PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add src-tauri/src/saas/domain/groups.rs src-tauri/src/saas/domain/mod.rs src-tauri/src/saas/billing/mod.rs src-tauri/src/saas/proxy/mod.rs src-tauri/src/saas/domain/tests.rs src-tauri/src/saas/billing/tests.rs src-tauri/src/saas/proxy/tests.rs
@@ -386,7 +386,7 @@ git commit -m "feat: 让 Claude SaaS 使用真实上游模型并安全计费"
 - Produces `ProxyAppState::with_model_match_mode(mode) -> ProxyAppState`，仅 SaaS 内部调用。
 - `filter_candidates_for_model`、模型体改写和 capability 过滤都读取该模式。
 
-- [ ] **Step 1: 写失败测试，复现映射链二次改写**
+- [x] **Step 1: 写失败测试，复现映射链二次改写**
 
 新增一个代理级纯测试，直接构造两个候选账号：
 
@@ -408,7 +408,7 @@ fn saas_upstream_mode_does_not_rewrite_b_when_another_mapping_uses_b_as_from() {
 
 再增加一个 fallback 测试：`unknown-model` 在 `SaasUpstream` 下改写为 `catch-all`，具体 `to` `B` 不改写。
 
-- [ ] **Step 2: 运行 route proxy 测试确认失败**
+- [x] **Step 2: 运行 route proxy 测试确认失败**
 
 ```powershell
 $env:CARGO_TARGET_DIR = 'target-codex'
@@ -417,7 +417,7 @@ cargo test --lib services::route_proxy_service
 
 Expected: FAIL，因为当前 `apply_model_mappings` 没有模式参数，且 SaaS 调用仍使用默认匹配。
 
-- [ ] **Step 3: 实现内部匹配模式传递**
+- [x] **Step 3: 实现内部匹配模式传递**
 
 1. 给 `ProxyAppState` 增加默认 `ClientFacing` 模式和 `with_model_match_mode` builder。
 2. 将 `filter_candidates_for_model`、`filter_candidates_for_capability`、`apply_model_mappings` 的内部版本增加 `ModelMatchMode` 参数；保留公开 `apply_model_mappings` wrapper 使用 `ClientFacing`，避免其他测试和调用点无意义改动。
@@ -425,7 +425,7 @@ Expected: FAIL，因为当前 `apply_model_mappings` 没有模式参数，且 Sa
 4. `saas/proxy/mod.rs` 在 `with_access_scope` 后继续调用 `with_model_match_mode(ModelMatchMode::SaasUpstream)`，图片请求也使用同一模式。
 5. 日志里的 requested model 保持 SaaS 用户提交的裸 `to`，每账号的 model state key 使用最终上游目标。
 
-- [ ] **Step 4: 运行 route proxy 与 SaaS 回归测试**
+- [x] **Step 4: 运行 route proxy 与 SaaS 回归测试**
 
 ```powershell
 $env:CARGO_TARGET_DIR = 'target-codex'
@@ -436,7 +436,7 @@ cargo test --lib saas::billing
 
 Expected: 映射链、fallback、精确前缀、SaaS access scope 和原有重试测试全部 PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src-tauri/src/services/route_proxy_service.rs src-tauri/src/saas/proxy/mod.rs
@@ -458,7 +458,7 @@ git commit -m "fix: 防止 SaaS 上游模型被二次映射"
 - 该 helper 在主事务提交后调用，失败只记录 `eprintln!`/已有日志入口，不改变主操作返回值。
 - 同步只查 Claude SaaS 分组；其他平台调用直接返回成功，不触碰既有手工模型。
 
-- [ ] **Step 1: 写失败测试，验证账号映射和成员变化自动刷新 SaaS**
+- [x] **Step 1: 写失败测试，验证账号映射和成员变化自动刷新 SaaS**
 
 测试流程：
 
@@ -468,7 +468,7 @@ git commit -m "fix: 防止 SaaS 上游模型被二次映射"
 4. 调用 `RoutePoolService::set_group_members` 移除账号；
 5. 断言所有 managed 行都为 stale，且价格仍在数据库中。
 
-- [ ] **Step 2: 运行 route service 测试确认失败**
+- [x] **Step 2: 运行 route service 测试确认失败**
 
 ```powershell
 $env:CARGO_TARGET_DIR = 'target-codex'
@@ -478,7 +478,7 @@ cargo test --lib services::route_pool_service
 
 Expected: FAIL，因为现有服务提交后没有调用 SaaS 同步。
 
-- [ ] **Step 3: 实现提交后 best-effort hook**
+- [x] **Step 3: 实现提交后 best-effort hook**
 
 在各服务成功提交数据库写入、即将返回结果之前调用：
 
@@ -495,7 +495,7 @@ if let Err(error) = crate::saas::domain::model_sync::best_effort_sync_platform(
 
 避免在事务尚未 commit 时调用同步，避免 SQLite 嵌套写事务；批量操作只在批量事务完成后同步一次。
 
-- [ ] **Step 4: 运行自动同步回归测试**
+- [x] **Step 4: 运行自动同步回归测试**
 
 ```powershell
 $env:CARGO_TARGET_DIR = 'target-codex'
@@ -506,7 +506,7 @@ cargo test --lib saas::domain
 
 Expected: 映射变化、成员移除、批量导入和已有价格保留测试 PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src-tauri/src/services/route_credential_service.rs src-tauri/src/services/route_pool_service.rs src-tauri/src/saas/domain/model_sync.rs
@@ -530,7 +530,7 @@ git commit -m "feat: 在算力池变更后同步 Claude SaaS 模型"
 - `is_ours` 同时能识别旧的受管 Chat URL 和新的 Responses URL，以便下一次写入替换旧记录而不是追加重复项。
 - `resolve_client_models` 继续只对需要模型清单的第三方适配器提供 `to` 目录；Claude Code 原生配置仍走 alias env plan。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 WorkBuddy 测试模块增加：
 
@@ -549,7 +549,7 @@ fn claude_workbuddy_uses_responses_but_codex_keeps_chat_completions() {
 
 在 `AccountsScreen.test.tsx` 增加一条：编辑 Claude 模板映射后，`supports_image_input` 和 `capabilities` 仍存在于保存 payload；测试必须从真实用户事件触发，不直接调用内部 helper。
 
-- [ ] **Step 2: 运行前端和 WorkBuddy 测试确认失败**
+- [x] **Step 2: 运行前端和 WorkBuddy 测试确认失败**
 
 ```powershell
 $env:CARGO_TARGET_DIR = 'target-codex'
@@ -559,14 +559,14 @@ pnpm vitest run tests/AccountsScreen.test.tsx
 
 Expected: WorkBuddy Claude URL 断言 FAIL；前端测试在当前模板重建丢字段时 FAIL。
 
-- [ ] **Step 3: 实现端点和能力字段保留**
+- [x] **Step 3: 实现端点和能力字段保留**
 
 1. `WorkBuddyAdapter::model_url` 按 `self.platform` 分支；Claude 使用 `/responses`，Codex 使用 `/chat/completions`。
 2. `is_ours` 对旧 Chat URL 只在 Claude adapter 且 key/代理地址匹配时接纳，render 时统一替换为 Responses URL。
 3. `AccountsScreen.tsx` 模板行更新改为 `{...existing, from, to, label, supports_1m}`，再显式更新需要变化的字段；不能重新构造只含四个字段的对象。
 4. 复查 `resolve_client_models` 的 `context_window` 使用真实 `base_id=to`；Claude `supports_1m` 只有聚合全 true 才写 1M 窗口。
 
-- [ ] **Step 4: 运行适配器和前端回归测试**
+- [x] **Step 4: 运行适配器和前端回归测试**
 
 ```powershell
 $env:CARGO_TARGET_DIR = 'target-codex'
@@ -577,7 +577,7 @@ pnpm typecheck
 
 Expected: 两种 WorkBuddy URL、第三方真实模型名、能力字段保留和现有 Codex 行为全部 PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src-tauri/src/adapters/route_config/workbuddy.rs src-tauri/src/services/route_config_service.rs src/screens/AccountsScreen.tsx tests/AccountsScreen.test.tsx
@@ -601,7 +601,7 @@ git commit -m "feat: 修正 Claude 第三方端点并保留模型能力"
 - `SaasGroup` 增加 `sourceFingerprint`, `lastSyncAt`, `lastSyncError`。
 - 管理端调用 `adminCall("groups.sync", {groupId})` 并在成功后重新加载该页数据。
 
-- [ ] **Step 1: 写失败前端测试**
+- [x] **Step 1: 写失败前端测试**
 
 在 `tests/saas/admin.test.tsx` 增加三条行为测试：
 
@@ -611,7 +611,7 @@ git commit -m "feat: 修正 Claude 第三方端点并保留模型能力"
 
 断言应检查用户可见文本和真实 `adminCall` 调用参数，不能只测组件内部 state。
 
-- [ ] **Step 2: 运行前端测试确认失败**
+- [x] **Step 2: 运行前端测试确认失败**
 
 ```powershell
 pnpm vitest run tests/saas/admin.test.tsx
@@ -619,7 +619,7 @@ pnpm vitest run tests/saas/admin.test.tsx
 
 Expected: 当前组件没有状态字段、真实 `to` 只在手工 catalog 中出现，也没有 `groups.sync` 按钮，测试 FAIL。
 
-- [ ] **Step 3: 实现类型和管理界面**
+- [x] **Step 3: 实现类型和管理界面**
 
 1. 更新 `src/saas/types.ts` 的接口和 `AdminOperation` union，与 Rust camelCase JSON 完全一致。
 2. `GroupEditor` 打开时使用同步后的模型候选；Claude 的 public model 输入改为只读且值等于 `upstreamModel`。
@@ -627,7 +627,7 @@ Expected: 当前组件没有状态字段、真实 `to` 只在手工 catalog 中�
 4. `GroupsPanel` 显示 active/pending/stale 标签、最近同步错误和“重新同步”按钮。
 5. `groups.sync` 成功后同时刷新 `groups.list` 和当前编辑器的 catalog，失败显示 `ActionFeedback`。
 
-- [ ] **Step 4: 运行前端测试和类型检查**
+- [x] **Step 4: 运行前端测试和类型检查**
 
 ```powershell
 pnpm vitest run tests/saas/admin.test.tsx
@@ -636,7 +636,7 @@ pnpm typecheck
 
 Expected: SaaS 状态、重试、只读 Claude 模型名和现有分组定价行为全部 PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src/saas/types.ts src/saas/api.ts src/saas/admin/Groups.tsx tests/saas/admin.test.tsx tests/saas/fixtures.ts
@@ -656,7 +656,7 @@ git commit -m "feat: 在 SaaS 管理端展示并重试模型同步"
 **Interfaces:**
 - 文档明确 Claude Code alias 与第三方/SaaS `to` 的区别；不写入未实现的协议或客户端承诺。
 
-- [ ] **Step 1: 写文档回归检查项**
+- [x] **Step 1: 写文档回归检查项**
 
 在对应协议路由文档的模型清单章节加入以下可验证事实：
 
@@ -666,7 +666,7 @@ Claude SaaS 不暴露账号前缀；第三方精确模式才使用 {账号前缀
 未定价的自动发现模型不会出现在 SaaS /v1/models。
 ```
 
-- [ ] **Step 2: 运行完整验证**
+- [x] **Step 2: 运行完整验证**
 
 从仓库根目录执行：
 
@@ -689,7 +689,7 @@ cargo test --lib saas
 cargo test --lib adapters::route_config::workbuddy
 ```
 
-- [ ] **Step 3: 检查格式、差异和未跟踪文件**
+- [x] **Step 3: 检查格式、差异和未跟踪文件**
 
 ```powershell
 git diff --check
@@ -700,7 +700,7 @@ git status --short --branch
 
 确认只存在本计划提交的代码/文档改动，以及原本必须保留的 `.workbuddy/`、`dev.pid`、`screenshot.png`；不创建任何额外 target 目录。
 
-- [ ] **Step 4: 提交文档与剩余集成改动**
+- [x] **Step 4: 提交文档与剩余集成改动**
 
 ```powershell
 git add docs-site/docs/guide/protocol-routing.md docs-site/docs/en/guide/protocol-routing.md docs-site/docs/guide/quick-start.md docs-site/docs/en/guide/quick-start.md
