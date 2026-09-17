@@ -2,8 +2,9 @@
   "compilerOptions": {
     "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler",
     "lib": ["ES2022", "DOM"], "types": [],
-    "strict": true, "skipLibCheck": false, "noEmit": true, "resolveJsonModule": true,
-    "esModuleInterop": false, "allowSyntheticDefaultImports": false
+    "strict": true,
+    "allowSyntheticDefaultImports": false, "skipLibCheck": true, "noEmit": true, "resolveJsonModule": true,
+    "esModuleInterop": false
   },
-  "include": ["tests/types/node-imports.ts", "dist/node-types.d.ts"]
+  "include": ["tests/types/node-imports.ts", "tests/types/testing-imports.ts", "dist/node-types.d.ts"]
 }

@@ -18,10 +18,10 @@ const fail=(message:string):never=>{throw new ProjectError("E_BUILD_CONFIG",`E_B
 const forward=(value:string)=>value.replaceAll("\\","/");
 const diagnosticError=(code:string,message:string)=>new Error(`${code}: ${message}`);
 
-export function bootstrapPlugin(options: {manifestPath?:string}): Plugin {
+export function bootstrapPlugin(options: {manifestPath?:string; preview?:boolean}): Plugin {
   let projectRoot="";let publicAssets:{fileName:string;bytes:Uint8Array}[]=[];
   let config:ResolvedConfig; let manifest:Manifest; let manifestBytes:Uint8Array;
-  let manifestPath=options.manifestPath??"aplg.json"; let htmlPath=""; let businessEntry:string|null=null; let businessAbsolute=""; let active=false; let transformed=false;
+  let manifestPath=options.manifestPath??"aplg.json"; let htmlPath=""; let businessEntry:string|null=null; let businessAbsolute=""; let active=false; let building=false; let transformed=false;
   async function manifestCurrent() {
     const now=await readBoundedFile(join(config.root,manifestPath),256*1024);
     if(!Buffer.from(now).equals(Buffer.from(manifestBytes))) throw diagnosticError("E_BUILD_MANIFEST_CHANGED","The source manifest changed during the build.");
@@ -51,38 +51,42 @@ export function bootstrapPlugin(options: {manifestPath?:string}): Plugin {
       return {base:"./",build:{outDir:"dist",target:"es2022",sourcemap:false,modulePreload:false,copyPublicDir:false}};
     },
     async configResolved(resolved) {
-      config=resolved;projectRoot=config.root; active=!config.build.ssr && config.command==="build";
+      config=resolved;projectRoot=config.root; building=config.command==="build"; active=!config.build.ssr && (building || options.preview===true && config.command==="serve");
       if(!active) return;
-      if(config.plugins.filter((plugin)=>plugin.name==="aplg:bootstrap").length!==1) fail("Use aplgVite exactly once in a plugin build.");
-      if(config.base!=="./" || resolve(config.root,config.build.outDir)!==join(config.root,"dist") || config.build.target!=="es2022" || config.build.sourcemap) fail("Resolved plugin output settings violate the safe layout.");
+      if(building) {
+        if(config.plugins.filter((plugin)=>plugin.name==="aplg:bootstrap").length!==1) fail("Use aplgVite exactly once in a plugin build.");
+        if(config.base!=="./" || resolve(config.root,config.build.outDir)!==join(config.root,"dist") || config.build.target!=="es2022" || config.build.sourcemap) fail("Resolved plugin output settings violate the safe layout.");
+        try {const output=await inspectPath(join(config.root,"dist"));if(!output.stat.isDirectory())fail("dist must be a real directory.");}
+        catch(error){if(errorCode(error)!=="ENOENT")throw error;}
+      }
       const root=await inspectPath(config.root); if(!root.stat.isDirectory()) fail("Plugin root must be a real directory.");
-      try {const output=await inspectPath(join(config.root,"dist"));if(!output.stat.isDirectory())fail("dist must be a real directory.");}
-      catch(error){if(errorCode(error)!=="ENOENT")throw error;}
       manifestBytes=await readBoundedFile(join(config.root,manifestPath),256*1024);
       const parsed=validateWebManifest(parseStrictJson(decodeUtf8(manifestBytes)));
       if(!parsed.ok) throw diagnosticError(parsed.diagnostics[0].code,parsed.diagnostics[0].message);
       manifest=parsed.value; htmlPath=manifest.entry.slice("dist/".length);
       const expected=resolve(config.root,htmlPath);
-      const input=config.build.rolldownOptions.input;
-      const paths=typeof input==="string"?[input]:Array.isArray(input)?input:input?Object.values(input):[join(config.root,"index.html")];
-      if(paths.length!==1 || resolve(config.root,paths[0])!==expected) fail("Build exactly the HTML entry declared by the manifest.");
+      if(building) {
+        const input=config.build.rolldownOptions.input;
+        const paths=typeof input==="string"?[input]:Array.isArray(input)?input:input?Object.values(input):[join(config.root,"index.html")];
+        if(paths.length!==1 || resolve(config.root,paths[0])!==expected) fail("Build exactly the HTML entry declared by the manifest.");
+      }
       await readBoundedFile(expected,2*1024*1024);
       businessEntry=null;businessAbsolute="";transformed=false;
     },
     buildStart: {
       order:"post",sequential:true,
-      async handler() {if(!active)return;await guardOutput();try {publicAssets=await readPublicAssets(projectRoot,config.publicDir);} catch(error) {if(error instanceof ProjectError)throw diagnosticError(error.code,error.message);throw error;}},
+      async handler() {if(!active || !building)return;await guardOutput();try {publicAssets=await readPublicAssets(projectRoot,config.publicDir);} catch(error) {if(error instanceof ProjectError)throw diagnosticError(error.code,error.message);throw error;}},
     },
     renderStart: {
       order:"pre",sequential:true,
-      async handler(output) {if(!active)return;await guardOutput();if(output.file || output.dir && resolve(projectRoot,output.dir)!==join(projectRoot,"dist"))fail("Output hooks cannot redirect plugin files.");},
+      async handler(output) {if(!active || !building)return;await guardOutput();if(output.file || output.dir && resolve(projectRoot,output.dir)!==join(projectRoot,"dist"))fail("Output hooks cannot redirect plugin files.");},
     },
     transformIndexHtml: {
       order:"pre",
       async handler(html,context) {
         if(!active) return;
         if(resolve(context.filename)!==resolve(config.root,htmlPath)) fail("Unexpected additional HTML entry.");
-        if(transformed) fail("Bootstrap was already injected for this build."); transformed=true;
+        if(transformed && building) fail("Bootstrap was already injected for this build."); transformed=true;
         const scan=scanHtmlText(htmlPath,html,true);
         if(scan.diagnostics.length) throw diagnosticError(scan.diagnostics[0].code,scan.diagnostics[0].message);
         if(!scan.scripts.length) return html+`<script type="module" src="${virtualPublic}"></script>`;
@@ -100,12 +104,12 @@ export function bootstrapPlugin(options: {manifestPath?:string}): Plugin {
 let connected=false;
 try { await connectPlugin(); connected=true; }
 catch { const e=document.createElement("p"); e.setAttribute("role","alert"); e.dataset.aplgError="connection"; e.textContent="Plugin connection failed."; document.body.append(e); }
-${businessEntry ? `if(connected) { try { await import(${JSON.stringify(forward(businessAbsolute))}); }
+${businessEntry ? `if(connected) { try { await import(${JSON.stringify(building ? forward(businessAbsolute) : "/" + forward(businessEntry).replace(/^\/+/, "") )}); }
 catch { const e=document.createElement("p"); e.setAttribute("role","alert"); e.dataset.aplgError="business"; e.textContent="Plugin startup failed."; document.body.append(e); } }` : ""}
 `;
     },
     renderChunk(code) {
-      if(!active) return;
+      if(!active || !building) return;
       // Remove only parsed bundler provenance comments. Do not regex-rewrite code
       // or string literals; otherwise a non-minified build leaks local paths.
       const comments=parseSync("output.js",code).comments;
@@ -117,7 +121,7 @@ catch { const e=document.createElement("p"); e.setAttribute("role","alert"); e.d
     generateBundle: {
       order:"post",
       async handler(_output,bundle) {
-        if(!active)return; await manifestCurrent();
+        if(!active || !building)return; await manifestCurrent();
         if(bundle["aplg-build.json"]) fail("A build record cannot be supplied by author output.");
         const registry=createPathRegistry();
         for(const asset of publicAssets) {
@@ -154,7 +158,7 @@ catch { const e=document.createElement("p"); e.setAttribute("role","alert"); e.d
     writeBundle: {
       order:"post", sequential:true,
       async handler() {
-        if(!active)return;await manifestCurrent();
+        if(!active || !building)return;await manifestCurrent();
         const checked=await inspectBuildFiles(config.root,manifest);
         if(checked.diagnostics.length)throw diagnosticError(checked.diagnostics[0].code,checked.diagnostics[0].message);
       },

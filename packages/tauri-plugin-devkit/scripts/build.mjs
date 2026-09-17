@@ -18,7 +18,7 @@ if (existing && (existing.isSymbolicLink() || !existing.isDirectory() || await r
 await rm(output, { recursive: true, force: true });
 await build({
   absWorkingDir: packageRoot,
-  entryPoints: { index: "src/index.ts", cli: "src/cli.ts", "vite/index": "src/vite/index.ts" },
+  entryPoints: { index: "src/index.ts", cli: "src/cli.ts", "vite/index": "src/vite/index.ts", "testing/index": "src/testing/index.ts" },
   outdir: "dist", bundle: true, splitting: true, format: "esm", platform: "node",
   packages: "external", target: "node22.12", sourcemap: false, logLevel: "info",
 });

@@ -23,7 +23,7 @@ test("public Node import never runs the CLI, reads a project or imports browser/
     assert.equal(typeof api.validateProject, 'function');
     assert.equal(typeof api.packProject, 'function');
     assert.equal(typeof api.initProject, 'function');
-    for(const path of ['/testing','/node-types','/src/index.ts','/dist/cli.js']) await assert.rejects(import('@ai-switch/tauri-plugin-devkit'+path),{code:'ERR_PACKAGE_PATH_NOT_EXPORTED'});
+    for(const path of ['/node-types','/src/index.ts','/dist/cli.js']) await assert.rejects(import('@ai-switch/tauri-plugin-devkit'+path),{code:'ERR_PACKAGE_PATH_NOT_EXPORTED'});
   `], { cwd: root, encoding: "utf8", timeout: 10000, windowsHide: true });
   assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout, "");
 });
@@ -115,7 +115,9 @@ test("public Vite entry is separate from the Node CLI and node-types is declarat
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
     import assert from 'node:assert/strict';
     const {aplgVite} = await import('@ai-switch/tauri-plugin-devkit/vite');
+    const {createTestHost} = await import('@ai-switch/tauri-plugin-devkit/testing');
     assert.equal(typeof aplgVite, 'function');
+    assert.equal(typeof createTestHost, 'function');
     assert.equal(Array.isArray(aplgVite({preview:false})), true);
     await assert.rejects(import('@ai-switch/tauri-plugin-devkit/node-types'), {code:'ERR_PACKAGE_PATH_NOT_EXPORTED'});
   `], { cwd: root, encoding: "utf8", timeout: 10000, windowsHide: true });

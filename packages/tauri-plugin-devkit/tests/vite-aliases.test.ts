@@ -67,6 +67,10 @@ describe("plugin-only Node import adaptation", () => {
     await project.write("node_modules/path-helper/index.js", 'export const marker = "ordinary-package";');
     expect(output(await build('import {marker} from "path-helper"; document.body.textContent=marker;'))).toContain("ordinary-package");
   });
+  test("an author query cannot impersonate the preview virtual module", async () => {
+    await project.write("src/preview-bypass.ts", 'console.log(process.cwd());');
+    await expect(build('import "./preview-bypass.ts?aplg-preview";')).rejects.toThrow(/APLG_UNSUPPORTED_NODE_GLOBAL/);
+  });
   test("cannot bypass the host-entry restriction using an absolute/relative installed path", async () => {
     await expect(build('import {createPluginHost} from "../node_modules/@ai-switch/tauri-plugin-runtime/dist/host/index.js"; console.log(createPluginHost);')).rejects.toThrow(/APLG_HOST_IMPORT/);
   });

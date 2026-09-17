@@ -2,7 +2,7 @@
 
 APLG 插件的 Node 开发工具包。单向依赖 `@ai-switch/tauri-plugin-runtime` 公共协议入口，不依赖 AI Switch 应用源码或 Tauri。
 
-> 当前为 **0.1.0 开发实现，尚未发布到 npm**。D1–D6 已交付源码/产物校验、只读归档 inspect、CLI、Vite Node alias、握手 bootstrap、浏览器类型适配、可复现且不覆盖已有文件的 `.aplg` pack，以及无副作用的 `vanilla-ts` init 模板。浏览器 testing 和 CI 发布仍在 D7–D9，不要把这些目标当作现成功能。
+> 当前为 **0.1.0 开发实现，尚未发布到 npm**。D1–D7 已交付源码/产物校验、只读归档 inspect、CLI、Vite Node alias、握手 bootstrap、浏览器类型适配、可复现且不覆盖已有文件的 `.aplg` pack、无副作用的 `vanilla-ts` init 模板，以及显式内存测试宿主和仅 loopback 的开发预览。D8 双包外部验收与 D9 CI 发布仍未交付，不要把这些目标当作现成功能。
 
 ## 使用已构建的本地包
 
@@ -47,7 +47,7 @@ const packed = await packProject("./my-plugin", {
 console.log(packed.path, packed.sha256, packed.size);
 ```
 
-包根入口是 **Node-only ESM**；导入本身不会读取项目、执行 CLI 或访问浏览器 DOM。公共报告类型直接复用 runtime 的 `Manifest` / `Diagnostic`。`/vite` 是独立 Node 构建插件入口，`/node-types` 仅包含声明，`/testing` 尚未导出。内部 `src`/`dist` 路径不是公共接口。
+包根入口是 **Node-only ESM**；导入本身不会读取项目、执行 CLI 或访问浏览器 DOM。公共报告类型直接复用 runtime 的 `Manifest` / `Diagnostic`。`/vite` 是独立 Node 构建插件入口，`/testing` 是浏览器安全的内存模拟宿主入口，`/node-types` 仅包含声明。内部 `src`/`dist` 路径不是公共接口。
 
 ## D1 的 source 校验范围
 
@@ -162,7 +162,7 @@ await fs.writeFile(file, bytes);
 - 将 runtime 排除出 Vite dev dependency optimization，保留原有共享 ESM chunks/插件单例；测试覆盖 build 与 dev transform。SSR/server 环境不适配，Vite 配置脚本和 CLI 继续使用真正 Node API。没有配置 aplgVite 的宿主构建不受影响。
 - Node 文件 API 是异步客户端，不在网页制造真实磁盘；没有宿主时明确 `E_HOST_UNAVAILABLE`。
 
-**当前阶段边界：** D4 已接入握手 bootstrap 和离线资源静态检查，`manifestPath` 支持根目录内的相对源清单；`preview` 仍是后续 D7 选项，目前没有预览 Provider。不要把静态诊断当作恶意代码沙箱：显式 Vite build 会运行作者配置/依赖，计算 URL、运行期生成代码、额外插件改写等仍需生产 CSP/权限系统约束。
+**当前阶段边界：** D4 已接入握手 bootstrap 和离线资源静态检查，`manifestPath` 支持根目录内的相对源清单；D7 增加显式 `preview` 选项和内存测试宿主。不要把静态诊断当作恶意代码沙箱：显式 Vite build 会运行作者配置/依赖，计算 URL、运行期生成代码、额外插件改写等仍需生产 CSP/权限系统约束。
 
 ### 浏览器 TypeScript 配置
 
@@ -244,6 +244,29 @@ D4 浏览器验收在两个 loopback 来源与不允许 unsafe-inline/unsafe-eva
 - 写入失败只删除本次创建且 identity 未改变的文件/空目录；如果目标身份发生变化则停止清理，避免递归删除用户内容。
 
 模板已随 npm tarball 的 `templates/` 发布。由于包管理器可能忽略源模板目录中的隐藏文件，仓库中以 `templates/vanilla-ts/gitignore` 保存源文件，init 渲染时输出目标项目的 `.gitignore`。
+
+
+## D7 的显式内存测试宿主与开发预览
+
+`@ai-switch/tauri-plugin-devkit/testing` 只提供浏览器安全的内存模拟宿主，不访问 Node `fs`、浏览器本机磁盘、管理 token 或生产宿主 API。它消费 runtime 公共 `HostTransport` 与协议校验；`dispose()` 会清空全部会话、存储和内存文件。
+
+```ts
+import { createTestHost } from "@ai-switch/tauri-plugin-devkit/testing";
+
+const host = createTestHost({
+  manifest,
+  assetUrl: "http://127.0.0.1:43272/plugin/index.html",
+  memoryFiles: { "/data/note.txt": new TextEncoder().encode("hello") },
+});
+```
+
+- `aplg.storage` 只有在 manifest 声明后才出现在会话能力中。
+- `aplg.fs` 只有在 manifest 声明且调用方显式传入 `memoryFiles` 时才出现；所有路径仍是 runtime 的虚拟路径，不映射真实 OS 文件。
+- 会话、订阅和文件 transfer handle 按 session/插件归属隔离；关闭 session 或 dispose 后旧句柄失效。`disconnect()`/`reconnect()` 只改变连接状态，不自动重放调用。
+
+`aplgVite({ preview: true })` 在 `vite serve` 时提供 `/__aplg_preview__/` 开发壳。它只绑定 loopback、校验 Host 头、关闭 iframe HMR 和 Vite client 注入，并在沙箱 iframe（不授予 `allow-same-origin`）中通过真实 runtime 桥完成握手。页面明确显示“模拟宿主 / 内存数据”；需要文件能力时通过 `memoryFiles` 显式提供固定内存快照。生产 build 不包含 preview 路由、`/testing` mock 或内存数据。
+
+本地浏览器验收覆盖 Chromium 和 WebKit：真实握手与业务启动、disconnect/reconnect、重新挂载产生新会话、无 `memoryFiles` 时明确 `E_CAPABILITY_UNAVAILABLE`、显式内存文件读写、非 loopback Host 拒绝，以及生产产物不含 preview/mock。
 
 ## 开发验证
 

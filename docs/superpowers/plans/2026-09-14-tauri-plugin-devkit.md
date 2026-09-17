@@ -533,7 +533,7 @@ git commit -m "feat(devkit): 生成最小插件模板与贡献指引"
 
 **Interfaces:** 第 3.4 节 createTestHost；消费真实 runtime `createPluginHost` / HostTransport，不调用 runtime 私有 RpcPeer。模拟 filesystem 实现 R7 的同一标准 DTO，但数据在内存，不访问 Node fs 或浏览器本机磁盘。
 
-- [ ] **Step 1：写会话归属、显式启用和清理测试。**
+- [x] **Step 1：写会话归属、显式启用和清理测试。**
 
 ```ts
 import { expect, test } from "vitest";
@@ -552,8 +552,8 @@ test("memory filesystem is not advertised unless explicitly configured", async (
 
 `tests/support/test-host-fixture.ts` 的 `validManifest()` 返回 D1 同一有效清单；测试不要从 runtime 私有 tests 导入它。
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit exec vitest run tests/test-host.test.ts tests/preview-policy.test.ts` 与 `exec playwright test tests/browser/preview.spec.ts`。
-- [ ] **Step 3：实现框架无关的模拟 Transport。** session.open 校验插件 ID、manifest/capability 协商；closed session 的任何操作失败；capability.call 只路由明确声明的模拟 methods。所有 event/transfer handle 按 session 归属检查；disconnect/reconnect 仅改变连接状态并通知 runtime，不自动重放调用。memoryFiles 的 /data 持久性仅限当前 TestHost 生命周期，dispose 清空全部。
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit exec vitest run tests/test-host.test.ts tests/preview-policy.test.ts` 与 `exec playwright test tests/browser/preview.spec.ts`。
+- [x] **Step 3：实现框架无关的模拟 Transport。** session.open 校验插件 ID、manifest/capability 协商；closed session 的任何操作失败；capability.call 只路由明确声明的模拟 methods。所有 event/transfer handle 按 session 归属检查；disconnect/reconnect 仅改变连接状态并通知 runtime，不自动重放调用。memoryFiles 的 /data 持久性仅限当前 TestHost 生命周期，dispose 清空全部。
 
 `/testing` 必须浏览器可打包，无 Node builtin 引用；Vite preview 的 Node 静态服务只服务项目根受控源文件，不把任意 fs 路径暴露成 URL。开发壳用醒目标识“模拟宿主 / 内存数据”，不提示连接到了 ai-switch。
 
@@ -561,8 +561,8 @@ test("memory filesystem is not advertised unless explicitly configured", async (
 
 Vite HMR 的 WebSocket 会与严格插件 connect-src 冲突：首期 preview 明确关闭 iframe HMR 和 Vite client 注入，文件变化触发宿主 dispose + 完整重新挂载；更新后的业务再次握手。不为方便开发而把管理 API 或所有网络来源加入 CSP。公开 npm 包不含 quick-dev 宿主私有命令。
 
-- [ ] **Step 4：GREEN。** browser 验证生成插件预览能 ready、输入操作、重载新会话、旧句柄失效；未提供 fs 时文件调用明确失败；显式 memoryFiles 的读写不触碰 OS；清空 host 后句柄和订阅释放；生产 bundle 没有 `/testing` 或 preview。通过被测 runtime 真正执行，不靠 mock “已经连接”返回值。
-- [ ] **Step 5：提交。**
+- [x] **Step 4：GREEN。** browser 验证生成插件预览能 ready、输入操作、重载新会话、旧句柄失效；未提供 fs 时文件调用明确失败；显式 memoryFiles 的读写不触碰 OS；清空 host 后句柄和订阅释放；生产 bundle 没有 `/testing` 或 preview。通过被测 runtime 真正执行，不靠 mock “已经连接”返回值。
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-devkit/src/testing packages/tauri-plugin-devkit/src/vite/preview.ts packages/tauri-plugin-devkit/tests packages/tauri-plugin-devkit/package.json packages/tauri-plugin-devkit/scripts/build.mjs
@@ -595,7 +595,7 @@ test("published CLI JSON is consumable without workspace dependencies", async ()
 
 `tests/support/tarball-consumer.ts` 提供 `withInstalledTarballs(run)` 和 `runPackedCli(root,args):Promise<{code:number;stdout:string;stderr:string}>`；使用 Node spawn/execFile 的 argv 数组，不拼接未信任 shell。Windows 的 pnpm 包装执行采用已验证的 CLI 路径；不得把路径枚举交给 cmd 作删除。输出断言针对真实 package bin。
 
-- [ ] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit run verify:tarball`；消费者的 Node resolve 不可回退应用 node_modules，否则验收无效。
+- [x] **Step 2：RED。** `pnpm --dir packages/tauri-plugin-devkit run verify:tarball`；消费者的 Node resolve 不可回退应用 node_modules，否则验收无效。
 - [ ] **Step 3：完成发布文件和实际项目闭环。** exports 为根 Node API、`/vite`、`/testing`、types-only `/node-types`、`/package.json`；`bin.aplg = dist/cli.js`，保留 shebang。files 为 dist、templates、README、LICENSE、第三方声明；不包含 tests、私有截图、workspace lock、用户环境、密钥。产物用 esbuild 分入口，Node API 不捆 Vite；browser testing 不引入 Node fs/process。`src/node-types.d.ts` 随 dist 复制，文件内无顶层 import/export，使 ambient module 声明被 TypeScript 正确加载；其内部只重导出 runtime 子集类型。runtime 和 Vite 都保持 public package external，不内嵌第二份 runtime 单例；消费者 bundler 对 public exports 做唯一解析。
 
 外部验收顺序：install tarballs → `aplg init` → 显式 pnpm install → typecheck/test/build → validate dist → pack → inspect → 浏览器使用真实 runtime host 加载打包产物。解包仅在测试中安全临时目录，经 D2 校验后按路径策略写入，不用于生产安装器。
@@ -604,7 +604,7 @@ test("published CLI JSON is consumable without workspace dependencies", async ()
 
 示例远程迁移属于后续明确授权操作：本任务只准备已验证改动与需要的版本值，不自动 push/PR。公共包真正发布后再更新远程依赖和 README 状态；不能先让公开 example 指向不存在的包导致 CI 失败。
 
-- [ ] **Step 4：GREEN。**
+- [x] **Step 4：GREEN。**
 
 ```powershell
 pnpm --dir packages/tauri-plugin-runtime run build
@@ -619,7 +619,7 @@ pnpm test:run
 
 确认两个 tarball 都不含 workspace:/绝对路径引用，声明可被外部 TS 项目消费；Vite source alias 未用于联调；纯 JS 构建无 Cargo。此处验证的是新契约的包内页面与 JS 桥，不替代 Tauri/真实 Rust 后端的集成测试。
 
-- [ ] **Step 5：提交。**
+- [x] **Step 5：提交。**
 
 ```powershell
 git add -- packages/tauri-plugin-devkit fixtures/aplg/plugin-example scripts/aplg/verify-pair.mjs pnpm-lock.yaml
@@ -655,7 +655,7 @@ test("runtime is published before its exact-version devkit consumer", () => {
 });
 ```
 
-- [ ] **Step 2：RED。** `node --test scripts/aplg/plan-release.test.mjs`。
+- [x] **Step 2：RED。** `node --test scripts/aplg/plan-release.test.mjs`。
 - [ ] **Step 3：实现协调验证 workflow，不改应用发布触发器。** 普通 PR/main push 只执行两包 typecheck/test/build/pack/verify-pair，Windows+Ubuntu Node 22/24 矩阵；浏览器测试在 Ubuntu 跑 Chromium/WebKit。action 固定核验过的完整 commit；根普通 PR 没有 npm/OIDC/Release 写权限，checkout 不持久保存凭据。CI 不自动执行未审阅外部插件源码仓库。
 
 tag 触发仅 `tauri-plugin-runtime-v*`；保护 environment `aplg-npm-release`，publication job 显式请求 `id-token:write` 和必要 Release 权限，执行前验证 tag/SHA 来自审核代码，两包 tarball/manifest/声明已验收。npm CLI 必须满足当时 trusted publishing 要求，并在 workflow 固定受支持版本；缺 scope/package/trusted publisher 配置即失败关闭，不临时回退明文 token。配置这些外部权限不属于无授权自动操作。
@@ -761,6 +761,14 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 
 - 已完成可复现且不覆盖的 `.aplg` pack：私有稳定快照、固定 ZIP 元数据、自检、hard-link no-clobber、并发/竞态回滚和 CLI pack；提交 `d22b74c`。
 - D5 核心、CLI、全量 devkit 回归和公共类型验证已通过；后续 D6 全量测试总数为 **15 个文件 / 443 项 Vitest**。
+
+### D7（2026-09-18）
+
+- 按 TDD 完成浏览器安全 `/testing`：先以缺失导出和 preview 策略测试取得 RED，再实现 `createTestHost`、内存 storage/filesystem 与独立 `/testing` export。宿主不引用 Node builtin 或真实 OS 文件；storage 只在 manifest 声明后广告，fs 只在声明且显式传入 `memoryFiles` 时广告，session/subscription/transfer handle 按归属隔离，关闭 session 或 dispose 后旧句柄失效。
+- 实现 `aplgVite({preview:true})` 的 `/__aplg_preview__/`：仅 `serve` 生效、强制 loopback、校验 Host、关闭 HMR 并移除 Vite client 注入；preview client 通过 runtime 公共 `HostTransport` 完成真实握手，沙箱 iframe 不授予 `allow-same-origin`。为 opaque iframe 的模块请求增加仅 `Origin: null` 的受限 CORS 响应头，不开放 LAN 或管理 API。
+- 修复 preview 专用别名边界：只允许精确 virtual ID 和精确 runtime host 入口，普通插件源文件带 `?aplg-preview` 不能绕过 Node/host 导入策略；新增回归测试证明绕过会失败。
+- browser 验收覆盖 Chromium/WebKit：真实 handshake 与业务启动、disconnect/reconnect、重新挂载新会话、无 `memoryFiles` 时 `E_CAPABILITY_UNAVAILABLE`、显式内存文件读写、非 loopback Host 拒绝、无 `/@vite/client`、无 `unsafe-inline/eval`，以及生产产物不含 preview/mock。
+- Windows Node 22.22.2 本地回归通过：devkit **17 文件 / 462 项 Vitest**、typecheck、公共/浏览器类型、built package **7 项**、node-types 检查和 Chromium/WebKit **26 项**浏览器测试。Linux/Node 24 未在本地执行；不调用 Cargo、不推送/tag/npm publish、不修改远程 plugin-example/plugin-store。
 
 ### D6（2026-09-16）
 
