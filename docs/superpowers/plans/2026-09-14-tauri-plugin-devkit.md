@@ -632,7 +632,7 @@ git commit -m "test(devkit): 验收双包外部安装与示例打包"
 
 **Interfaces:** `planRelease(input): ReleasePlan` 在 `plan-release.mjs` 导出；`input` 为 `{tag, runtime:{name,version}, devkit:{name,version,runtimeDependency}}`；输出 `{version,order:[runtimeName,devkitName],candidateTag:"aplg-candidate",stableTag:"latest"}`。非法名称/版本/依赖/tag 抛 `E_RELEASE_PLAN`。只允许稳定 SemVer；预发布流程另行设计，不把 beta 意外推到 latest。
 
-- [ ] **Step 1：写无网络纯发布计划测试。**
+- [x] **Step 1：写无网络纯发布计划测试。**
 
 ```js
 import assert from "node:assert/strict";
@@ -656,7 +656,7 @@ test("runtime is published before its exact-version devkit consumer", () => {
 ```
 
 - [x] **Step 2：RED。** `node --test scripts/aplg/plan-release.test.mjs`。
-- [ ] **Step 3：实现协调验证 workflow，不改应用发布触发器。** 普通 PR/main push 只执行两包 typecheck/test/build/pack/verify-pair，Windows+Ubuntu Node 22/24 矩阵；浏览器测试在 Ubuntu 跑 Chromium/WebKit。action 固定核验过的完整 commit；根普通 PR 没有 npm/OIDC/Release 写权限，checkout 不持久保存凭据。CI 不自动执行未审阅外部插件源码仓库。
+- [x] **Step 3：实现协调验证 workflow，不改应用发布触发器。** 普通 PR/main push 只执行两包 typecheck/test/build/pack/verify-pair，Windows+Ubuntu Node 22/24 矩阵；浏览器测试在 Ubuntu 跑 Chromium/WebKit。action 固定核验过的完整 commit；根普通 PR 没有 npm/OIDC/Release 写权限，checkout 不持久保存凭据。CI 不自动执行未审阅外部插件源码仓库。
 
 tag 触发仅 `tauri-plugin-runtime-v*`；保护 environment `aplg-npm-release`，publication job 显式请求 `id-token:write` 和必要 Release 权限，执行前验证 tag/SHA 来自审核代码，两包 tarball/manifest/声明已验收。npm CLI 必须满足当时 trusted publishing 要求，并在 workflow 固定受支持版本；缺 scope/package/trusted publisher 配置即失败关闭，不临时回退明文 token。配置这些外部权限不属于无授权自动操作。
 
@@ -666,8 +666,8 @@ tag 触发仅 `tauri-plugin-runtime-v*`；保护 environment `aplg-npm-release`�
 
 实际调用 npm publish 时固定使用已验证支持 OIDC 的 npm CLI，并加 `--ignore-scripts` 与 provenance 选项；只上传已验证 tarball，不重新打包源码。发布包使用 provenance，GitHub Release 附两个 tarball、SHA256 清单与版本说明；manifest 指明 npm/协议/API 各自版本。源验证 job 的 artifact 只允许来自同 run/commit，发布 job 不执行包生命周期脚本。实际用户说“发布”之前不创建 tag 或调用 execute。
 
-- [ ] **Step 4：GREEN 与非发布演练。** `node --test scripts/aplg/plan-release.test.mjs`、workflow 静态校验、两包 dry-run、假 registry HTTP 服务模拟已存在/冲突/第一包成功第二包失败/latest 部分更新；验证脚本未调用真实 registry publish。真实 npm OIDC 和 GitHub Release 只有显式发布任务才验收，记录为外部待启用门槛，不以 dry-run 假称已发布。
-- [ ] **Step 5：提交流程代码，不推送/tag。**
+- [x] **Step 4：GREEN 与非发布演练。** `node --test scripts/aplg/plan-release.test.mjs`、workflow 静态校验、两包 dry-run、假 registry HTTP 服务模拟已存在/冲突/第一包成功第二包失败/latest 部分更新；验证脚本未调用真实 registry publish。真实 npm OIDC 和 GitHub Release 只有显式发布任务才验收，记录为外部待启用门槛，不以 dry-run 假称已发布。
+- [x] **Step 5：提交流程代码，不推送/tag。**
 
 ```powershell
 git add -- .github/workflows/tauri-plugin-runtime.yml scripts/aplg packages/tauri-plugin-runtime/README.md packages/tauri-plugin-devkit/README.md
@@ -761,6 +761,13 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 
 - 已完成可复现且不覆盖的 `.aplg` pack：私有稳定快照、固定 ZIP 元数据、自检、hard-link no-clobber、并发/竞态回滚和 CLI pack；提交 `d22b74c`。
 - D5 核心、CLI、全量 devkit 回归和公共类型验证已通过；后续 D6 全量测试总数为 **15 个文件 / 443 项 Vitest**。
+
+### D9（2026-09-18）
+
+- 按 TDD 实现纯发布计划器 `planRelease`：只接受稳定 SemVer、固定包名、完全一致的 runtime/devkit 版本和精确 runtime 依赖；非法 tag/版本/依赖统一抛 `E_RELEASE_PLAN`，dist-tag 固定为 `aplg-candidate`/`latest`，调用方不能覆盖。5 项计划测试通过。
+- 实现默认 dry-run 的 `publish-npm.mjs`：校验 gzip tarball 内真实 `package.json`，核对已发布 integrity，相同则幂等跳过、冲突则失败；`--execute` 才按 runtime → devkit 发布，随后提升 `latest`，部分失败尝试恢复旧 dist-tag 并报告。3 项假 registry 演练覆盖 dry-run、幂等/冲突、顺序发布与回滚，全程未调用真实 registry publish。
+- 新增 `.github/workflows/tauri-plugin-runtime.yml`：普通 PR/main push 只在 Windows/Ubuntu Node 22/24 做 typecheck/test/build/pack/verify-pair/发布逻辑测试；只有 `tauri-plugin-runtime-v*` tag 进入受保护 environment `aplg-npm-release`，使用 OIDC `id-token: write`、固定 action commit、checkout 不持久凭据，并校验 tag 属于默认分支。
+- 两包 README 已说明候选 tag、latest 提升、锁文件建议和真实 npm/OIDC/scope 仍需外部授权配置。真实 npm 发布、GitHub Release、OIDC 与 trusted publisher 配置未执行，不以 dry-run 假称已发布；不推送、不打 tag。
 
 ### D8（2026-09-18）
 

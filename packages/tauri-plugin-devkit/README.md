@@ -2,7 +2,7 @@
 
 APLG 插件的 Node 开发工具包。单向依赖 `@ai-switch/tauri-plugin-runtime` 公共协议入口，不依赖 AI Switch 应用源码或 Tauri。
 
-> 当前为 **0.1.0 开发实现，尚未发布到 npm**。D1–D8 已交付源码/产物校验、只读归档 inspect、CLI、Vite Node alias、握手 bootstrap、浏览器类型适配、可复现且不覆盖已有文件的 `.aplg` pack、无副作用的 `vanilla-ts` init 模板，以及显式内存测试宿主和仅 loopback 的开发预览。D9 CI 发布仍未交付，不要把这些目标当作现成功能。
+> 当前为 **0.1.0 开发实现，尚未发布到 npm**。D1–D8 已交付源码/产物校验、只读归档 inspect、CLI、Vite Node alias、握手 bootstrap、浏览器类型适配、可复现且不覆盖已有文件的 `.aplg` pack、无副作用的 `vanilla-ts` init 模板，以及显式内存测试宿主和仅 loopback 的开发预览。D9 协调 CI 与受控发布入口已准备，但 npm scope/trusted publisher 配置与真实发布仍未启用；不要把 dry-run 当作已发布。
 
 ## 使用已构建的本地包
 
@@ -279,6 +279,12 @@ node scripts/aplg/verify-pair.mjs --runtime <runtime.tgz> --devkit <devkit.tgz>
 ```
 
 它在外部消费者中保留 `fixtures/aplg/plugin-example` 的来源与 7 个上游行为测试，完成上述闭环后，解包经 inspect 校验的 `.aplg`，在受控 loopback host 中以真实 runtime `createPluginHost` 加载，并运行 Chromium/WebKit 的握手、文本统计行为、不透明 iframe 与父页面/存储隔离验收。`inspect` 仍是 `not-verified`，不表示签名、安装或商店审核已实现。
+
+## 发布与 CI
+
+`.github/workflows/tauri-plugin-runtime.yml` 在普通 PR/main push 上运行两包 typecheck/test/build/pack、`verify-pair`、`plan-release` 与 `publish-npm` 演练，不授予 npm 或 OIDC 写权限。
+
+只有 `tauri-plugin-runtime-v*` tag 才进入 `aplg-npm-release` environment 的发布 job：先验证 tag 在默认分支上，再构建/打包/`verify-pair`，最后调用 `scripts/aplg/publish-npm.mjs --execute`。脚本默认 dry-run；真实执行使用 npm trusted publishing 与 provenance，按 runtime → devkit 发布到 `aplg-candidate`，两包成功后提升 `latest`，失败时尝试恢复旧 dist-tag 并报告部分结果。候选 tag 不隔离版本范围安装，使用者应使用锁文件或精确版本。
 
 ## 开发验证
 
