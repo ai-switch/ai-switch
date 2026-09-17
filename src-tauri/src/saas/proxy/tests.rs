@@ -304,3 +304,166 @@ async fn claude_responses_is_allowed_but_chat_completions_is_rejected() {
     assert!(chat.is_err());
     assert_eq!(chat.unwrap_err().code(), "saas.endpoint_not_allowed");
 }
+/// The full Claude SaaS path in one test: automatic discovery, an administrator
+/// pricing and enabling the model, the public catalog, a real request, and the
+/// reservation it produces.
+///
+/// The account deliberately carries a mapping chain (`provider-sonnet` is also
+/// the `from` of a second mapping). If the proxy re-applied client-facing
+/// matching to the already-resolved SaaS model, the upstream would receive
+/// `something-else` instead.
+#[tokio::test]
+async fn claude_saas_end_to_end_sync_price_request_and_bill() {
+    let pool = repository::test_pool().await;
+    let (_principal, plaintext) = repository::claude_principal_and_key(&pool).await;
+    // One account keeps the rotation deterministic.
+    sqlx::query("DELETE FROM route_pool_members WHERE route_credential_id='claude-sync-opus'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM route_credentials WHERE id='claude-sync-opus'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen_upstream = seen.clone();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(payload): Json<Value>| {
+            let seen = seen_upstream.clone();
+            async move {
+                seen.lock()
+                    .unwrap()
+                    .push(payload["model"].as_str().unwrap_or_default().to_string());
+                Json(json!({
+                    "choices":[{"message":{"content":"ok"}}],
+                    "usage":{"prompt_tokens":10,"completion_tokens":5}
+                }))
+                .into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    sqlx::query(
+        "UPDATE route_credentials SET secret_payload_json=?,config_json=?
+         WHERE id='claude-sync-sonnet'",
+    )
+    .bind(r#"{"api_key":"upstream-key"}"#)
+    .bind(
+        json!({
+            "base_url": format!("http://{address}/v1"),
+            "interface_format": "openai",
+            "model_mappings": [
+                {"from":"claude-sonnet-alias","to":"provider-sonnet"},
+                {"from":"provider-sonnet","to":"something-else"}
+            ]
+        })
+        .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Discovery puts the model in the catalog but leaves it closed.
+    domain::admin(&pool, "groups.sync", json!({"groupId":"claude-saas"}))
+        .await
+        .unwrap();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {plaintext}").parse().unwrap(),
+    );
+    let runtime = SaasRuntime::default();
+    let proxy = build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default());
+
+    let pending = execute(
+        &pool,
+        &runtime,
+        proxy.clone(),
+        Method::GET,
+        headers.clone(),
+        "/v1/models".parse().unwrap(),
+        Body::empty(),
+    )
+    .await
+    .unwrap();
+    let pending: Value = serde_json::from_slice(
+        &axum::body::to_bytes(pending.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(pending["data"].as_array().map(Vec::len), Some(0));
+
+    // The administrator prices and enables it through the normal save flow.
+    let mut payload = repository::claude_group_payload();
+    payload["models"][0]["syncState"] = json!("pending_pricing");
+    payload["models"][0]["enabled"] = json!(true);
+    domain::admin(&pool, "groups.save", payload).await.unwrap();
+
+    let listed = execute(
+        &pool,
+        &runtime,
+        proxy.clone(),
+        Method::GET,
+        headers.clone(),
+        "/v1/models".parse().unwrap(),
+        Body::empty(),
+    )
+    .await
+    .unwrap();
+    let listed: Value = serde_json::from_slice(
+        &axum::body::to_bytes(listed.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|model| model["id"] == "provider-sonnet"));
+
+    let response = execute(
+        &pool,
+        &runtime,
+        proxy,
+        Method::POST,
+        headers,
+        "/v1/messages".parse().unwrap(),
+        Body::from(
+            json!({
+                "model":"provider-sonnet",
+                "max_tokens":16,
+                "messages":[{"role":"user","content":"hi"}]
+            })
+            .to_string(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+
+    // The upstream saw the resolved public name, not the second mapping's target.
+    assert_eq!(seen.lock().unwrap().as_slice(), ["provider-sonnet"]);
+    let reservation: (String, String, String, i64) = sqlx::query_as(
+        "SELECT model,status,platform,reserved_micros FROM saas_billing_reservations",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reservation.0, "provider-sonnet");
+    assert_eq!(reservation.2, "claude");
+    assert!(reservation.3 > 0);
+    task.abort();
+}
