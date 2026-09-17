@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Layers3, Pencil, Plus, RefreshCw } from "lucide-react";
+import { Layers3, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { adminCall } from "../api";
 import type { PageResult, SaasCatalog, SaasGroup } from "../types";
 import { decimalToInteger, formatCount, formatMoney, integerToDecimal } from "../format";
@@ -14,6 +14,16 @@ export function GroupsPanel() {
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
   const groups = useResource(() => adminCall<PageResult<SaasGroup>>("groups.list", { page, pageSize: 20 }), [page]);
+  async function deleteModel(groupId: string, model: string) {
+    setSyncError(null);
+    try {
+      await adminCall("groups.model.delete", { groupId, model });
+      groups.reload();
+    } catch (error) {
+      setSyncError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function resync(groupId: string) {
     setSyncingId(groupId);
     setSyncError(null);
@@ -36,7 +46,7 @@ export function GroupsPanel() {
         {group.availableAccountCount === 0 && <Notice tone="warning">{text("没有可用账号，不会回退到其他分组。", "No eligible accounts. Requests never fall back to another group.")}</Notice>}
         <Table items={group.models} rowKey={model => model.model} columns={[
           { label: text("模型映射", "Model mapping"), render: model => <code>{model.model} → {model.upstreamModel}</code> },
-          { label: text("状态", "Status"), render: model => <SyncStateBadge state={model.syncState} enabled={model.enabled} text={text} /> },
+          { label: text("状态", "Status"), render: model => <span className="saas-row"><SyncStateBadge state={model.syncState} enabled={model.enabled} text={text} />{model.syncState === "stale" && <Button onClick={() => void deleteModel(group.id, model.model)} aria-label={text(`删除历史价格 ${model.model}`, `Delete historical price ${model.model}`)}><Trash2 size={14} /></Button>}</span> },
           { label: text("输入 / 缓存 / 输出 · USD/百万", "Input / cache / output · USD/M"), render: model => <span className="saas-tabular">{formatMoney(model.inputPriceMicros,locale)} / {formatMoney(model.cachePriceMicros,locale)} / {formatMoney(model.outputPriceMicros,locale)}</span> },
           { label: text("生图 · USD/张", "Image · USD/image"), render: model => <span className="saas-tabular">{(model.imagePriceMicros ?? 0) > 0 ? formatMoney(model.imagePriceMicros ?? 0,locale) : "—"}</span> },
         ]} />

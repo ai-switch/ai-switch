@@ -523,6 +523,60 @@ pub async fn catalog(pool: &SqlitePool, payload: Value) -> Result<Value, AppErro
     }))
 }
 
+/// Remove one historical price row from a Claude group.
+///
+/// Only `stale` rows may be deleted: an `active` or `pending_pricing` row is
+/// still part of the live catalog, and deleting it would silently drop a model
+/// users may already be billed against. The compute pool is never touched —
+/// this clears the SaaS price record only.
+pub async fn delete_model(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> {
+    let group_id = repository::text(&payload, "groupId")?;
+    let model = repository::text(&payload, "model")?;
+    let mut transaction = repository::begin(pool).await?;
+    let group = core_group(&mut *transaction, group_id)
+        .await?
+        .ok_or_else(|| invalid("saas.group_not_found", "Core group is unavailable"))?;
+    if group.platform != "claude" {
+        return Err(invalid(
+            "saas.validation",
+            "Only Claude groups manage models from the pool",
+        ));
+    }
+    let state: Option<String> =
+        sqlx::query_scalar("SELECT sync_state FROM saas_group_models WHERE group_id=? AND model=?")
+            .bind(group_id)
+            .bind(model)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(db_error)?;
+    match state.as_deref() {
+        None => return Err(invalid("saas.validation", "Model row was not found")),
+        Some("stale") => {}
+        Some(_) => {
+            return Err(invalid(
+                "saas.validation",
+                "Only stale models may be deleted; disable or keep it instead",
+            ))
+        }
+    }
+    sqlx::query("DELETE FROM saas_group_models WHERE group_id=? AND model=?")
+        .bind(group_id)
+        .bind(model)
+        .execute(&mut *transaction)
+        .await
+        .map_err(db_error)?;
+    repository::audit(
+        &mut *transaction,
+        "groups.model.delete",
+        Some(group_id),
+        json!({"model": model}),
+    )
+    .await?;
+    let result = group_json(&mut *transaction, group_id).await?;
+    transaction.commit().await.map_err(db_error)?;
+    Ok(result)
+}
+
 pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> {
     let mut input: GroupInput = serde_json::from_value(payload)
         .map_err(|_| invalid("saas.validation", "Invalid group extension"))?;

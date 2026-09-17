@@ -575,3 +575,55 @@ async fn admin_can_promote_a_pending_model_by_pricing_and_enabling_it() {
     .unwrap();
     assert_eq!(row, (true, "active".to_string()));
 }
+#[tokio::test]
+async fn admin_can_delete_a_stale_model_row_without_touching_the_pool() {
+    let pool = repository::test_pool().await;
+    repository::insert_claude_sync_fixture(&pool).await;
+    admin(&pool, "groups.sync", json!({"groupId":"claude-saas"}))
+        .await
+        .unwrap();
+
+    // Price and enable the discovered model so it is live.
+    let mut payload = repository::claude_group_payload();
+    payload["models"][0]["syncState"] = json!("pending_pricing");
+    payload["models"][0]["enabled"] = json!(true);
+    admin(&pool, "groups.save", payload).await.unwrap();
+
+    // An active row must not be deletable: that would silently drop a live model.
+    let live = admin(
+        &pool,
+        "groups.model.delete",
+        json!({"groupId":"claude-saas","model":"provider-sonnet"}),
+    )
+    .await;
+    assert_eq!(
+        live.expect_err("active row must not be deletable").code(),
+        "saas.validation"
+    );
+
+    // Take the account out of the pool, sync, and the row becomes stale.
+    sqlx::query("UPDATE route_pool_members SET enabled=0 WHERE group_id='claude-saas'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    admin(&pool, "groups.sync", json!({"groupId":"claude-saas"}))
+        .await
+        .unwrap();
+
+    let removed = admin(
+        &pool,
+        "groups.model.delete",
+        json!({"groupId":"claude-saas","model":"provider-sonnet"}),
+    )
+    .await
+    .expect("delete stale row");
+    assert_eq!(removed["models"].as_array().map(Vec::len), Some(0));
+
+    // Only the historical price row is gone; pool membership is untouched.
+    let members: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM route_pool_members WHERE group_id='claude-saas'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(members, 2);
+}

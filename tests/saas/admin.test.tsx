@@ -264,6 +264,24 @@ describe("SaaS administrator", () => {
     expect(screen.getAllByText(/pending pricing/i).length).toBeGreaterThan(0);
   });
 
+  it("deletes a stale Claude model's historical price row", async () => {
+    const staleGroup = {
+      ...claudeGroup,
+      models: [{ ...claudeGroup.models[0], syncState: "stale" as const, enabled: true }],
+    };
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command, request) => {
+      if (request?.operation === "groups.list") return page([staleGroup]);
+      if (request?.operation === "groups.model.delete") return { ...staleGroup, models: [] };
+      return original(command, request);
+    });
+    const actor = userEvent.setup();
+    render(<SaasAdmin />);
+    await actor.click(screen.getByRole("button", { name: /^groups & pricing$/i }));
+    await actor.click(await screen.findByRole("button", { name: /delete historical price provider-sonnet/i }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("saas_admin", { operation: "groups.model.delete", payload: { groupId: staleGroup.id, model: "provider-sonnet" } }));
+  });
+
   it("retries Claude model synchronization and reloads the group list", async () => {
     const original = invoke.getMockImplementation()!;
     invoke.mockImplementation(async (command, request) => {
