@@ -99,7 +99,9 @@ async fn daily_subscription_migration_upgrades_an_existing_growth_schema() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(version, 5);
+    // The latest migration is whatever the repository currently ships; pin it
+    // so a future migration must consciously update this expectation.
+    assert_eq!(version, 6);
     assert!(columns.iter().any(|column| column == "invite_code"));
     assert!(!columns.iter().any(|column| column == "invite_code_hash"));
     assert_eq!(table_exists, 1);

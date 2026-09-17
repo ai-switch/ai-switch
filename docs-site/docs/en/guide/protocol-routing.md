@@ -170,6 +170,17 @@ Three behaviors worth remembering:
 - When the prefix resolves to no account — or that account cannot serve the remaining alias — the whole string continues as the model name. Vendor-pathed relay model names like `z-ai/glm-5.3` are unaffected.
 - Claude Code's four `/model` slots are untouched: a slot carries a single alias rather than a list, so it keeps rotating. Gemini's native path carries the model in the URL and no prefix is parsed there.
 
+### Client-facing model names: alias vs. real upstream model
+
+The same mapping has two names depending on who reads it:
+
+- **Claude Code's official config** uses alias slots (such as `claude-sonnet-alias`): that is a Claude Code client limitation — a slot only accepts a fixed alias — and the proxy rewrites it to `to` per account.
+- **Third-party clients and Claude SaaS** use the real upstream `to` model name. The model lists for ZCode, WorkBuddy/CodeBuddy, Qoder CLI, and DeepSeek Harness, plus SaaS `/v1/models`, billing, and account filtering, all expose `to` rather than leaking the Claude Code alias.
+
+Claude SaaS is a billed product catalog, so it **always uses the bare `to` and never exposes an account prefix**: one real model has one price, and renaming or adding accounts does not change the model ID users see. Account prefixes exist only in the third-party client's precise mode (`{account prefix}/{to}`).
+
+Models discovered by automatic synchronization start in a **pending-pricing** state: **an unpriced or stale model never appears in SaaS `/v1/models` and never creates a billing reservation**. An administrator has to price and enable it explicitly before it becomes public.
+
 ## The full order of one forward
 
 ```text
