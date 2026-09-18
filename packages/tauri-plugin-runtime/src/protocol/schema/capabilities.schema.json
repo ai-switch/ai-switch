@@ -1,0 +1,301 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-switch.github.io/aplg/schema/v1/capabilities.schema.json",
+  "title": "StandardCapabilityMessage",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.storage"
+        },
+        "method": {
+          "const": "get"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "key"
+          ],
+          "properties": {
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.storage"
+        },
+        "method": {
+          "const": "get"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "$ref": "#/definitions/jsonValue"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.storage"
+        },
+        "method": {
+          "const": "set"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "key",
+            "value"
+          ],
+          "properties": {
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "value": {
+              "$ref": "#/definitions/jsonValue"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.storage"
+        },
+        "method": {
+          "const": "set"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "type": "null"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.storage"
+        },
+        "method": {
+          "const": "remove"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "key"
+          ],
+          "properties": {
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.storage"
+        },
+        "method": {
+          "const": "remove"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "type": "null"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.dialog"
+        },
+        "method": {
+          "const": "pickDirectory"
+        },
+        "direction": {
+          "const": "request"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {
+            "access": {
+              "enum": [
+                "read",
+                "readwrite"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "method",
+        "direction",
+        "value"
+      ],
+      "properties": {
+        "capability": {
+          "const": "aplg.dialog"
+        },
+        "method": {
+          "const": "pickDirectory"
+        },
+        "direction": {
+          "const": "result"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "access"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "access": {
+                  "enum": [
+                    "read",
+                    "readwrite"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "jsonValue": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/jsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/jsonValue"
+          }
+        }
+      ]
+    }
+  }
+}

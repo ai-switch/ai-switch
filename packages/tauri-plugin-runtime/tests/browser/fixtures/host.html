@@ -1,0 +1,9 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>APLG handshake fixture</title></head>
+<body>
+<button id="connect">Connect</button><button id="ack">Acknowledge</button><button id="close">Close</button><button id="rogue-connect">Rogue connect</button>
+<div id="readies">0</div><div id="acks">0</div><div id="calls">0</div><div id="sent">0</div><div id="rogue-sent">no</div>
+<iframe id="plugin" title="Plugin" sandbox="allow-scripts"></iframe>
+<iframe id="rogue" title="Rogue sibling" src="/rogue.html" hidden></iframe>
+<script type="module" src="/host.js"></script>
+</body></html>

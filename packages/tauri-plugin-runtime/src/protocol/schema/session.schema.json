@@ -1,0 +1,145 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-switch.github.io/aplg/schema/v1/session.schema.json",
+  "title": "SessionDescriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sessionId",
+    "manifest",
+    "assetUrl",
+    "info"
+  ],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[\\x21-\\x7e]+$"
+    },
+    "manifest": {
+      "$ref": "manifest.schema.json"
+    },
+    "assetUrl": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192
+    },
+    "info": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "apiVersion",
+        "plugin",
+        "capabilities",
+        "limits"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "aplg/1"
+        },
+        "apiVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "plugin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "version",
+            "packageSha256"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 160,
+              "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)+$"
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "packageSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "maxProperties": 128,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 128,
+            "pattern": "^[a-z0-9][a-z0-9-]*(?:\\.[a-z0-9][a-z0-9-]*)+$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "version",
+              "methods"
+            ],
+            "properties": {
+              "version": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "methods": {
+                "type": "array",
+                "maxItems": 128,
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[a-zA-Z][a-zA-Z0-9_.-]*$"
+                }
+              }
+            }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "controlBytes",
+            "fileChunkBytes",
+            "fileBytes",
+            "fileTransfers"
+          ],
+          "properties": {
+            "controlBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1048576
+            },
+            "fileChunkBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 262144
+            },
+            "fileBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8388608
+            },
+            "fileTransfers": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2
+            }
+          }
+        }
+      }
+    }
+  }
+}

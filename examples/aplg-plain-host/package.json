@@ -1,0 +1,14 @@
+{
+  "name": "@ai-switch/aplg-plain-host-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "^22.12.0 || ^24.0.0 || >=26.0.0" },
+  "scripts": {
+    "build": "vite build",
+    "preview": "node scripts/serve.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": { "@ai-switch/tauri-plugin-runtime": "workspace:*" },
+  "devDependencies": { "typescript": "5.9.3", "vite": "8.3.0" }
+}

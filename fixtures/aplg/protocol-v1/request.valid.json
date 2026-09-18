@@ -1,0 +1,13 @@
+{
+  "protocol": "aplg/1",
+  "id": "r-1",
+  "kind": "request",
+  "args": {
+    "method": "get",
+    "params": {
+      "key": "note"
+    },
+    "capability": "aplg.storage"
+  },
+  "operation": "capability.call"
+}

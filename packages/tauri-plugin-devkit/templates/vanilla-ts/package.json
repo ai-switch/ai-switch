@@ -1,0 +1,25 @@
+{
+  "name": __APLG_PACKAGE_NAME_JSON__,
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.12.4",
+  "scripts": {
+    "dev:vite": "vite",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "test:node": "node --test tests/*.test.mjs",
+    "build": "pnpm typecheck && pnpm typecheck:node && vite build",
+    "plugin:validate": "aplg validate --stage dist",
+    "plugin:pack": "aplg pack"
+  },
+  "dependencies": {
+    "@ai-switch/tauri-plugin-runtime": "0.1.0"
+  },
+  "devDependencies": {
+    "@ai-switch/tauri-plugin-devkit": "0.1.0",
+    "@types/node": "22.19.15",
+    "typescript": "5.9.3",
+    "vite": "8.3.0"
+  }
+}

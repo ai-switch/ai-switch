@@ -1,0 +1,15 @@
+{
+  "manifestVersion": 1,
+  "id": "io.github.example.preview",
+  "name": "Preview fixture",
+  "version": "0.1.0",
+  "description": "A browser-only APLG preview fixture.",
+  "license": "MIT",
+  "engines": { "aplg": "^1.0.0" },
+  "entry": "dist/index.html",
+  "activation": "view",
+  "requires": { "aplg.storage": "^1.0.0" },
+  "optional": { "aplg.fs": "^1.0.0" },
+  "permissions": { "filesystem": [], "network": [], "native": false },
+  "contributes": { "views": [{ "id": "main", "title": "Preview" }] }
+}

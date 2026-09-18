@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="aplg-asset-origin" content="__APLG_ASSET_ORIGIN__">
+    <title>APLG · 无框架宿主演示</title>
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="heading">
+        <p class="eyebrow">APLG / PUBLIC NPM API</p>
+        <h1>无框架的插件宿主</h1>
+        <p class="intro">一个 HTML 页面、一份 Transport，以及一个隔离的插件视图。</p>
+        <p class="notice">模拟宿主，仅内存数据</p>
+      </header>
+      <section class="panel" aria-labelledby="host-title">
+        <div class="toolbar">
+          <div><h2 id="host-title">宿主控制台</h2><p class="muted">协议 <code id="protocol">aplg/1</code> · 原生 DOM + TypeScript</p></div>
+          <div class="actions"><button id="open" type="button">打开插件</button><button id="close" class="secondary" type="button" disabled>关闭插件</button></div>
+        </div>
+        <p id="host-status" role="status">尚未打开插件</p>
+        <dl class="stats">
+          <div><dt>活动会话</dt><dd id="sessions">0</dd></div>
+          <div><dt>宿主监听</dt><dd id="listeners">0</dd></div>
+          <div><dt>内存条目</dt><dd id="entries">0</dd></div>
+        </dl>
+        <div id="plugin-slot" aria-label="插件视图"></div>
+      </section>
+      <footer>
+        <p>仅提供 <code>aplg.storage</code>。未申请文件、网络或原生权限。</p>
+        <p>关闭视图或刷新页面即清空数据。本示例不代表 Rust 文件授权、安装验签或 Tauri IPC 隔离已实现。</p>
+      </footer>
+    </main>
+  </body>
+</html>

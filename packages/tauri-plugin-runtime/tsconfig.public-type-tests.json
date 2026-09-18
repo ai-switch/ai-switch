@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "skipLibCheck": false
+  },
+  "include": [
+    "tests/types/public-node-subset.test-d.ts",
+    "tests/types/public-fs-subset.test-d.ts"
+  ]
+}

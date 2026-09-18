@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="description" content="一个无需权限、仅在当前页面处理文本的 APLG 示例插件。" />
+    <title>文本统计 · AI Switch 插件示例</title>
+  </head>
+  <body>
+    <main class="workspace">
+      <header class="page-header">
+        <p class="eyebrow">AI SWITCH / PLUGIN EXAMPLE</p>
+        <h1>文本统计</h1>
+        <p class="intro">输入一段文本，即时查看字符和行数。内容仅在当前页面处理。</p>
+        <span class="badge">无需权限 · 无需 Rust</span>
+      </header>
+
+      <section class="editor-panel" aria-labelledby="editor-label">
+        <div class="editor-heading">
+          <label id="editor-label" for="text-input">输入文本</label>
+          <div class="actions">
+            <button id="sample-button" type="button">载入示例</button>
+            <button id="clear-button" type="button">清空</button>
+          </div>
+        </div>
+        <textarea
+          id="text-input"
+          rows="10"
+          maxlength="200000"
+          placeholder="在这里输入或粘贴文本…"
+          aria-describedby="input-help"
+          autocomplete="off"
+          spellcheck="false"
+          wrap="soft"
+        ></textarea>
+        <p id="input-help" class="hint">内容不上传、不写入文件，也不会在关闭页面后保留。</p>
+      </section>
+
+      <section aria-label="统计结果">
+        <dl class="statistics">
+          <div class="stat-card">
+            <dt>字符（码点）</dt>
+            <dd id="character-count">0</dd>
+          </div>
+          <div class="stat-card">
+            <dt>非空白字符</dt>
+            <dd id="non-whitespace-count">0</dd>
+          </div>
+          <div class="stat-card">
+            <dt>行数</dt>
+            <dd id="line-count">0</dd>
+          </div>
+        </dl>
+        <p id="statistics-status" class="sr-only" role="status" aria-live="polite"></p>
+      </section>
+
+      <footer class="footer">
+        <p>按 Unicode 码点计数，不等同于字数或视觉字符数；空文本为 0 行。</p>
+        <p>字符数包含空白与换行。最多输入 200,000 个 UTF-16 代码单元。</p>
+      </footer>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

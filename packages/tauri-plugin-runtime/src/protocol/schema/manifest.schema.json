@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-switch.github.io/aplg/schema/v1/manifest.schema.json",
+  "title": "Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifestVersion", "id", "name", "version", "description", "license", "engines", "entry", "activation", "requires", "optional", "permissions", "contributes"],
+  "properties": {
+    "manifestVersion": { "const": 1 },
+    "id": { "type": "string", "minLength": 3, "maxLength": 160, "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)+$" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "description": { "type": "string", "maxLength": 8192 },
+    "license": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "engines": { "type": "object", "additionalProperties": false, "required": ["aplg"], "properties": { "aplg": { "$ref": "#/definitions/range" } } },
+    "entry": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "activation": { "const": "view" },
+    "requires": { "$ref": "#/definitions/capabilityRanges" },
+    "optional": { "$ref": "#/definitions/capabilityRanges" },
+    "permissions": {
+      "type": "object", "additionalProperties": false,
+      "required": ["filesystem", "network", "native"],
+      "properties": {
+        "filesystem": {
+          "type": "array", "maxItems": 2,
+          "items": { "type": "object", "additionalProperties": false, "required": ["root", "access"], "properties": {
+            "root": { "enum": ["plugin-data", "user-selected"] },
+            "access": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["read", "write"] } }
+          } }
+        },
+        "network": {
+          "type": "array", "maxItems": 64,
+          "items": { "type": "object", "additionalProperties": false, "required": ["origins", "methods"], "properties": {
+            "origins": { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 2048 } },
+            "methods": { "type": "array", "minItems": 1, "maxItems": 9, "uniqueItems": true, "items": { "enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE"] } }
+          } }
+        },
+        "native": { "type": "boolean" }
+      }
+    },
+    "contributes": {
+      "type": "object", "additionalProperties": false, "required": ["views"],
+      "properties": { "views": { "type": "array", "minItems": 1, "maxItems": 32, "items": {
+        "type": "object", "additionalProperties": false, "required": ["id", "title"],
+        "properties": { "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" }, "title": { "type": "string", "minLength": 1, "maxLength": 160 } }
+      } } }
+    },
+    "extensions": { "type": "object", "maxProperties": 64, "propertyNames": { "$ref": "#/definitions/capabilityName" }, "additionalProperties": { "$ref": "#/definitions/jsonValue" } }
+  },
+  "definitions": {
+    "range": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "capabilityName": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[a-z0-9][a-z0-9-]*(?:\\.[a-z0-9][a-z0-9-]*)+$" },
+    "capabilityRanges": { "type": "object", "maxProperties": 128, "propertyNames": { "$ref": "#/definitions/capabilityName" }, "additionalProperties": { "$ref": "#/definitions/range" } },
+    "jsonValue": { "anyOf": [
+      { "type": "null" }, { "type": "boolean" }, { "type": "number" }, { "type": "string" },
+      { "type": "array", "items": { "$ref": "#/definitions/jsonValue" } },
+      { "type": "object", "additionalProperties": { "$ref": "#/definitions/jsonValue" } }
+    ] }
+  }
+}

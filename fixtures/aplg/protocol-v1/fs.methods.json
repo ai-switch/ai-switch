@@ -1,0 +1,118 @@
+[
+  {
+    "method": "transfer.openRead",
+    "result": {
+      "handle": "h",
+      "size": 0
+    },
+    "request": {
+      "path": "/data/a"
+    }
+  },
+  {
+    "method": "transfer.openWrite",
+    "result": {
+      "handle": "h"
+    },
+    "request": {
+      "size": 3,
+      "path": "/data/a",
+      "mode": "w"
+    }
+  },
+  {
+    "method": "transfer.pull",
+    "result": {
+      "offset": 0,
+      "dataBase64": "YWJj"
+    },
+    "request": {
+      "offset": 0,
+      "length": 3,
+      "handle": "h"
+    }
+  },
+  {
+    "method": "transfer.push",
+    "result": {
+      "written": 3
+    },
+    "request": {
+      "offset": 0,
+      "dataBase64": "YWJj",
+      "handle": "h"
+    }
+  },
+  {
+    "method": "transfer.finish",
+    "result": null,
+    "request": {
+      "handle": "h"
+    }
+  },
+  {
+    "method": "transfer.abort",
+    "result": null,
+    "request": {
+      "handle": "h"
+    }
+  },
+  {
+    "method": "stat",
+    "result": {
+      "size": 3,
+      "kind": "file",
+      "mtimeMs": 0
+    },
+    "request": {
+      "path": "/data/a"
+    }
+  },
+  {
+    "method": "readdir",
+    "result": [
+      {
+        "kind": "file",
+        "name": "a"
+      }
+    ],
+    "request": {
+      "path": "/data"
+    }
+  },
+  {
+    "method": "mkdir",
+    "result": {
+      "createdPath": "/data/a"
+    },
+    "request": {
+      "recursive": true,
+      "path": "/data/a"
+    }
+  },
+  {
+    "method": "rename",
+    "result": null,
+    "request": {
+      "from": "/data/a",
+      "to": "/data/b"
+    }
+  },
+  {
+    "method": "copyFile",
+    "result": null,
+    "request": {
+      "from": "/data/a",
+      "to": "/mounts/g/a"
+    }
+  },
+  {
+    "method": "rm",
+    "result": null,
+    "request": {
+      "path": "/data/a",
+      "recursive": false,
+      "force": true
+    }
+  }
+]

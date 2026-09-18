@@ -1,0 +1,21 @@
+{
+  "manifestVersion": 1,
+  "id": "io.github.ai-switch.plugin-example",
+  "name": "Text Statistics",
+  "version": "0.1.0",
+  "description": "A minimal text statistics plugin that needs no host permissions.",
+  "license": "MIT",
+  "engines": { "aplg": "^1.0.0" },
+  "entry": "dist/index.html",
+  "activation": "view",
+  "requires": {},
+  "optional": {},
+  "permissions": {
+    "filesystem": [],
+    "network": [],
+    "native": false
+  },
+  "contributes": {
+    "views": [{ "id": "main", "title": "Text Statistics" }]
+  }
+}
