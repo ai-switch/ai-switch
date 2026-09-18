@@ -11,7 +11,7 @@ import { scanArtifactText, scanHtmlText, type ResourceReference } from "./resour
 
 export const buildRecordPath = "dist/aplg-build.json";
 export interface BuildRecord {
-  formatVersion: 1; devkitVersion: "0.1.0"; manifestPath: string; manifestSha256: string;
+  formatVersion: 1; devkitVersion: "0.1.1"; manifestPath: string; manifestSha256: string;
   entry: string; bootstrap: string; businessEntry: string | null; businessChunk: string | null;
   files: PackFile[];
 }
@@ -85,7 +85,7 @@ function checkedRecord(value:unknown): BuildRecord {
   const record=value as BuildRecord;
   const fail=():never=>{throw new ProjectError("E_BUILD_RECORD","Invalid or unsupported build record.",buildRecordPath);};
   if(!record || typeof record!=="object" || Array.isArray(record) || Object.keys(record).sort().join()!==["formatVersion","devkitVersion","manifestPath","manifestSha256","entry","bootstrap","businessEntry","businessChunk","files"].sort().join()) fail();
-  if(record.formatVersion!==1 || record.devkitVersion!=="0.1.0" || !/^[a-f0-9]{64}$/.test(record.manifestSha256) || !Array.isArray(record.files) || record.files.length>limits.archiveEntries) fail();
+  if(record.formatVersion!==1 || record.devkitVersion!=="0.1.1" || !/^[a-f0-9]{64}$/.test(record.manifestSha256) || !Array.isArray(record.files) || record.files.length>limits.archiveEntries) fail();
   for(const path of [record.manifestPath,record.entry,...[record.bootstrap,record.businessEntry,record.businessChunk].filter((p)=>p!==null)]) { try {normalizeArchivePath(path);} catch{fail();} }
   if(record.manifestPath.startsWith("dist/") || !record.entry.startsWith("dist/")) fail();
   if((record.businessEntry===null)!==(record.businessChunk===null)) fail();

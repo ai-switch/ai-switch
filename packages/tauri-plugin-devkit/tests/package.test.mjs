@@ -51,10 +51,10 @@ test("the published metadata replaces workspace protocols with exact registry ve
     const result = spawnSync("tar", ["-xOf", archive, "package/package.json"], { cwd: root, encoding: "utf8", timeout: 30000, windowsHide: true });
     assert.equal(result.status, 0, result.stderr);
     const published = JSON.parse(result.stdout);
-    assert.equal(published.dependencies["@ai-switch/tauri-plugin-runtime"], "0.1.0");
+    assert.equal(published.dependencies["@ai-switch/tauri-plugin-runtime"], "0.1.1");
     assert.equal(JSON.stringify(published).includes("workspace:"), false);
   } finally { await rm(archive, { force: true }); }
-  assert.equal(metadata.dependencies["@ai-switch/tauri-plugin-runtime"], "workspace:0.1.0");
+  assert.equal(metadata.dependencies["@ai-switch/tauri-plugin-runtime"], "workspace:0.1.1");
 });
 
 test("building clears stale generated artifacts without shipping source aliases", async () => {

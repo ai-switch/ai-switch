@@ -89,7 +89,7 @@ export async function withInstalledTarballs(run: (consumer: TarballConsumer) => 
       assert.equal(await realpath(installed), installed);
     }
     const packageJson = JSON.parse(await readFile(join(devkitInstalled, "package.json"), "utf8"));
-    assert.equal(packageJson.dependencies["@ai-switch/tauri-plugin-runtime"], "0.1.0");
+    assert.equal(packageJson.dependencies["@ai-switch/tauri-plugin-runtime"], "0.1.1");
     const cli = join(devkitInstalled, "dist/cli.js");
     const consumer: TarballConsumer = {
       root: consumerRoot,

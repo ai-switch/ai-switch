@@ -1,6 +1,6 @@
 {
   "name": "@ai-switch/tauri-plugin-devkit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Node tooling for validating, building and packaging APLG plugins.",
   "type": "module",
   "license": "MIT",
@@ -43,7 +43,7 @@
     "verify:tarball": "vitest run --config vitest.e2e.config.ts"
   },
   "dependencies": {
-    "@ai-switch/tauri-plugin-runtime": "workspace:0.1.0",
+    "@ai-switch/tauri-plugin-runtime": "workspace:0.1.1",
     "acorn": "8.18.0",
     "es-module-lexer": "3.0.2",
     "jsonc-parser": "3.3.1",

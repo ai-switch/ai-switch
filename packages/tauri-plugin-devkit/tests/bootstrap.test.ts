@@ -26,7 +26,7 @@ test("replaces the business script with one bootstrap and records exact manifest
   const recordAsset = result.output.find((item) => item.fileName === "aplg-build.json");
   expect(recordAsset?.type).toBe("asset"); if(recordAsset?.type !== "asset") return;
   const record = JSON.parse(String(recordAsset.source));
-  expect(record).toMatchObject({ formatVersion: 1, devkitVersion: "0.1.0", manifestPath: "aplg.json", manifestSha256: createHash("sha256").update(manifest).digest("hex"), entry: "dist/index.html", businessEntry: "src/main.ts" });
+  expect(record).toMatchObject({ formatVersion: 1, devkitVersion: "0.1.1", manifestPath: "aplg.json", manifestSha256: createHash("sha256").update(manifest).digest("hex"), entry: "dist/index.html", businessEntry: "src/main.ts" });
   expect(record.bootstrap).toMatch(/^dist\/.+\.js$/); expect(record.businessChunk).toMatch(/^dist\/.+\.js$/);
   expect(record.bootstrap).not.toBe(record.businessChunk);
   expect(record.files.some((file: {path:string}) => file.path === "dist/aplg-build.json")).toBe(false);
