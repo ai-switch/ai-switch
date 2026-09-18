@@ -75,7 +75,7 @@ jobs:
         run: pnpm --dir packages/tauri-plugin-devkit run verify:tarball
 
       - name: Package release plan
-        run: node --test scripts/aplg/plan-release.test.mjs scripts/aplg/publish-npm.test.mjs
+        run: node --test scripts/aplg/plan-release.test.mjs scripts/aplg/publish-npm.test.mjs scripts/aplg/release-metadata.test.mjs
 
       - name: Pack both packages
         shell: bash

@@ -71,19 +71,10 @@ async function publishedIntegrity(registry, name, version) {
   return integrity;
 }
 
-async function distTag(registry, name, tag) {
-  const encoded = name.startsWith("@") ? name.replace("/", "%2f") : name;
-  const result = await registryJson(`${registry}/-/package/${encoded}/dist-tags`);
-  if (result.status === 404) return null;
-  const value = result.body?.[tag];
-  return typeof value === "string" ? value : null;
-}
-
-async function setDistTag(registry, name, tag, version) {
-  const encoded = name.startsWith("/") ? name.slice(1).replace("/", "%2f") : name.replace("/", "%2f");
-  const response = await fetch(`${registry}/-/package/${encoded}/dist-tags/${tag}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(version) });
-  if (!response.ok) fail(`Could not set ${name}@${version} dist-tag ${tag} (${response.status}).`);
-}
+// npm trusted publishing (OIDC) only authenticates `npm publish` / `npm stage
+// publish`. Dist-tag mutation over the raw registry API carries no credentials
+// in CI and fails closed with 401, so the stable tag must be applied by the
+// publish call itself rather than by a follow-up PUT.
 
 export async function publishNpm(options) {
   const runtimeTarball = await checkedTarball(options.runtime, "runtime");
@@ -104,22 +95,11 @@ export async function publishNpm(options) {
     if (existing !== null) fail(`${name}@${plan.version} already exists with a different integrity.`);
     if (!options.execute) { results.push({ name, version: plan.version, status: "dry-run" }); continue; }
     const npm = process.env.npm_execpath ?? "npm";
-    if (options.publish) await options.publish({ name, version: plan.version, tarball: tarballs[name], tag: plan.candidateTag, registry });
-    else await runNodeCommand([npm, "publish", tarballs[name], "--ignore-scripts", "--provenance", "--access", "public", "--tag", plan.candidateTag, "--registry", registry], { cwd: process.cwd(), env: { ...process.env }, capture: true, timeout: 180_000 });
+    if (options.publish) await options.publish({ name, version: plan.version, tarball: tarballs[name], tag: plan.stableTag, registry });
+    else await runNodeCommand([npm, "publish", tarballs[name], "--ignore-scripts", "--provenance", "--access", "public", "--tag", plan.stableTag, "--registry", registry], { cwd: process.cwd(), env: { ...process.env }, capture: true, timeout: 180_000 });
     results.push({ name, version: plan.version, status: "published" });
   }
   if (!options.execute) return { ...plan, registry, execute: false, results };
-  const previous = {};
-  for (const name of plan.order) previous[name] = await distTag(registry, name, plan.stableTag);
-  try {
-    for (const name of plan.order) await setDistTag(registry, name, plan.stableTag, plan.version);
-  } catch (error) {
-    for (const name of plan.order) {
-      const value = previous[name];
-      if (value) { try { await setDistTag(registry, name, plan.stableTag, value); } catch {} }
-    }
-    throw error;
-  }
   return { ...plan, registry, execute: true, results };
 }
 

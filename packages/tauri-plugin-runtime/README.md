@@ -27,7 +27,7 @@ to access files, the network, or the host application.
 
 两个 npm 包由 `.github/workflows/tauri-plugin-runtime.yml` 协调。普通 PR/main push 只执行两包 typecheck/test/build/pack、`verify-pair` 与发布计划测试；只有 `tauri-plugin-runtime-v*` tag 才进入受保护 environment `aplg-npm-release` 的发布 job。
 
-发布 job 使用 npm trusted publishing（OIDC），不保存明文 token；先按 `@ai-switch/tauri-plugin-runtime` → `@ai-switch/tauri-plugin-devkit` 顺序发布到 `aplg-candidate`，两包都确认后再提升 `latest`。若第二步失败，会尝试恢复旧 dist-tag 并报告部分结果，不宣称事务性。实际发布必须由用户显式授权；本地脚本默认 dry-run。
+发布 job 使用 npm trusted publishing（OIDC），不保存明文 token；按 `@ai-switch/tauri-plugin-runtime` → `@ai-switch/tauri-plugin-devkit` 顺序以 `latest` 发布。npm 的 OIDC 只认证 `npm publish`，因此不再有独立的候选 tag 与提升步骤；第二包失败时第一包已发布，重跑会按 integrity 幂等跳过，不宣称事务性。实际发布必须由用户显式授权；本地脚本默认 dry-run。
 
 候选 dist-tag 不会隔离按版本范围安装，使用者应使用锁文件或精确版本。包发布本身不代表签名、安装授权或 plugin-store 审核已完成。
 

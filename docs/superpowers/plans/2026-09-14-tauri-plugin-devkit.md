@@ -630,7 +630,7 @@ git commit -m "test(devkit): 验收双包外部安装与示例打包"
 
 **Files:** `.github/workflows/tauri-plugin-runtime.yml`、`scripts/aplg/{plan-release.mjs,plan-release.test.mjs,publish-npm.mjs}`；调用 D8 verify-pair 与 R8 package boundary 检查；修改两包 README 的发布说明。
 
-**Interfaces:** `planRelease(input): ReleasePlan` 在 `plan-release.mjs` 导出；`input` 为 `{tag, runtime:{name,version}, devkit:{name,version,runtimeDependency}}`；输出 `{version,order:[runtimeName,devkitName],candidateTag:"aplg-candidate",stableTag:"latest"}`。非法名称/版本/依赖/tag 抛 `E_RELEASE_PLAN`。只允许稳定 SemVer；预发布流程另行设计，不把 beta 意外推到 latest。
+**Interfaces:** `planRelease(input): ReleasePlan` 在 `plan-release.mjs` 导出；`input` 为 `{tag, runtime:{name,version}, devkit:{name,version,runtimeDependency}}`；输出 `{version,order:[runtimeName,devkitName],stableTag:"latest"}`。非法名称/版本/依赖/tag 抛 `E_RELEASE_PLAN`。只允许稳定 SemVer；预发布流程另行设计，不把 beta 意外推到 latest。
 
 - [x] **Step 1：写无网络纯发布计划测试。**
 
@@ -770,11 +770,12 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 
 ### D9（2026-09-18）
 
-- 按 TDD 实现纯发布计划器 `planRelease`：只接受稳定 SemVer、固定包名、完全一致的 runtime/devkit 版本和精确 runtime 依赖；非法 tag/版本/依赖统一抛 `E_RELEASE_PLAN`，dist-tag 固定为 `aplg-candidate`/`latest`，调用方不能覆盖。5 项计划测试通过。
-- 实现默认 dry-run 的 `publish-npm.mjs`：校验 gzip tarball 内真实 `package.json`，核对已发布 integrity，相同则幂等跳过、冲突则失败；`--execute` 才按 runtime → devkit 发布，随后提升 `latest`，部分失败尝试恢复旧 dist-tag 并报告。3 项假 registry 演练覆盖 dry-run、幂等/冲突、顺序发布与回滚，全程未调用真实 registry publish。
+- 按 TDD 实现纯发布计划器 `planRelease`：只接受稳定 SemVer、固定包名、完全一致的 runtime/devkit 版本和精确 runtime 依赖；非法 tag/版本/依赖统一抛 `E_RELEASE_PLAN`，stable dist-tag 固定为 `latest`，调用方不能覆盖。计划测试通过。
+- 实现默认 dry-run 的 `publish-npm.mjs`：校验 gzip tarball 内真实 `package.json`，核对已发布 integrity，相同则幂等跳过、冲突则失败；`--execute` 才按 runtime → devkit 顺序以 `latest` 发布。假 registry 演练覆盖 dry-run、幂等/冲突、顺序发布与失败后重跑，全程未调用真实 registry publish。
 - 新增 `.github/workflows/tauri-plugin-runtime.yml`：普通 PR/main push 只在 Windows/Ubuntu Node 22/24 做 typecheck/test/build/pack/verify-pair/发布逻辑测试；只有 `tauri-plugin-runtime-v*` tag 进入受保护 environment `aplg-npm-release`，使用 OIDC `id-token: write`、固定 action commit、checkout 不持久凭据，并校验 tag 属于默认分支。
 - 首次推送后 CI 立即失败：workflow 中 `pnpm/action-setup` 的固定 SHA 不存在（`Unable to resolve action`），实际校验发现该哈希从未对应任何 commit。已改为真实 `v4` tag 解引用后的 commit `b906affcce14559ad1aafd4ab0e942779e9f58b1`，并用 GitHub API 逐个核对四个固定 action SHA 均可解析。
 - 首次推送后 CI 暴露三处缺陷并已修复：(1) `pnpm/action-setup` 的固定 SHA 从未对应任何 commit，已改为真实 `v4` tag 解引用后的 commit；(2) `.gitattributes` 漏声明 `*.mjs`，Windows runner checkout 出 CRLF 导致 `validators.generated.mjs` 字节比对失败，已加 `*.mjs text eol=lf` 并补生成物换行符守卫测试；(3) Playwright 浏览器安装排在测试之后且仅限 ubuntu，devkit 的 `vitest run` 内含真实 Chromium/WebKit 用例因而必然失败，已把安装提前并按平台区分 `--with-deps`。
+- 补齐 npm trusted publishing 的两处硬性前提：(1) 两包 `package.json` 原先没有 `repository` 字段，而 npm 要求 `repository.url` 与托管 workflow 的 GitHub 仓库精确一致，已补 `repository.url` 与 `directory` 并加 `release-metadata` 测试；(2) 原发布脚本先用 `aplg-candidate` 发布、再用裸 `fetch` PUT 提升 `latest`，但 npm 的 OIDC 只认证 `npm publish`/`npm stage publish`，裸 dist-tag PUT 在 CI 中必然 401，已改为 `npm publish --tag latest` 直接发布并移除 candidate/promote 与回滚分支。
 ### D8（2026-09-18）
 
 - 按 TDD 新增真实双 tarball 外部消费者：`pnpm pack` 生成 runtime/devkit 发布包，在 `os.tmpdir()` 安装，断言无 workspace symlink、devkit 发布元数据无 `workspace:`，并运行打包后的 CLI `init → install → Vite build → validate --stage dist → pack → inspect`。
