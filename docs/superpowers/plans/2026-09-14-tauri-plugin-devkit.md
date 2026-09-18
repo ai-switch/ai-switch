@@ -12,7 +12,7 @@
 
 **Prerequisite plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-runtime.md`。R1/R2 的导出/契约是唯一权威，本文只引用，不维护复制的 manifest/wire schema。
 
-**状态：** D1–D9 已实施并通过 Windows 本地验证；协调 CI 与受控发布入口已准备，但 Linux/Node 24 未在本机复验，npm scope/trusted publisher 与真实发布仍未启用。所有 npm 包仍未发布。
+**状态：** D1–D9 已实施并通过 Windows Node 22.22.2 与 Linux Node 22/24 本地验证；协调 CI 与受控发布入口已准备，npm scope/trusted publisher 与真实发布仍未启用。所有 npm 包仍未发布。
 
 ## Global Constraints
 
@@ -709,7 +709,7 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 - 计划依赖均固定版本加入锁文件，Vite 8 为 optional peer；主应用 Vite/TS/React 依赖未升级。devkit 的多入口构建使用 platform=node/packages=external 并安全清理 package-local dist，不把 Node 代码混入 runtime 浏览器图。
 - `tests/fixtures/plugin-example/pnpm-lock.yaml` 原样摘自已提交的 plugin-example `c30cd40d8d6fafba15acbeb0b866f72fff0229c1`，两文件 SHA-256 相同；夹具 README 明确这不是 validProjectFiles package.json 的冻结安装证明。此次只读校验现有 plugin-example 本地 checkout 成功，没有改动它或远端仓库。
 - 实际执行 pnpm pack，检查 **15 个包文件**、runtime dependency 精确为 `0.1.0`、无 workspace:、Vite peer optional，已清理临时 tarball。此项是发布元数据/文件检查，不替代 D8 仓库外消费者安装/构建/浏览器完整验收。临时外部 pack 清理命令曾被工具策略拒绝，未执行；改为仓库内显式 staging、只删除确切文件与空目录，未递归删除外部路径。
-- devkit typecheck/test/build/公共 types/构建后测试、pnpm 冻结安装通过；runtime **26 文件 / 364 项单元测试**、typecheck/类型检查和真实 tarball **Chromium/WebKit 共 8 项**复验通过；主应用 typecheck 与 **74 文件 / 803 项测试**通过。R8 既有 Linux/Node24 验收缺口未解除，不重复声称跨平台完成。
+- devkit typecheck/test/build/公共 types/构建后测试、pnpm 冻结安装通过；runtime **26 文件 / 364 项单元测试**、typecheck/类型检查和真实 tarball **Chromium/WebKit 共 8 项**复验通过；主应用 typecheck 与 **74 文件 / 803 项测试**通过。R8 的 Windows 验收已完成，Linux/Node 24 缺口在 D9 后续状态中补跑并解除。
 - 新增中文 README、依赖许可说明和根 aplg:devkit:test/build 入口；本任务在同一 worktree 顺序执行并本地提交。不调用 Cargo、不改 Rust、不创建/推送 tag、不发布 npm、不改 plugin-store/plugin-example workflow。
 ### D2（2026-09-15）
 
@@ -723,7 +723,7 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 - 恶意 ZIP 由独立 bitwise CRC 与手写 local/central 生成，不借 packProject 构造同源预期；正向额外使用真实 yazl addBuffer（含/不含 extra）、空文件/目录、Unicode 资源、乱序 central 互操作性。CRC 以 123456789 → cbf43926 和 Node zlib.crc32 独立对照。
 - 最终 devkit **7 文件 / 252 项测试**通过（相对 D1 净增 161 项，原 inspect-unavailable 用例替换为真实功能用例）；构建后 **4 项**公共 import/真实进程 CLI/清理/实际 ZIP 测试、typecheck 与无 DOM NodeNext 公共类型检查通过。无新增依赖/锁文件变更，pnpm 冻结安装通过。
 - runtime **26 文件 / 364 项单元测试**、生成物一致性、typecheck 和独立 tarball 的 **Chromium/WebKit 共 8 项**复验通过；主应用 typecheck 与 **74 文件 / 803 项回归**通过。并行运行应用回归时 runtime generator 测试曾超过默认 5 秒，检查生成物已还原后串行单测/全量复跑通过；没有放宽超时或修改 runtime 代码掩盖失败。
-- 所有验证仍为 Windows Node 22.22.2；Linux/Node24 与真实 Rust/Tauri/Web 的既有缺口未解除。本任务不调用 Cargo、不新建 target、不推送/tag/npm publish、不改远端 plugin-example/plugin-store，临时测试目录/服务均已清理。
+- 本批验证为 Windows Node 22.22.2；Linux/Node 24 与真实 Rust/Tauri/Web 的既有缺口在 D9 后续状态中部分解除（Linux Node 22/24 已补跑），真实 Rust/Tauri/Web 接入仍未实施。本任务不调用 Cargo、不推送/tag/npm publish。
 ### D3（2026-09-15）
 
 - 先用真实 Vite 构建写失败测试，再实现 `/vite` 的 aplgVite、node-aliases 与 AST Node 用法检查。fs/promises、fs、path、buffer、events 的裸名/`node:` 前缀精确映射至 runtime 公开出口，不匹配 path-helper 等相似名称，不进行字符串改写或全局 polyfill。
@@ -754,7 +754,7 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 - 安全边界有显式测试：record 是未签名元数据，攻击者同时修改脚本与 record 可以保持静态图自洽；静态资源策略不能证明任意脚本真的握手，不能阻止所有 computed fetch/eval/外部构建 hook。不得作为签名、来源认证、权限或 OS/浏览器沙箱。真实生成器行为以浏览器测试验证；D5/D8/安装端仍须独立验证。
 - 包内 **12 文件 / 410 项**测试（相对 D3 增加 76 项）通过；typecheck、Node/浏览器公共类型、生成物校验、build 与构建后 **5 项**通过。无框架真实宿主/独立 runtime tarball、严格 CSP、两来源 opaque iframe 的 **7 场景 × Chromium/WebKit = 14 项**通过，覆盖握手门控、无重复副作用、拒绝连接、业务异常、无宿主、静态 HTML、挂载清理。审查发现“静态 HTML 完全不注入客户端”会使 R5 mount 等待到超时，先补实际浏览器失败测试后改为 handshake-only bootstrap，验证静态页也能正常挂载。
 - 首轮 RED 的未受保护输出配置曾写入本 worktree 的 packages/outside 两个测试资产，已核对内容并按精确文件/空目录删除。初版 Playwright webServer 在 Windows 强制终止时未执行 finally，遗留一次外部 fixture 目录；后续改为资产入内存后、宣布 ready 前清理，复跑不再创建残留。对早期外部临时目录的递归清理命令被工具策略拒绝，不绕过限制；残留路径为 `C:\Users\Admin\AppData\Local\Temp\aplg-tarball-10URSa`，与工作树代码无关。
-- runtime **26 文件 / 364 项**、typecheck 和独立 tarball **8 项 Chromium/WebKit**复验通过；主应用 typecheck 与 **74 文件 / 803 项**回归通过。测试工具和业务构建均为 Windows Node 22.22.2，Linux/Node24 的既有验收缺口仍保留。
+- runtime **26 文件 / 364 项**、typecheck 和独立 tarball **8 项 Chromium/WebKit**复验通过；主应用 typecheck 与 **74 文件 / 803 项**回归通过。本批测试工具和业务构建为 Windows Node 22.22.2，Linux/Node 24 缺口在 D9 后续状态中补跑。
 - README、第三方许可和整体设计状态同步；本任务只本地提交，不运行 Cargo、不新建 target、不推送/tag/npm publish、不修改远程 plugin-example/plugin-store。D5 可复现打包与 D6 init 已交付；D7 模拟宿主、D8 双包消费与 D9 授权发布仍未交付。
 
 ### D5（2026-09-16）
@@ -763,9 +763,9 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 - D5 核心、CLI、全量 devkit 回归和公共类型验证已通过；后续 D6 全量测试总数为 **15 个文件 / 443 项 Vitest**。
 
 ### D9 后续状态（2026-09-18）
-
-- D9 已本地提交，devkit 计划 D1–D9 全部实施完成。Windows Node 22.22.2 下两包 typecheck/test/build/pack、`verify-pair`、Chromium/WebKit、发布计划与假 registry 演练均通过。
-- Linux/Node 24 仍未在本机复验：WSL Ubuntu 与 podman-machine-default 都因 `ext4.vhdx` 缺失无法启动，返回 `Wsl/Service/CreateInstance/MountDisk/HCS/ERROR_FILE_NOT_FOUND`。这不影响 Windows 结论，但不宣称跨平台全通过。
+- D9 已本地提交，devkit 计划 D1–D9 全部实施完成。Windows Node 22.22.2 与 Linux（Podman `node:22-bookworm-slim` / `node:24-bookworm-slim`）下两包 typecheck/test/build/pack、`verify-pair`、Chromium/WebKit、发布计划与假 registry 演练均通过。
+- Linux Node 22 实测：devkit **17 文件 / 463 项 Vitest**、typecheck、公共/浏览器类型、built package **8 项**、node-types、外部 tarball E2E、Chromium/WebKit **26 项**与 `verify-pair` 4 项均通过。Linux Node 24 实测：同一套 typecheck/test/types/built/node-types/tarball E2E 与浏览器 26 项通过，`verify-pair` 4 项通过。
+- Podman 环境本身：machine 存储已迁至 D 盘（C 盘保留 junction），machine 内 `/etc/containers/registries.conf` 配置了 `docker.m.daocloud.io`、`docker.1ms.run`、`docker.1panel.live` 三个国内镜像；Playwright 浏览器持久化到 Podman 卷并在两个 Node 版本间复用。
 - npm scope、trusted publisher、GitHub environment `aplg-npm-release` 与真实 npm/GitHub Release 尚未配置或执行；`publish-npm` 默认 dry-run，未推送、未打 tag、未发布。
 
 ### D9（2026-09-18）

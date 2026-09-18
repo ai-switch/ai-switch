@@ -1,7 +1,7 @@
 # APLG 通用插件运行时与 ai-switch 双模式接入设计
 
 - 日期：2026-09-13
-- 状态：总体方向、npm 包名和公开 PR 发布入口已确认；本文同步 `ai-switch/plugin-store` 的职责与信任边界，并已拆分 runtime/devkit 两份实施计划。runtime R1–R8 与 devkit D1–D9 已在 Windows Node 22.22.2 本地实现并通过测试；协调 CI 与受控发布入口已准备，但 Linux/Node 24 未在本机复验，npm scope/trusted publisher 与真实发布仍未启用。真实 Rust/Tauri/Web 宿主接入、plugin-store 审核构建/签名/索引和原生扩展 profile 尚未实施，所有 npm 包均未发布。
+- 状态：总体方向、npm 包名和公开 PR 发布入口已确认；本文同步 `ai-switch/plugin-store` 的职责与信任边界，并已拆分 runtime/devkit 两份实施计划。runtime R1–R8 与 devkit D1–D9 已在 Windows Node 22.22.2 与 Linux Node 22/24 本地实现并通过测试；协调 CI 与受控发布入口已准备，但 npm scope/trusted publisher 与真实发布仍未启用。真实 Rust/Tauri/Web 宿主接入、plugin-store 审核构建/签名/索引和原生扩展 profile 尚未实施，所有 npm 包均未发布。
 - 工作树：`D:\Repos\worktree\ai-switch-plugin-design`
 - 分支：`docs/plugin-architecture`
 - ai-switch 调研基线：`a8387b5`。
@@ -19,7 +19,7 @@
 | 插件通过 GitHub CI Release 发布 | 公开 `ai-switch/plugin-store` 接收任何人的发布申请 PR；审核合并后由受控 CI 构建、签名并发布 Release，Actions artifact 不作为发布终点 |
 | 插件扩展名 | 统一为 `.aplg`；内部使用 ZIP 容器和 `aplg.json` 清单 |
 | 架构优先于旧插件兼容 | MenuGit 仅作设计参考；不承诺 `.oplg`、`window.otools`、同步 Noder I/O 或旧 C ABI 兼容 |
-| 原始设计交付与后续实施 | 原始阶段修订设计并创建 plugin-store；后续 runtime R1–R8 已本地实现（Linux 验收待补），不配置自动发布、不执行 npm 或插件 Release 发布 |
+| 原始设计交付与后续实施 | 原始阶段修订设计并创建 plugin-store；后续 runtime R1–R8 与 devkit D1–D9 已本地实现并通过 Windows/Linux Node 22/24 验收，不配置自动发布、不执行 npm 或插件 Release 发布 |
 
 “支持 Node API”指明确定义的接口和行为子集，不指完整 Node.js、任意 npm 包或无限制的系统权限。通用 npm 包也不能凭空为普通浏览器增加真实文件系统能力。
 

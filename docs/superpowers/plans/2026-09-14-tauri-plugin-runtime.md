@@ -12,7 +12,7 @@
 
 **Related plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-devkit.md`，其中 D1 消费 R1/R2，D3/D4 消费 R4/R5/R6，最终联调需要 R8。
 
-**状态：** R1–R8 代码已实施；Windows Node 22.22.2 的独立 tarball、Chromium/WebKit 与主应用回归通过。R8 的 Linux 实测因本机 WSL VHD 缺失仍待补验，不标记跨平台全通过；npm 未发布，devkit 与真实宿主仍另行实施。
+**状态：** R1–R8 代码已实施；Windows Node 22.22.2 与 Linux Node 22/24 的独立 tarball、Chromium/WebKit、双包 verify-pair 与主应用回归通过。npm 未发布，devkit 与真实宿主仍另行实施。
 
 ## Global Constraints
 
@@ -710,7 +710,7 @@ assert.equal(validateManifest({ manifestVersion: 99 }).ok, false);
 
 演示宿主提供只在内存的 `aplg.storage`、一个仅在 requires 声明 storage 且不申请系统文件/网络权限的插件和明确“模拟宿主，仅内存数据”的标识；真实 `aplg.fs` 不可用，不伪造磁盘能力。静态页面通过 R5 的 transport 接入，验证 iframe mount、存储、清理。示例 package 使用独立 Vite 8，不升级主应用 Vite 5。
 
-- [ ] **Step 4：执行完整验收。** Windows 本地验收已通过；Linux 仍待实测（WSL Ubuntu 与 podman machine 均因 `ext4.vhdx` 缺失无法启动），此项保留未勾选。
+- [x] **Step 4：执行完整验收。** Windows Node 22.22.2 与 Linux（Podman `node:22-bookworm-slim` / `node:24-bookworm-slim`）验收均已通过：runtime typecheck/test/build/verify:tarball、Chromium/WebKit 8 项打包宿主测试；`pnpm run aplg:verify-pair` 在两个 Node 版本上均通过。
 
 ```powershell
 pnpm --dir packages/tauri-plugin-runtime run check:generated
@@ -841,11 +841,11 @@ git commit -m "test(runtime): 验收独立安装与无框架宿主接入"
 - 构建前验证 package-local dist 的绝对路径、目录类型和非符号链接，再清理重建；保留单次多入口 ESM splitting。esbuild metafile 检查打包前输入，AST 检查产物 JS/声明导入，安装后递归检查生产依赖和 packed file allowlist；阻止 Tauri/框架/应用源码、真实 Node builtin、workspace/file 依赖、安装钩子、未解析导入、旧 chunk、source map 和常见密钥文件。
 - 构建图检查发现 fs/client 的 Buffer 仅用于类型却采用 value import，改为 import type；不改变运行时行为。fresh-checkout 验证证明示例单元测试依赖 public dist，因此 test 脚本先 build 再运行，不增加源码 alias 绕过外部边界。
 - verify:tarball 实际 npm pack 后在仓库外 os.tmpdir 创建新消费者，用 npm 安装真实 .tgz（禁用生命周期脚本），比对安装后所有文件/字节。九个公共 ESM 入口、package.json、内部路径不可见、SSR 无 DOM 访问、fs 单例、无 Node 全局的 Bundler/NodeNext 公开类型和外部 Vite 8 构建均通过。
-- 外部消费者不复制 workspace/node_modules/dist，不使用 devkit；最终 tarball 测得 **122,416 bytes 压缩、1,005,975 bytes 解包，77 文件 / 16 JS**。文档变化会微调字节数，以 verify:tarball 当次输出为准。四个直接依赖 buffer/events/path-browserify/semver，加上传递的 base64-js/ieee754，共六个已安装生产包，不宣称零依赖。
+- 外部消费者不复制 workspace/node_modules/dist，不使用 devkit；tarball 结构稳定，Linux Node 22/24 实测为 **123,293 bytes 压缩 / 1,006,846 bytes 解包，77 文件 / 16 JS**。文档变化会微调字节数，以 verify:tarball 当次输出为准。四个直接依赖 buffer/events/path-browserify/semver，加上传递的 base64-js/ieee754，共六个已安装生产包，不宣称零依赖。
 - examples/aplg-plain-host 提供无框架宿主和内存便笺插件，所有 runtime 引用均为公共子入口。仅声明 storage，无文件/网络/native 权限；界面明确「模拟宿主，仅内存数据」，无 aplg.fs Provider。全零 packageSha256 是注明的模拟身份，不是验签。
 - 按 Vite manifest 的各页依赖图分离 loopback 宿主/插件资产来源；CORS 仅在插件资产端，CSP 不含 unsafe-inline/unsafe-eval 且 connect-src none。真实 opaque iframe 验证存储、XSS 文本处理、关闭/重挂载资源清理、host DOM/localStorage 禁止、响应头及 375px 布局；外部 tarball **4 场景 × Chromium/WebKit = 8 项**通过，桌面/移动页面人工截图检查通过。
 - 原有浏览器套件扩为双项目，**50 场景 × Chromium/WebKit = 100 项**通过。初次外部 Chromium 生命周期场景曾出现保存未反映到计数的单次失败；加入失败现场日志和保存结果阶段断言后多轮外部安装均通过，另外原始无中间断言序列 50 次串行 + 80 次双 worker 新上下文复跑均未复现。未声称已定位/修复一个 runtime 竞态；保留诊断并继续观察。
-- 独立 Node 测试 **12 项**验证清理旧产物、静态资产/CSP 隔离、成功/失败/超时/中断、子进程后代退出及临时目录所有权篡改。清理在 finally 内检查 realpath、父目录、文件身份和所有权 marker；POSIX 使用新建的自有 process group，但这里只验证了信号路由单元测试，不当作 Linux 实测。
-- 本机 WebKit 26.6 已安装并运行成功；Ubuntu 与 podman-machine-default 两个 WSL 均报 MountDisk/ERROR_FILE_NOT_FOUND（各自 ext4.vhdx 不存在），因此 **Linux 验收未完成**。没有修复用户 WSL、新建 VM 或为此推送/触发远程 CI；Windows/Ubuntu Node 22/24 矩阵由 devkit D9 协调 workflow 继续补齐。
+- 独立 Node 测试 **12 项**验证清理旧产物、静态资产/CSP 隔离、成功/失败/超时/中断、子进程后代退出及临时目录所有权篡改。清理在 finally 内检查 realpath、父目录、文件身份和所有权 marker；POSIX 使用新建的自有 process group，这里只验证了信号路由单元测试，不当作 Linux 实测。
+- **Linux 验收已补跑**：修复 Podman machine 存储到 D 盘并配置国内镜像后，使用 `node:22-bookworm-slim` 与 `node:24-bookworm-slim` 两个容器完成 runtime check:generated/typecheck/test/build/verify:tarball；verify:tarball 在 Linux v22.23.2 与 v24.21.0 上均通过 8 项 Chromium/WebKit 打包宿主测试，且两版本上 `pnpm run aplg:verify-pair` 双包端到端均通过。
 - typecheck、源/公共出口 type tests、生成物校验、build、冻结依赖安装及示例 typecheck 通过；主应用 typecheck 与 **74 文件 / 803 项回归**通过。根应用依赖未升级，无 Cargo/Rust 改动。
-- runtime README、示例中文指南、三方许可说明和总体设计状态已同步。本任务本地提交，不推送、打 tag、发布 npm 或改远端 plugin-store/plugin-example；npm scope 权限、devkit、真实 Tauri/Web/Rust 提供方、安装验签与商店自动发布仍未交付。
+- runtime README、示例中文指南、三方许可说明和总体设计状态已同步。本任务本地提交，不推送、打 tag、发布 npm 或改远端 plugin-store/plugin-example；npm scope 权限、真实 Tauri/Web/Rust 提供方、安装验签与商店自动发布仍未交付。
