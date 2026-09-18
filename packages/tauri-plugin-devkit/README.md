@@ -284,7 +284,7 @@ node scripts/aplg/verify-pair.mjs --runtime <runtime.tgz> --devkit <devkit.tgz>
 
 `.github/workflows/tauri-plugin-runtime.yml` 在普通 PR/main push 上运行两包 typecheck/test/build/pack、`verify-pair`、`plan-release` 与 `publish-npm` 演练，不授予 npm 或 OIDC 写权限。
 
-只有 `tauri-plugin-runtime-v*` tag 才进入 `aplg-npm-release` environment 的发布 job：先验证 tag 在默认分支上，再构建/打包/`verify-pair`，最后调用 `scripts/aplg/publish-npm.mjs --execute`。脚本默认 dry-run；真实执行使用 npm trusted publishing 与 provenance，按 runtime → devkit 发布到 `aplg-candidate`，两包成功后提升 `latest`，失败时尝试恢复旧 dist-tag 并报告部分结果。候选 tag 不隔离版本范围安装，使用者应使用锁文件或精确版本。
+只有 `tauri-plugin-runtime-v*` tag 才进入 `aplg-npm-release` environment 的发布 job：先验证 tag 在默认分支上，再构建/打包/`verify-pair`，最后调用 `scripts/aplg/publish-npm.mjs --execute`。脚本默认 dry-run；真实执行使用 npm trusted publishing 与 provenance，按 runtime → devkit 顺序以 `latest` 发布。npm 的 OIDC 只认证 `npm publish`，因此不存在独立的候选 tag 与提升步骤；第二包失败时第一包已发布，重跑按 integrity 幂等跳过，不宣称事务性。使用者应使用锁文件或精确版本。
 
 ## 开发验证
 

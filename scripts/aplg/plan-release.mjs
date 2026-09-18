@@ -17,10 +17,12 @@ export function planRelease(input) {
   if (runtime.version !== devkit.version) fail("Both packages must release the same version.");
   if (devkit.runtimeDependency !== runtime.version) fail("The devkit runtime dependency must match the exact runtime version.");
   if (tag !== `tauri-plugin-runtime-v${runtime.version}`) fail("The tag version must match both package versions.");
+  // npm trusted publishing authenticates only `npm publish`, so a separate
+  // candidate-then-promote step is impossible without a long-lived token.
+  // The stable tag is applied by the publish call itself.
   return {
     version: runtime.version,
     order: [runtimeName, devkitName],
-    candidateTag: "aplg-candidate",
     stableTag: "latest",
   };
 }

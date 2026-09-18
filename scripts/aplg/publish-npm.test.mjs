@@ -93,30 +93,45 @@ test("matching published integrity is idempotently skipped and conflicts fail cl
     });
   } finally { await files.cleanup(); }
 });
-test("execute publishes in order, then promotes latest with rollback on partial failure", async () => {
+test("execute publishes in order with the stable tag and never mutates dist-tags out of band", async () => {
   const files = await fixtures();
   try {
     await withRegistry(async ({ registry, state }) => {
-      state.distTags.set("@ai-switch/tauri-plugin-runtime@latest", "0.0.9");
-      state.distTags.set("@ai-switch/tauri-plugin-devkit@latest", "0.0.9");
       const published = [];
       const result = await publishNpm({
         runtime: files.runtime, devkit: files.devkit, tag: "tauri-plugin-runtime-v0.1.0", execute: true, registry,
-        publish: async (item) => { published.push(item.name); state.packages.set(`${item.name}@${item.version}`, { integrity: "sha512-test" }); },
+        publish: async (item) => { published.push({ name: item.name, tag: item.tag }); state.packages.set(`${item.name}@${item.version}`, { integrity: "sha512-test" }); },
       });
-      assert.deepEqual(published, ["@ai-switch/tauri-plugin-runtime", "@ai-switch/tauri-plugin-devkit"]);
+      assert.deepEqual(published, [
+        { name: "@ai-switch/tauri-plugin-runtime", tag: "latest" },
+        { name: "@ai-switch/tauri-plugin-devkit", tag: "latest" },
+      ]);
       assert.deepEqual(result.results.map((item) => item.status), ["published", "published"]);
-      assert.equal(state.distTags.get("@ai-switch/tauri-plugin-runtime@latest"), "0.1.0");
-      assert.equal(state.distTags.get("@ai-switch/tauri-plugin-devkit@latest"), "0.1.0");
+      // npm trusted publishing only authenticates `npm publish`; a raw dist-tag
+      // PUT carries no credentials in CI and fails closed with 401.
+      assert.equal(state.puts.length, 0);
+    });
+  } finally { await files.cleanup(); }
+});
 
-      state.packages.clear();
-      state.failures.add("@ai-switch/tauri-plugin-devkit@latest");
+test("a failed devkit publish surfaces the error and a rerun skips the published runtime", async () => {
+  const files = await fixtures();
+  try {
+    const runtimeIntegrity = `sha512-${createHash("sha512").update(await readFile(files.runtime)).digest("base64")}`;
+    await withRegistry(async ({ registry, state }) => {
       await assert.rejects(publishNpm({
         runtime: files.runtime, devkit: files.devkit, tag: "tauri-plugin-runtime-v0.1.0", execute: true, registry,
-        publish: async (item) => { state.packages.set(`${item.name}@${item.version}`, { integrity: "sha512-test" }); },
+        publish: async (item) => {
+          if (item.name.endsWith("devkit")) throw Object.assign(new Error("injected"), { code: "E_NPM_PUBLISH" });
+          state.packages.set(`${item.name}@${item.version}`, { integrity: runtimeIntegrity });
+        },
       }), { code: "E_NPM_PUBLISH" });
-      assert.equal(state.distTags.get("@ai-switch/tauri-plugin-runtime@latest"), "0.1.0");
-      assert.equal(state.distTags.get("@ai-switch/tauri-plugin-devkit@latest"), "0.1.0");
+      assert.equal(state.packages.has("@ai-switch/tauri-plugin-runtime@0.1.0"), true);
+      const retried = await publishNpm({
+        runtime: files.runtime, devkit: files.devkit, tag: "tauri-plugin-runtime-v0.1.0", execute: true, registry,
+        publish: async (item) => { state.packages.set(`${item.name}@${item.version}`, { integrity: `sha512-${createHash("sha512").update(await readFile(item.tarball)).digest("base64")}` }); },
+      });
+      assert.deepEqual(retried.results.map((item) => item.status), ["already-published", "published"]);
     });
   } finally { await files.cleanup(); }
 });
