@@ -12,7 +12,7 @@
 
 **Prerequisite plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-runtime.md`。R1/R2 的导出/契约是唯一权威，本文只引用，不维护复制的 manifest/wire schema。
 
-**状态：** D1–D9 已实施并通过 Windows Node 22.22.2 与 Linux Node 22/24 本地验证；协调 CI 与受控发布入口已准备，npm scope/trusted publisher 与真实发布仍未启用。所有 npm 包仍未发布。
+**状态：** D1–D9 已实施并通过 Windows Node 22.22.2 与 Linux Node 22/24 本地验证；协调 CI 与受控发布入口已准备，npm `@ai-switch` scope、两包 trusted publisher 与 GitHub environment `aplg-npm-release` 已配置，两包 **0.1.0 已发布到 npm**。
 
 ## Global Constraints
 
@@ -737,7 +737,7 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 - 首轮把 Rolldown 自带 virtual runtime 的 Node 二进制 helper 当作作者代码误拒，查明后仅豁免精确 `\0rolldown/runtime.js`（浏览器未用 helper 由 bundler tree-shake）；保留对普通依赖/作者代码的检查。runtime 本身为已验证浏览器 bundle，不递归用作者规则重审其上游不可达 fallback。
 - 首轮加载临时安装 Vite 的 native Rolldown DLL 导致 Windows 进程存续期间清理锁文件；改用 D3 计划规定的测试工具 Vite 驱动。原测试退出后仅删除已确认的自有 DLL 文件/空目录；一次失败的 dev optimizer 晚写入也在进程退出后按精确路径清理。后续全套成功运行无临时根/测试服务残留，未修改/放宽生产目录清理规则。
 - 新增 82 项测试，devkit 合计 **10 文件 / 334 项**（其中含真实 Chromium/WebKit 2 项），构建后 **5 项**测试、Node/public browser 类型、生成物一致性、typecheck、build 均通过。test 先构建本包，保证新 checkout 的已构建声明可用。未新增依赖/锁文件变化；根应用 Vite/TS 无升级。
-- pnpm pack 实测包含 30 个文件，runtime workspace 依赖转成精确 0.1.0、/vite 与 types-only /node-types 导出正确，无源文件/测试输出混入；清理本地临时 tgz。npm 包仍未发布，此项不替代 D8 外部双包完整验收。
+- pnpm pack 实测包含 30 个文件，runtime workspace 依赖转成精确 0.1.0、/vite 与 types-only /node-types 导出正确，无源文件/测试输出混入；清理本地临时 tgz。此项不替代 D8 外部双包完整验收（D8 已单独通过）。
 - runtime **26 文件 / 364 项**、typecheck 和独立 tarball **8 项 Chromium/WebKit**复验通过；主应用 typecheck 与 **74 文件 / 803 项**通过。Windows Node 22.22.2 以外 Linux/Node24 的既有验证缺口未解除。
 - 当前 `/vite` 只做 D3 adaptation；manifestPath 明确返回 APLG_OPTION_UNAVAILABLE，preview 预留但不创建 provider，不注入握手 bootstrap、不宣称 dist/离线产物合格。D4/D7、pack/init、真实 Rust/Tauri/Web、签名安装与商店发布仍待实施。README 已说明这些边界。
 - 本任务顺序本地实施/提交，无 subagent、Cargo、新 target、推送、tag、npm publish 或远程 plugin-store/plugin-example 修改。
@@ -766,7 +766,9 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 - D9 已本地提交，devkit 计划 D1–D9 全部实施完成。Windows Node 22.22.2 与 Linux（Podman `node:22-bookworm-slim` / `node:24-bookworm-slim`）下两包 typecheck/test/build/pack、`verify-pair`、Chromium/WebKit、发布计划与假 registry 演练均通过。
 - Linux Node 22 实测：devkit **17 文件 / 463 项 Vitest**、typecheck、公共/浏览器类型、built package **8 项**、node-types、外部 tarball E2E、Chromium/WebKit **26 项**与 `verify-pair` 4 项均通过。Linux Node 24 实测：同一套 typecheck/test/types/built/node-types/tarball E2E 与浏览器 26 项通过，`verify-pair` 4 项通过。
 - Podman 环境本身：machine 存储已迁至 D 盘（C 盘保留 junction），machine 内 `/etc/containers/registries.conf` 配置了 `docker.m.daocloud.io`、`docker.1ms.run`、`docker.1panel.live` 三个国内镜像；Playwright 浏览器持久化到 Podman 卷并在两个 Node 版本间复用。
-- npm scope、trusted publisher、GitHub environment `aplg-npm-release` 与真实 npm/GitHub Release 尚未配置或执行；`publish-npm` 默认 dry-run，未推送、未打 tag、未发布。
+- GitHub environment `aplg-npm-release` 已创建并限定 `tauri-plugin-runtime-v*` tag；npm `@ai-switch` scope 已存在且 `ijry` 为 owner，两包均已配置 GitHub Actions trusted publisher（workflow `tauri-plugin-runtime.yml`，environment `aplg-npm-release`）。
+- 两包 **0.1.0 已发布到 npm**（bootstrap，用一次性 granular token），并已用 registry 安装做端到端复验：真实安装、CLI `init`、`pnpm install`、Vite build、`validate --stage dist` 与 `pack` 均通过。
+- 尚未打 tag、尚未触发 GitHub Release；`publish-npm` 默认 dry-run。
 
 ### D9（2026-09-18）
 

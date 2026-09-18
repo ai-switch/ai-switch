@@ -12,7 +12,7 @@
 
 **Related plan:** `docs/superpowers/plans/2026-09-14-tauri-plugin-devkit.md`，其中 D1 消费 R1/R2，D3/D4 消费 R4/R5/R6，最终联调需要 R8。
 
-**状态：** R1–R8 代码已实施；Windows Node 22.22.2 与 Linux Node 22/24 的独立 tarball、Chromium/WebKit、双包 verify-pair 与主应用回归通过。npm 未发布，devkit 与真实宿主仍另行实施。
+**状态：** R1–R8 代码已实施；Windows Node 22.22.2 与 Linux Node 22/24 的独立 tarball、Chromium/WebKit、双包 verify-pair 与主应用回归通过。runtime 与 devkit 均已以 **0.1.0 发布到 npm**，并配置 trusted publisher；真实宿主仍另行实施。
 
 ## Global Constraints
 
@@ -848,4 +848,4 @@ git commit -m "test(runtime): 验收独立安装与无框架宿主接入"
 - 独立 Node 测试 **12 项**验证清理旧产物、静态资产/CSP 隔离、成功/失败/超时/中断、子进程后代退出及临时目录所有权篡改。清理在 finally 内检查 realpath、父目录、文件身份和所有权 marker；POSIX 使用新建的自有 process group，这里只验证了信号路由单元测试，不当作 Linux 实测。
 - **Linux 验收已补跑**：修复 Podman machine 存储到 D 盘并配置国内镜像后，使用 `node:22-bookworm-slim` 与 `node:24-bookworm-slim` 两个容器完成 runtime check:generated/typecheck/test/build/verify:tarball；verify:tarball 在 Linux v22.23.2 与 v24.21.0 上均通过 8 项 Chromium/WebKit 打包宿主测试，且两版本上 `pnpm run aplg:verify-pair` 双包端到端均通过。
 - typecheck、源/公共出口 type tests、生成物校验、build、冻结依赖安装及示例 typecheck 通过；主应用 typecheck 与 **74 文件 / 803 项回归**通过。根应用依赖未升级，无 Cargo/Rust 改动。
-- runtime README、示例中文指南、三方许可说明和总体设计状态已同步。本任务本地提交，不推送、打 tag、发布 npm 或改远端 plugin-store/plugin-example；npm scope 权限、真实 Tauri/Web/Rust 提供方、安装验签与商店自动发布仍未交付。
+- runtime README、示例中文指南、三方许可说明和总体设计状态已同步。本任务本地提交，不推送、打 tag、发布 npm 或改远端 plugin-store/plugin-example；真实 Tauri/Web/Rust 提供方、安装验签与商店自动发布仍未交付；npm 发布与 trusted publisher 已在后续任务完成。
