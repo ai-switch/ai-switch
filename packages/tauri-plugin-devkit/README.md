@@ -2,7 +2,7 @@
 
 APLG 插件的 Node 开发工具包。单向依赖 `@ai-switch/tauri-plugin-runtime` 公共协议入口，不依赖 AI Switch 应用源码或 Tauri。
 
-> 当前为 **0.1.0 开发实现，尚未发布到 npm**。D1–D8 已交付源码/产物校验、只读归档 inspect、CLI、Vite Node alias、握手 bootstrap、浏览器类型适配、可复现且不覆盖已有文件的 `.aplg` pack、无副作用的 `vanilla-ts` init 模板，以及显式内存测试宿主和仅 loopback 的开发预览。D9 协调 CI 与受控发布入口已准备，但 npm scope/trusted publisher 配置与真实发布仍未启用；不要把 dry-run 当作已发布。
+> 当前为 **0.1.0，已发布到 npm**。D1–D8 已交付源码/产物校验、只读归档 inspect、CLI、Vite Node alias、握手 bootstrap、浏览器类型适配、可复现且不覆盖已有文件的 `.aplg` pack、无副作用的 `vanilla-ts` init 模板，以及显式内存测试宿主和仅 loopback 的开发预览。D9 协调 CI 与受控发布入口已准备；0.1.0 已用一次性 granular token 完成首发，trusted publisher 已配置。
 
 ## 使用已构建的本地包
 
@@ -306,7 +306,7 @@ pnpm --dir packages/tauri-plugin-devkit test:browser
 
 `vite:^8.3.0` 为 optional peer，纯 CLI 不要求安装 Vite。其余计划依赖已按固定版本写入锁文件，D1 使用 runtime 与 jsonc-parser，D2 增加 yauzl 流式读取，D3 的 `/vite` 入口使用 Vite 8.3 的解析器；D4 的静态检查使用已声明的 HTML/CSS/module parser 与 Acorn。devkit 构建将 registry 依赖保持 external，不把 Node 工具代码混入 runtime 浏览器图。
 
-对外打包应使用 `pnpm pack` 将 `workspace:0.1.0` 转换成真实 `0.1.0`。该版本目前未发布；不要用 npm pack 直接分发带 workspace: 的源码 package.json。D8 将负责两包在仓库外的完整 install/build/pack/browser 验收，D9 才提供授权发布流程。本任务不推送、不发布。
+对外打包应使用 `pnpm pack` 将 `workspace:0.1.0` 转换成真实 `0.1.0`；不要用 npm pack 直接分发带 workspace: 的源码 package.json。两包 0.1.0 已发布到 npm，并已用仓库外消费者完成 install/build/pack/browser 验收。
 
 ## License
 

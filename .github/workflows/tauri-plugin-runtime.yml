@@ -150,7 +150,7 @@ jobs:
           node scripts/aplg/verify-pair.mjs --runtime "$runtime" --devkit "$devkit"
           sha256sum artifacts/*.tgz > artifacts/SHA256SUMS
 
-      - name: Publish candidate and promote latest
+      - name: Publish both packages to npm
         shell: bash
         env:
           NPM_CONFIG_PROVENANCE: "true"
