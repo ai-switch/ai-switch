@@ -16,8 +16,8 @@ export function validProjectFiles(): Record<string, string> {
     "package.json": JSON.stringify({
       name: "notes", version: "0.1.0", type: "module", private: true,
       packageManager: "pnpm@10.12.4", scripts: { build: "vite build" },
-      dependencies: { "@ai-switch/tauri-plugin-runtime": "0.1.0" },
-      devDependencies: { "@ai-switch/tauri-plugin-devkit": "0.1.0", vite: "8.3.0" },
+      dependencies: { "@ai-switch/tauri-plugin-runtime": "0.1.1" },
+      devDependencies: { "@ai-switch/tauri-plugin-devkit": "0.1.1", vite: "8.3.0" },
     }),
     "pnpm-lock.yaml": readFileSync(new URL("../fixtures/plugin-example/pnpm-lock.yaml", import.meta.url), "utf8"),
     "README.md": "# Notes\nThis is a permission-free test fixture.\n",

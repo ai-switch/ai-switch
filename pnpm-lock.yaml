@@ -131,7 +131,7 @@ importers:
   packages/tauri-plugin-devkit:
     dependencies:
       '@ai-switch/tauri-plugin-runtime':
-        specifier: workspace:0.1.0
+        specifier: workspace:0.1.1
         version: link:../tauri-plugin-runtime
       acorn:
         specifier: 8.18.0

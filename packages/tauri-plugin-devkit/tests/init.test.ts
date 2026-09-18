@@ -68,9 +68,9 @@ describe("initProject", () => {
         name: "aplg-plugin-io-github-example-demo",
         private: true,
         version: "0.1.0",
-        dependencies: { "@ai-switch/tauri-plugin-runtime": "0.1.0" },
+        dependencies: { "@ai-switch/tauri-plugin-runtime": "0.1.1" },
         devDependencies: {
-          "@ai-switch/tauri-plugin-devkit": "0.1.0",
+          "@ai-switch/tauri-plugin-devkit": "0.1.1",
           "@types/node": "22.19.15",
           typescript: "5.9.3",
           vite: "8.3.0",

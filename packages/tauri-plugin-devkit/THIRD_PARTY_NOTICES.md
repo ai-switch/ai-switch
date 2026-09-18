@@ -9,7 +9,7 @@ Direct dependency licenses:
 
 | Dependency | Version | License |
 | --- | --- | --- |
-| @ai-switch/tauri-plugin-runtime | 0.1.0 | MIT |
+| @ai-switch/tauri-plugin-runtime | 0.1.1 | MIT |
 | jsonc-parser | 3.3.1 | MIT |
 | acorn | 8.18.0 | MIT |
 | es-module-lexer | 3.0.2 | MIT |

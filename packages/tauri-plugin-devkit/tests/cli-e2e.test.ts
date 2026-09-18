@@ -8,7 +8,7 @@ describe("packed devkit CLI", () => {
     await withInstalledTarballs(async (consumer) => {
       const version = await consumer.runCli(["--version"]);
       expect(version).toMatchObject({ code: 0, stderr: "" });
-      expect(version.stdout.trim()).toBe("0.1.0");
+      expect(version.stdout.trim()).toBe("0.1.1");
 
       const unknown = await consumer.runCli(["not-a-command", "--json"]);
       expect(unknown.code).toBe(1);

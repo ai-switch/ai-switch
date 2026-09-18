@@ -1,6 +1,6 @@
 {
   "name": "@ai-switch/tauri-plugin-runtime",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Host-neutral APLG plugin runtime and protocol contracts.",
   "type": "module",
   "license": "MIT",

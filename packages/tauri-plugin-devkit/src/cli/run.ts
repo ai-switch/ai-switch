@@ -9,7 +9,7 @@ import { ProjectError } from "../project/errors.js";
 import type { PackResult, ProjectReport } from "../project/types.js";
 
 export interface CliIo { stdout(text: string): void; stderr(text: string): void }
-const version = "0.1.0";
+const version = "0.1.1";
 const help = `APLG devkit ${version}
 Usage:
   aplg init <directory> --id <id> --name <name> [--template vanilla-ts] [--json]

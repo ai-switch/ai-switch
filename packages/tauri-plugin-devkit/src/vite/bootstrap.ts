@@ -149,7 +149,7 @@ catch { const e=document.createElement("p"); e.setAttribute("role","alert"); e.d
         if(!boot)throw diagnosticError("E_BOOTSTRAP_ORDER","Every plugin view needs a handshake bootstrap, including static HTML.");
         const business=businessEntry?chunks.find((chunk)=>Object.keys(chunk.modules).some((id)=>forward(id)===forward(businessAbsolute))):undefined;
         if(businessEntry && (!boot || !business || boot===business || !boot.dynamicImports.includes(business.fileName))) throw diagnosticError("E_BOOTSTRAP_ORDER","Business module must remain a dynamic dependency after the handshake.");
-        const record:BuildRecord={formatVersion:1,devkitVersion:"0.1.0",manifestPath,manifestSha256:digest(manifestBytes),entry:manifest.entry,bootstrap:`dist/${boot.fileName}`,businessEntry,businessChunk:business?`dist/${business.fileName}`:null,files:snapshot.files};
+        const record:BuildRecord={formatVersion:1,devkitVersion:"0.1.1",manifestPath,manifestSha256:digest(manifestBytes),entry:manifest.entry,bootstrap:`dist/${boot.fileName}`,businessEntry,businessChunk:business?`dist/${business.fileName}`:null,files:snapshot.files};
         const recordText=JSON.stringify(record,null,2)+"\n";
         if(Buffer.byteLength(recordText)>1024*1024)throw diagnosticError("E_LIMIT_EXCEEDED","Build record exceeds 1 MiB.");
         this.emitFile({type:"asset",fileName:"aplg-build.json",source:recordText});

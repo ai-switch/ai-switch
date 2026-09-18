@@ -4,6 +4,7 @@ import { describe, expect, test, vi } from "vitest";
 import { runCli } from "../src/cli/run.js";
 import { validProjectFiles, withProject } from "./support/project.js";
 import { validArchiveEntries, writeZipFixture } from "./support/zip-fixtures.js";
+import metadata from "../package.json" with { type: "json" };
 
 function output() {
   let stdout = ""; let stderr = "";
@@ -15,7 +16,8 @@ describe("aplg CLI", () => {
     const out = output(); const open = vi.spyOn(fs, "open").mockRejectedValue(new Error("must not read"));
     try {
       expect(await runCli(argv, out.io, { cwd: "missing-project" })).toBe(0);
-      expect(out.stdout).toMatch(argv.includes("--version") || argv.includes("-v") ? /^0\.1\.0\n$/ : /aplg validate/);
+      const isVersion = argv.includes("--version") || argv.includes("-v");
+      expect(out.stdout).toMatch(isVersion ? new RegExp("^" + metadata.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\n$") : /aplg validate/);
       expect(out.stderr).toBe(""); expect(open).not.toHaveBeenCalled();
     } finally { open.mockRestore(); }
   });

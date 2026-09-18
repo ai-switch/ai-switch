@@ -20,14 +20,14 @@ wrappers with bounded transfer handling. R8 adds clean builds, package boundary
 checks, a framework-free storage-only host example, and real external npm
 tarball installation tests in Chromium and WebKit. Real Rust capability providers and
 installation/release integration are **not implemented yet**. The package is
-published to npm as 0.1.0. Do not interpret a valid manifest as authorization
+published to npm as 0.1.1. Do not interpret a valid manifest as authorization
 to access files, the network, or the host application.
 
 ## 发布与 CI
 
 两个 npm 包由 `.github/workflows/tauri-plugin-runtime.yml` 协调。普通 PR/main push 只执行两包 typecheck/test/build/pack、`verify-pair` 与发布计划测试；只有 `tauri-plugin-runtime-v*` tag 才进入受保护 environment `aplg-npm-release` 的发布 job。
 
-0.1.0 已用一次性 granular token 完成首次发布；npm trusted publisher 已在两个包上配置为 GitHub Actions `ai-switch/ai-switch` + `tauri-plugin-runtime.yml` + environment `aplg-npm-release`。后续发布 job 使用 npm trusted publishing（OIDC），不保存明文 token；按 `@ai-switch/tauri-plugin-runtime` → `@ai-switch/tauri-plugin-devkit` 顺序以 `latest` 发布。npm 的 OIDC 只认证 `npm publish`，因此不再有独立的候选 tag 与提升步骤；第二包失败时第一包已发布，重跑会按 integrity 幂等跳过，不宣称事务性。实际发布必须由用户显式授权；本地脚本默认 dry-run。
+0.1.0 已用一次性 granular token 完成首次发布，0.1.1 由 CI 通过 OIDC 发布；npm trusted publisher 已在两个包上配置为 GitHub Actions `ai-switch/ai-switch` + `tauri-plugin-runtime.yml` + environment `aplg-npm-release`。后续发布 job 使用 npm trusted publishing（OIDC），不保存明文 token；按 `@ai-switch/tauri-plugin-runtime` → `@ai-switch/tauri-plugin-devkit` 顺序以 `latest` 发布。npm 的 OIDC 只认证 `npm publish`，因此不再有独立的候选 tag 与提升步骤；第二包失败时第一包已发布，重跑会按 integrity 幂等跳过，不宣称事务性。实际发布必须由用户显式授权；本地脚本默认 dry-run。
 
 候选 dist-tag 不会隔离按版本范围安装，使用者应使用锁文件或精确版本。包发布本身不代表签名、安装授权或 plugin-store 审核已完成。
 
@@ -78,7 +78,7 @@ remain the responsibility of an authenticated capability provider.
 Shared cross-language inputs live in `fixtures/aplg/protocol-v1/`. Generated
 schemas define structural contracts; semantic validation and backend grant
 checks remain necessary in every consumer.
-The implementation version is `0.1.0`; the wire identifier is `aplg/1`, the
+The implementation version is `0.1.1`; the wire identifier is `aplg/1`, the
 plugin API version is `1.0.0`, and `manifestVersion` is `1`. These are separate
 version domains.
 
@@ -320,7 +320,7 @@ repository. Its Transport offers **memory-only, view-scoped storage**, no fake
 filesystem and no OS/network permission grants. The example and verification tools
 are deliberately not in the published tarball. Rust providers, production
 Tauri/Web adapters, native plugins, installation/signing and store release
-workflows are separate work. The runtime is **published to npm as 0.1.0**.
+workflows are separate work. The runtime is **published to npm as 0.1.1**.
 
 ## License
 
