@@ -41,6 +41,7 @@ pub struct DeepLinkBuildInput<'a> {
     pub headers: &'a serde_json::Value,
     pub api_key_field: Option<&'a str>,
     pub responses_custom_tool_compat: bool,
+    pub responses_encrypted_content_aggressive_strip: bool,
 }
 
 pub fn build_aiswitch_import_url(input: &DeepLinkBuildInput<'_>) -> Result<String, String> {
@@ -61,6 +62,11 @@ pub fn build_aiswitch_import_url(input: &DeepLinkBuildInput<'_>) -> Result<Strin
     }
     if input.responses_custom_tool_compat {
         return Err("deeplink_export.custom_tool_compat_unsupported".into());
+    }
+    // The deeplink query has no slot for this sub-switch. Exporting anyway would
+    // hand the recipient a link that silently drops it, so refuse instead.
+    if input.responses_encrypted_content_aggressive_strip {
+        return Err("deeplink_export.encrypted_content_aggressive_strip_unsupported".into());
     }
     if input
         .model_mappings
@@ -174,6 +180,7 @@ pub fn to_create_api_input(parsed: &DeepLinkProviderImport) -> CreateApiRouteCre
         batch_id: None,
         responses_custom_tool_compat: None,
         responses_encrypted_content_cleanup: None,
+        responses_encrypted_content_aggressive_strip: None,
         user_agent: None,
         relay_balance_provider: None,
         relay_balance_access_token: None,
@@ -454,6 +461,7 @@ mod tests {
             headers,
             api_key_field: None,
             responses_custom_tool_compat: false,
+            responses_encrypted_content_aggressive_strip: false,
         }
     }
 
@@ -585,6 +593,13 @@ mod tests {
         let mut input = build_input("codex", "openai-responses", &empty_mappings, &empty_headers);
         input.responses_custom_tool_compat = true;
         assert_safe_build_error(&input, "deeplink_export.custom_tool_compat_unsupported");
+
+        let mut input = build_input("codex", "openai-responses", &empty_mappings, &empty_headers);
+        input.responses_encrypted_content_aggressive_strip = true;
+        assert_safe_build_error(
+            &input,
+            "deeplink_export.encrypted_content_aggressive_strip_unsupported",
+        );
 
         let multiple_mappings = vec![
             ModelMapping {

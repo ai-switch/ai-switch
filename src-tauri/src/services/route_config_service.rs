@@ -20,8 +20,8 @@ use crate::services::config_write_service::{
 use crate::services::platform_capability_service::PlatformCapabilityService;
 use crate::services::route_model_capability::{
     advertised_model_catalog_entries, catalog_member_inputs, catalog_members,
-    client_facing_model_catalog_entries, codex_default_context_window,
-    codex_model_catalog_payload, codex_reasoning_levels, parse_model_capability,
+    client_facing_model_catalog_entries, codex_default_context_window, codex_model_catalog_payload,
+    codex_reasoning_levels, parse_model_capability,
 };
 use crate::services::settings_service::SettingsService;
 use directories::BaseDirs;
@@ -1272,6 +1272,7 @@ command = "npx"
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
+                responses_encrypted_content_aggressive_strip: None,
                 user_agent: None,
                 relay_balance_provider: None,
                 relay_balance_access_token: None,

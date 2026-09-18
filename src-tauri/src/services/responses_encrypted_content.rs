@@ -26,16 +26,38 @@ fn has_valid_reasoning_ciphertext_shape(content: &str) -> bool {
     decoded.len() >= 73 && decoded[0] == 0x80 && (decoded.len() - 57) % 16 == 0
 }
 
-/// Conservative Responses replay compatibility.
-/// Only invalid/missing reasoning ciphertext and its orphan id are considered.
-/// Never replace an item, resolve an opaque reference, or discard compaction,
-/// messages, tool calls, summaries, or valid-looking encrypted state.
+/// How hard the Responses replay cleanup should try.
+///
+/// `Conservative` is the original, shape-based pass: it only removes ciphertext
+/// that is missing or malformed, and keeps anything that *looks* like a valid
+/// Fernet envelope. That is deliberately non-destructive, but it cannot recover
+/// from a well-formed envelope minted by a resource this upstream cannot read —
+/// the upstream rejects it every turn and the switch appears to do nothing.
+///
+/// `Aggressive` is the explicit opt-in escape hatch: every replayed reasoning
+/// item loses its ciphertext regardless of shape. It is the caller's job to gate
+/// this behind the account's cleanup switch plus its own aggressive sub-switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReasoningCleanupMode {
+    Conservative,
+    Aggressive,
+}
+
+/// Responses replay compatibility for replayed reasoning history.
+///
+/// Only top-level `type: "reasoning"` items in `input` are considered. Nothing
+/// is ever replaced, reordered, or removed: messages, tool calls and their
+/// outputs, `item_reference`, compaction items, summaries, `content`, `status`,
+/// and extension fields are all preserved byte-for-byte in value terms.
 ///
 /// An explicit `store: true` keeps IDs for server-side lookup. The other modes
 /// may replay inline reasoning without an ID; this is upstream compatibility,
 /// not a guarantee that every Responses provider accepts that shape.
 /// Returns `None` for a byte-preserving no-op.
-pub(crate) fn sanitize_replayed_reasoning_from_bytes(body: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn sanitize_reasoning_from_bytes(
+    body: &[u8],
+    mode: ReasoningCleanupMode,
+) -> Option<Vec<u8>> {
     let mut value = serde_json::from_slice::<Value>(body).ok()?;
     let strip_orphan_ids = value.get("store").and_then(Value::as_bool) != Some(true);
     let input = value.get_mut("input")?.as_array_mut()?;
@@ -47,10 +69,11 @@ pub(crate) fn sanitize_replayed_reasoning_from_bytes(body: &[u8]) -> Option<Vec<
         if item.get("type").and_then(Value::as_str).map(str::trim) != Some("reasoning") {
             continue;
         }
-        if item
-            .get("encrypted_content")
-            .and_then(Value::as_str)
-            .is_some_and(has_valid_reasoning_ciphertext_shape)
+        if mode == ReasoningCleanupMode::Conservative
+            && item
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .is_some_and(has_valid_reasoning_ciphertext_shape)
         {
             continue;
         }
@@ -62,9 +85,17 @@ pub(crate) fn sanitize_replayed_reasoning_from_bytes(body: &[u8]) -> Option<Vec<
     changed.then(|| serde_json::to_vec(&value).ok()).flatten()
 }
 
+/// The original conservative entry point, kept for callers that predate the
+/// aggressive opt-in.
+pub(crate) fn sanitize_replayed_reasoning_from_bytes(body: &[u8]) -> Option<Vec<u8>> {
+    sanitize_reasoning_from_bytes(body, ReasoningCleanupMode::Conservative)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::sanitize_replayed_reasoning_from_bytes;
+    use super::{
+        sanitize_reasoning_from_bytes, sanitize_replayed_reasoning_from_bytes, ReasoningCleanupMode,
+    };
     use serde_json::{json, Value};
 
     // A structurally valid Fernet envelope, not a real upstream secret. Shape
@@ -88,6 +119,100 @@ mod tests {
                     "must preserve valid replay for store={store:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn aggressive_cleanup_strips_a_well_formed_reasoning_ciphertext() {
+        // The production failure is a *structurally valid* Fernet envelope that
+        // the receiving resource cannot decrypt. Conservative cleanup must keep
+        // it (that is why the switch looked inert); aggressive cleanup must drop
+        // it, otherwise the upstream keeps rejecting the replayed item.
+        for store in [None, Some(false), Some(true)] {
+            for ciphertext in [VALID_CIPHERTEXT, VALID_CIPHERTEXT.trim_end_matches('=')] {
+                let mut request = json!({"input": [{
+                    "type": "reasoning", "id": "rs_foreign", "summary": [],
+                    "content": [{"type": "reasoning_text", "text": "keep plan"}],
+                    "status": "completed", "encrypted_content": ciphertext
+                }]});
+                if let Some(store) = store {
+                    request["store"] = json!(store);
+                }
+                let encoded = serde_json::to_vec(&request).unwrap();
+                assert!(
+                    sanitize_reasoning_from_bytes(&encoded, ReasoningCleanupMode::Conservative)
+                        .is_none(),
+                    "conservative mode must keep a well-formed envelope for store={store:?}"
+                );
+
+                let mut expected = request.clone();
+                expected["input"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("encrypted_content");
+                if store != Some(true) {
+                    expected["input"][0].as_object_mut().unwrap().remove("id");
+                }
+                let rewritten =
+                    sanitize_reasoning_from_bytes(&encoded, ReasoningCleanupMode::Aggressive)
+                        .expect("aggressive cleanup rewrites the request");
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&rewritten).unwrap(),
+                    expected,
+                    "store={store:?}"
+                );
+                assert!(
+                    sanitize_reasoning_from_bytes(&rewritten, ReasoningCleanupMode::Aggressive)
+                        .is_none(),
+                    "aggressive cleanup must be idempotent"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aggressive_cleanup_leaves_messages_tools_and_compaction_untouched() {
+        let request = json!({
+            "store": false,
+            "input": [
+                {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": VALID_CIPHERTEXT},
+                {"type": "message", "id": "msg_1", "role": "assistant", "content": [
+                    {"type": "output_text", "text": "keep message"},
+                    {"type": "encrypted_content", "encrypted_content": "message-state"}
+                ]},
+                {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
+                {"type": "compaction", "id": "cc_1", "encrypted_content": "compacted-history"},
+                {"type": "item_reference", "id": "rs_foreign"}
+            ]
+        });
+        let rewritten = sanitize_reasoning_from_bytes(
+            &serde_json::to_vec(&request).unwrap(),
+            ReasoningCleanupMode::Aggressive,
+        )
+        .expect("the reasoning item is rewritten");
+        let value: Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(
+            value["input"][0],
+            json!({"type": "reasoning", "summary": []})
+        );
+        assert_eq!(value["input"][1], request["input"][1]);
+        assert_eq!(value["input"][2], request["input"][2]);
+        assert_eq!(value["input"][3], request["input"][3]);
+        assert_eq!(value["input"][4], request["input"][4]);
+    }
+
+    #[test]
+    fn aggressive_cleanup_is_a_noop_without_reasoning_ciphertext() {
+        for request in [
+            &b"not json"[..],
+            &b"{}"[..],
+            &br#"{"input":[{"type":"message","role":"user","content":"hi"}]}"#[..],
+            &br#"{"store":true,"input":[{"type":"reasoning","id":"rs_stored","summary":[]}]}"#[..],
+        ] {
+            assert!(
+                sanitize_reasoning_from_bytes(request, ReasoningCleanupMode::Aggressive).is_none(),
+                "unexpected rewrite for {request:?}"
+            );
         }
     }
 

@@ -2101,6 +2101,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
+                responses_encrypted_content_aggressive_strip: None,
                 user_agent: None,
                 relay_balance_provider: None,
                 relay_balance_access_token: access_token.map(str::to_string),

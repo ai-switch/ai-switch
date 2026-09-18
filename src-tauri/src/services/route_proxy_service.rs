@@ -28,7 +28,9 @@ use crate::services::response_failure_service::{
     is_text_only_chat_content_failure, is_thinking_signature_failure,
     stream_disconnected_before_completion, STREAM_DISCONNECTED_FAILURE_MESSAGE,
 };
-use crate::services::responses_encrypted_content::sanitize_replayed_reasoning_from_bytes;
+use crate::services::responses_encrypted_content::{
+    sanitize_reasoning_from_bytes, sanitize_replayed_reasoning_from_bytes, ReasoningCleanupMode,
+};
 use crate::services::route_config_service::generate_route_proxy_key;
 use crate::services::route_credential_activity::{
     RouteCredentialActivityLease, RouteCredentialActivityRegistry,
@@ -4020,12 +4022,11 @@ fn build_api_upstream_request(
     let mut rewritten_body = rewritten_body;
     let mut reasoning_sanitized = false;
     if bridge_kind == Some(ProtocolBridgeKind::ResponsesToResponses)
-        && config
-            .get("responses_encrypted_content_cleanup")
-            .and_then(Value::as_bool)
-            == Some(true)
+        && responses_encrypted_content_cleanup_enabled(config)
     {
-        if let Some(cleaned) = sanitize_replayed_reasoning_from_bytes(&rewritten_body) {
+        if let Some(cleaned) =
+            sanitize_reasoning_from_bytes(&rewritten_body, responses_cleanup_mode(config))
+        {
             rewritten_body = cleaned;
             reasoning_sanitized = true;
         }
@@ -4998,6 +4999,32 @@ fn normalize_request_path(path: &str) -> String {
         trimmed.to_string()
     } else {
         format!("/{trimmed}")
+    }
+}
+
+/// The account opted in to cleaning replayed reasoning history.
+fn responses_encrypted_content_cleanup_enabled(config: &Value) -> bool {
+    config
+        .get("responses_encrypted_content_cleanup")
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+/// The account additionally opted in to stripping even well-formed ciphertext.
+/// Subordinate to the main cleanup switch: without it this flag is inert.
+fn responses_encrypted_content_aggressive_strip_enabled(config: &Value) -> bool {
+    responses_encrypted_content_cleanup_enabled(config)
+        && config
+            .get("responses_encrypted_content_aggressive_strip")
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
+fn responses_cleanup_mode(config: &Value) -> ReasoningCleanupMode {
+    if responses_encrypted_content_aggressive_strip_enabled(config) {
+        ReasoningCleanupMode::Aggressive
+    } else {
+        ReasoningCleanupMode::Conservative
     }
 }
 
@@ -10972,6 +10999,66 @@ mod tests {
     }
 
     #[test]
+    fn aggressive_cleanup_strips_well_formed_ciphertext_only_when_both_switches_are_on() {
+        // A structurally valid Fernet envelope: conservative cleanup keeps it,
+        // which is exactly the production failure where the account's cleanup
+        // switch looked inert. Only the aggressive sub-switch may drop it, and
+        // it must be subordinate to the main switch.
+        const VALID: &str = "gAAAAAAAAAAAAQEBAQEBAQEBAQEBAQEBAQICAgICAgICAgICAgICAgIDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw==";
+        let request = json!({
+            "model": "gpt-6-astra", "include": ["reasoning.encrypted_content"],
+            "input": [
+                {"type": "reasoning", "id": "rs_foreign", "summary": [], "encrypted_content": VALID},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+                {"type": "compaction", "id": "cc_1", "encrypted_content": "keep compaction"}
+            ],
+            "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}]
+        });
+        for (cleanup, aggressive, should_strip) in [
+            (None, None, false),
+            (Some(false), Some(true), false),
+            (Some(true), None, false),
+            (Some(true), Some(false), false),
+            (Some(true), Some(true), true),
+        ] {
+            let mut config = json!({
+                "base_url": "https://api.example.com/v1",
+                "interface_format": "openai-responses",
+                "model_mappings": []
+            });
+            if let Some(cleanup) = cleanup {
+                config["responses_encrypted_content_cleanup"] = json!(cleanup);
+            }
+            if let Some(aggressive) = aggressive {
+                config["responses_encrypted_content_aggressive_strip"] = json!(aggressive);
+            }
+            let account = api_credential_with_config("cleanup", &config.to_string());
+            let (_, _, body) = build_upstream_request(
+                &account,
+                "codex",
+                "/v1/responses",
+                None,
+                HeaderMap::new(),
+                &serde_json::to_vec(&request).unwrap(),
+            )
+            .expect("request");
+            let mut expected = request.clone();
+            if should_strip {
+                expected["input"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("encrypted_content");
+                expected["input"][0].as_object_mut().unwrap().remove("id");
+            }
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                expected,
+                "cleanup={cleanup:?} aggressive={aggressive:?}"
+            );
+        }
+    }
+
+    #[test]
     fn conservative_cleanup_only_sanitizes_opted_in_native_requests() {
         let request = json!({
             "model": "gpt-6-astra", "include": ["reasoning.encrypted_content"],
@@ -11066,6 +11153,89 @@ mod tests {
         assert_eq!(account.status, "ok");
         assert_eq!(account.transient_failure_count, 0);
         RouteProxyService::stop(&runtime).await.expect("stop");
+    }
+
+    #[tokio::test]
+    async fn aggressive_cleanup_strips_a_well_formed_ciphertext_before_it_reaches_upstream() {
+        // The fake upstream rejects any reasoning item that still carries
+        // ciphertext, which is how a relay behaves when it cannot decrypt a
+        // foreign envelope. Conservative cleanup keeps a well-formed envelope
+        // (hence the reported "switch does nothing"); aggressive cleanup must
+        // make the same request succeed on the first attempt.
+        const VALID: &str = "gAAAAAAAAAAAAQEBAQEBAQEBAQEBAQEBAQICAgICAgICAgICAgICAgIDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw==";
+        for (aggressive, expected_status) in
+            [(false, StatusCode::BAD_REQUEST), (true, StatusCode::OK)]
+        {
+            let (upstream, calls, bodies) = start_encrypted_content_upstream().await;
+            let pool = create_memory_pool().await.expect("pool");
+            run_migrations(&pool).await.expect("migrations");
+            let credential_id = create_proxy_api_credential_with_config(
+                &pool,
+                "aggressive",
+                &upstream,
+                json!({
+                    "interface_format": "openai-responses",
+                    "responses_encrypted_content_cleanup": true,
+                    "responses_encrypted_content_aggressive_strip": aggressive,
+                    "failure_policy": {"retry_count": 0},
+                    "model_mappings": [{"from": "gpt-6-astra", "to": "gpt-6-astra"}]
+                }),
+            )
+            .await;
+            RoutePoolRepository::replace_members(
+                &pool,
+                "codex",
+                std::slice::from_ref(&credential_id),
+            )
+            .await
+            .expect("members");
+            let key = RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-test")
+                .await
+                .expect("key");
+            let runtime = RouteProxyRuntimeState::default();
+            let proxy =
+                RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+                    .await
+                    .expect("proxy");
+            let response = reqwest::Client::new()
+                .post(format!("{}/v1/responses", proxy.base_url.as_deref().unwrap()))
+                .bearer_auth(&key)
+                .json(&json!({
+                    "model": "gpt-6-astra", "store": false, "input": [
+                        {"type": "reasoning", "id": "rs_foreign", "summary": [], "encrypted_content": VALID},
+                        {"type": "message", "role": "user", "content": "continue"}
+                    ]
+                }))
+                .send()
+                .await
+                .expect("proxy response");
+            assert_eq!(
+                response.status(),
+                expected_status,
+                "aggressive={aggressive}"
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "no retry for aggressive={aggressive}"
+            );
+            let sent = bodies.lock().unwrap().clone();
+            assert_eq!(
+                sent[0]["input"][0],
+                if aggressive {
+                    json!({"type": "reasoning", "summary": []})
+                } else {
+                    json!({"type": "reasoning", "id": "rs_foreign", "summary": [], "encrypted_content": VALID})
+                },
+                "aggressive={aggressive}"
+            );
+            let account = RouteCredentialRepository::get(&pool, &credential_id)
+                .await
+                .expect("account");
+            assert_eq!(account.status, "ok");
+            assert_eq!(account.transient_failure_count, 0);
+            RouteProxyService::stop(&runtime).await.expect("stop");
+        }
     }
 
     #[test]

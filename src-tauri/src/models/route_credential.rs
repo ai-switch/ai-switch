@@ -200,6 +200,10 @@ pub struct CreateApiRouteCredentialInput {
     pub responses_custom_tool_compat: Option<bool>,
     #[serde(default)]
     pub responses_encrypted_content_cleanup: Option<bool>,
+    /// Sub-switch of `responses_encrypted_content_cleanup`: strip even
+    /// well-formed reasoning ciphertext instead of only malformed values.
+    #[serde(default)]
+    pub responses_encrypted_content_aggressive_strip: Option<bool>,
     #[serde(default)]
     pub user_agent: Option<String>,
     /// Which relay panel dialect the account's balance is read with. Only the

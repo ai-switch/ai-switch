@@ -1149,26 +1149,49 @@ function responsesCustomToolCompatFromConfig(config: Record<string, unknown>): b
 function ResponsesEncryptedContentCleanupOption({
   checked,
   onChange,
+  aggressiveStrip,
+  onAggressiveStripChange,
 }: {
   checked: boolean;
   onChange: (enabled: boolean) => void;
+  aggressiveStrip: boolean;
+  onAggressiveStripChange: (enabled: boolean) => void;
 }) {
   return (
-    <label className="flex items-start gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12px] font-medium text-stone-700">
-      <input
-        aria-label="Responses 推理兼容清理"
-        checked={checked}
-        className="mt-0.5"
-        onChange={(event) => onChange(event.target.checked)}
-        type="checkbox"
-      />
-      <span className="grid gap-1">
-        <span>Responses 推理兼容清理</span>
-        <span className="text-[11px] font-medium text-stone-500">
-          每次发送前仅清理格式非法的 reasoning 密文；store 非 true 时同时移除无可用密文的孤立 ID。保留格式有效的密文、摘要、消息、工具和压缩上下文，不展开条目引用。默认关闭；密文错误最多尝试一次同样的保守清理，不保证解决 Azure 跨资源错误。
+    <div className="grid gap-2">
+      <label className="flex items-start gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12px] font-medium text-stone-700">
+        <input
+          aria-label="Responses 推理兼容清理"
+          checked={checked}
+          className="mt-0.5"
+          onChange={(event) => onChange(event.target.checked)}
+          type="checkbox"
+        />
+        <span className="grid gap-1">
+          <span>Responses 推理兼容清理</span>
+          <span className="text-[11px] font-medium text-stone-500">
+            每次发送前仅清理格式非法的 reasoning 密文；store 非 true 时同时移除无可用密文的孤立 ID。保留格式有效的密文、摘要、消息、工具和压缩上下文，不展开条目引用。默认关闭；密文错误最多尝试一次同样的保守清理，不保证解决 Azure 跨资源错误。
+          </span>
         </span>
-      </span>
-    </label>
+      </label>
+      {checked ? (
+        <label className="ml-4 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] font-medium text-amber-900">
+          <input
+            aria-label="激进剥离推理密文"
+            checked={aggressiveStrip}
+            className="mt-0.5"
+            onChange={(event) => onAggressiveStripChange(event.target.checked)}
+            type="checkbox"
+          />
+          <span className="grid gap-1">
+            <span>激进剥离推理密文</span>
+            <span className="text-[11px] font-medium text-amber-700">
+              发送前无条件删除 reasoning 项的密文（含外形合法但上游无法解密的密文），store 非 true 时同时删除其 id。用于保守清理无效、上游持续报「encrypted content could not be decrypted」的情况。代价是每轮都不再携带推理密文，跨工具调用时可能丢失推理上下文；仅在必要时开启。
+            </span>
+          </span>
+        </label>
+      ) : null}
+    </div>
   );
 }
 
@@ -1501,6 +1524,7 @@ function apiConfigJsonWithFields(
   turnReminder = false,
   turnReminderText = "",
   responsesEncryptedContentCleanup = false,
+  responsesEncryptedContentAggressiveStrip = false,
 ) {
   const config = parseJsonObject(configJson);
   config.base_url = baseUrl.trim();
@@ -1508,6 +1532,10 @@ function apiConfigJsonWithFields(
   config.model_mappings = mappings;
   config.responses_custom_tool_compat = responsesCustomToolCompat;
   config.responses_encrypted_content_cleanup = responsesEncryptedContentCleanup;
+  // Subordinate to the main switch: never persist an aggressive opt-in on its
+  // own, so turning cleanup off cannot leave a live stripping flag behind.
+  config.responses_encrypted_content_aggressive_strip =
+    responsesEncryptedContentCleanup && responsesEncryptedContentAggressiveStrip;
   config.inline_remote_images = inlineRemoteImages;
   // Omitted rather than written as `false`/`""`, so an account that never opts in
   // carries no trace of the feature in its config.
@@ -2978,6 +3006,7 @@ export function AccountsScreen({
   );
   const [apiResponsesCustomToolCompat, setApiResponsesCustomToolCompat] = useState(false);
   const [apiResponsesEncryptedContentCleanup, setApiResponsesEncryptedContentCleanup] = useState(false);
+  const [apiResponsesEncryptedContentAggressiveStrip, setApiResponsesEncryptedContentAggressiveStrip] = useState(false);
   const [apiUserAgent, setApiUserAgent] = useState("");
   const [apiKeyField, setApiKeyField] = useState<AnthropicApiKeyField>(() =>
     defaultAnthropicApiKeyFieldForCreate(activePlatform),
@@ -3024,6 +3053,7 @@ export function AccountsScreen({
   const [editApiInterfaceFormat, setEditApiInterfaceFormat] = useState<InterfaceFormat>("openai");
   const [editResponsesCustomToolCompat, setEditResponsesCustomToolCompat] = useState(false);
   const [editResponsesEncryptedContentCleanup, setEditResponsesEncryptedContentCleanup] = useState(false);
+  const [editResponsesEncryptedContentAggressiveStrip, setEditResponsesEncryptedContentAggressiveStrip] = useState(false);
   const [editInlineRemoteImages, setEditInlineRemoteImages] = useState(false);
   const [editTurnReminder, setEditTurnReminder] = useState(false);
   const [editTurnReminderText, setEditTurnReminderText] = useState("");
@@ -3627,6 +3657,7 @@ export function AccountsScreen({
     setApiInterfaceFormat(nextInterfaceFormat);
     setApiResponsesCustomToolCompat(false);
     setApiResponsesEncryptedContentCleanup(false);
+    setApiResponsesEncryptedContentAggressiveStrip(false);
     setApiUserAgent("");
     setApiBaseUrl(activePlatform === "grok" ? "https://api.x.ai/v1" : "https://api.example.com/v1");
     setApiBaseUrlAdjustment(null);
@@ -3685,6 +3716,9 @@ export function AccountsScreen({
       setEditApiKeyField(anthropicApiKeyFieldFromConfig(config, "ANTHROPIC_API_KEY"));
       setEditResponsesCustomToolCompat(responsesCustomToolCompatFromConfig(config));
       setEditResponsesEncryptedContentCleanup(config.responses_encrypted_content_cleanup === true);
+      setEditResponsesEncryptedContentAggressiveStrip(
+        config.responses_encrypted_content_aggressive_strip === true,
+      );
       setEditInlineRemoteImages(inlineRemoteImagesFromConfig(config));
       setEditTurnReminder(turnReminderFromConfig(config));
       setEditTurnReminderText(turnReminderTextFromConfig(config));
@@ -3700,6 +3734,7 @@ export function AccountsScreen({
       setEditApiKeyField("ANTHROPIC_API_KEY");
       setEditResponsesCustomToolCompat(false);
       setEditResponsesEncryptedContentCleanup(false);
+      setEditResponsesEncryptedContentAggressiveStrip(false);
       setEditInlineRemoteImages(false);
       // Reset here too, or a value read from the previously edited API account
       // bleeds into an official one that has no such setting.
@@ -4179,6 +4214,9 @@ export function AccountsScreen({
           batch_id: batch?.id ?? null,
           responses_custom_tool_compat: apiResponsesCustomToolCompat,
           ...(apiResponsesEncryptedContentCleanup ? { responses_encrypted_content_cleanup: true } : {}),
+          ...(apiResponsesEncryptedContentCleanup && apiResponsesEncryptedContentAggressiveStrip
+            ? { responses_encrypted_content_aggressive_strip: true }
+            : {}),
           user_agent: apiUserAgent.trim() || null,
           relay_balance_provider:
             apiRelayBalance.provider === "none" || apiRelayBalance.provider === "custom"
@@ -4867,6 +4905,7 @@ export function AccountsScreen({
                 editTurnReminder,
                 editTurnReminderText,
                 editResponsesEncryptedContentCleanup,
+                editResponsesEncryptedContentAggressiveStrip,
               ),
             )
           : writeUserAgentToConfig(
@@ -8931,7 +8970,9 @@ export function AccountsScreen({
                     ) : null}
                     {shouldShowResponsesCustomToolCompatForFormat(activePlatform, apiInterfaceFormat) ? (
                       <ResponsesEncryptedContentCleanupOption
+                        aggressiveStrip={apiResponsesEncryptedContentAggressiveStrip}
                         checked={apiResponsesEncryptedContentCleanup}
+                        onAggressiveStripChange={setApiResponsesEncryptedContentAggressiveStrip}
                         onChange={setApiResponsesEncryptedContentCleanup}
                       />
                     ) : null}
@@ -9743,7 +9784,9 @@ export function AccountsScreen({
                   ) : null}
                   {shouldShowResponsesCustomToolCompatForFormat(activePlatform, editApiInterfaceFormat) ? (
                     <ResponsesEncryptedContentCleanupOption
+                      aggressiveStrip={editResponsesEncryptedContentAggressiveStrip}
                       checked={editResponsesEncryptedContentCleanup}
+                      onAggressiveStripChange={setEditResponsesEncryptedContentAggressiveStrip}
                       onChange={setEditResponsesEncryptedContentCleanup}
                     />
                   ) : null}

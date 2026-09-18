@@ -4017,6 +4017,80 @@ describe("AccountsScreen", () => {
     expect(screen.getByLabelText("Responses 推理兼容清理")).not.toBeChecked();
   });
 
+  it("only offers the aggressive reasoning strip after cleanup is enabled", async () => {
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "API 账号" }));
+    await userEvent.type(screen.getByLabelText("API 账号名称"), "Aggressive API");
+    await userEvent.type(screen.getByLabelText("API Key"), "sk-aggressive-test");
+    await userEvent.selectOptions(screen.getByLabelText("接口格式"), "openai-responses");
+    await openFormTab("高级");
+
+    expect(screen.queryByLabelText("激进剥离推理密文")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByLabelText("Responses 推理兼容清理"));
+    const aggressive = screen.getByLabelText("激进剥离推理密文");
+    expect(aggressive).not.toBeChecked();
+
+    await userEvent.click(aggressive);
+    await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
+    await waitFor(() =>
+      expect(createApiRouteCredential).toHaveBeenCalledWith(
+        expect.objectContaining({
+          responses_encrypted_content_cleanup: true,
+          responses_encrypted_content_aggressive_strip: true,
+        }),
+      ),
+    );
+  });
+
+  it("resets the aggressive reasoning strip after a successful save", async () => {
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "API 账号" }));
+    await userEvent.type(screen.getByLabelText("API 账号名称"), "Aggressive Reset");
+    await userEvent.type(screen.getByLabelText("API Key"), "sk-aggressive-reset");
+    await userEvent.selectOptions(screen.getByLabelText("接口格式"), "openai-responses");
+    await openFormTab("高级");
+    await userEvent.click(screen.getByLabelText("Responses 推理兼容清理"));
+    await userEvent.click(screen.getByLabelText("激进剥离推理密文"));
+    expect(screen.getByLabelText("激进剥离推理密文")).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
+    await waitFor(() => expect(createApiRouteCredential).toHaveBeenCalled());
+
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "API 账号" }));
+    await userEvent.selectOptions(screen.getByLabelText("接口格式"), "openai-responses");
+    await openFormTab("高级");
+    await userEvent.click(screen.getByLabelText("Responses 推理兼容清理"));
+    expect(screen.getByLabelText("激进剥离推理密文")).not.toBeChecked();
+  });
+
+  it("drops the aggressive reasoning strip when the cleanup switch is turned off", async () => {
+    const api = {
+      ...credentialsFixture[1],
+      config_json: JSON.stringify({
+        base_url: "https://api.example.com/v1", interface_format: "openai-responses",
+        model_mappings: [], responses_encrypted_content_cleanup: true,
+        responses_encrypted_content_aggressive_strip: true,
+      }),
+    };
+    vi.mocked(listRouteCredentials).mockResolvedValue([api]);
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 API Account" }));
+    await openFormTab("高级");
+    expect(screen.getByLabelText("激进剥离推理密文")).toBeChecked();
+
+    await userEvent.click(screen.getByLabelText("Responses 推理兼容清理"));
+    expect(screen.queryByLabelText("激进剥离推理密文")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
+    const config = JSON.parse(vi.mocked(updateRouteCredential).mock.calls[0][1].config_json);
+    expect(config.responses_encrypted_content_cleanup).toBe(false);
+    expect(config.responses_encrypted_content_aggressive_strip).toBe(false);
+  });
+
   it("loads and disables Responses encrypted content cleanup independently of other settings", async () => {
     const api = {
       ...credentialsFixture[1],

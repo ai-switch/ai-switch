@@ -196,6 +196,10 @@ fn build_scheme_link(credential: &RouteCredential) -> RouteCredentialSchemeLink 
             .get("responses_custom_tool_compat")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let responses_encrypted_content_aggressive_strip = config
+            .get("responses_encrypted_content_aggressive_strip")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         build_aiswitch_import_url(&DeepLinkBuildInput {
             platform: &credential.platform,
             display_name: &credential.display_name,
@@ -206,6 +210,7 @@ fn build_scheme_link(credential: &RouteCredential) -> RouteCredentialSchemeLink 
             headers: &headers,
             api_key_field,
             responses_custom_tool_compat,
+            responses_encrypted_content_aggressive_strip,
         })
     })();
     match outcome {
