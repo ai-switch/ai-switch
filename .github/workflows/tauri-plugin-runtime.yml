@@ -42,6 +42,15 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      - name: Install Playwright browsers
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            pnpm --dir packages/tauri-plugin-devkit exec playwright install --with-deps chromium webkit
+          else
+            pnpm --dir packages/tauri-plugin-devkit exec playwright install chromium webkit
+          fi
+
       - name: Runtime typecheck, tests and build
         run: |
           pnpm --dir packages/tauri-plugin-runtime typecheck
@@ -57,10 +66,6 @@ jobs:
           pnpm --dir packages/tauri-plugin-devkit run test:built
           pnpm --dir packages/tauri-plugin-devkit run check:node-types
           pnpm --dir packages/tauri-plugin-devkit run build
-
-      - name: Install Playwright browsers
-        if: matrix.os == 'ubuntu-latest'
-        run: pnpm --dir packages/tauri-plugin-devkit exec playwright install --with-deps chromium webkit
 
       - name: Browser tests
         if: matrix.os == 'ubuntu-latest'

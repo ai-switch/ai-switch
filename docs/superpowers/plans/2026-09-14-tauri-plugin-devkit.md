@@ -774,7 +774,7 @@ git commit -m "ci(aplg): 增加双包校验与受控发布入口"
 - 实现默认 dry-run 的 `publish-npm.mjs`：校验 gzip tarball 内真实 `package.json`，核对已发布 integrity，相同则幂等跳过、冲突则失败；`--execute` 才按 runtime → devkit 发布，随后提升 `latest`，部分失败尝试恢复旧 dist-tag 并报告。3 项假 registry 演练覆盖 dry-run、幂等/冲突、顺序发布与回滚，全程未调用真实 registry publish。
 - 新增 `.github/workflows/tauri-plugin-runtime.yml`：普通 PR/main push 只在 Windows/Ubuntu Node 22/24 做 typecheck/test/build/pack/verify-pair/发布逻辑测试；只有 `tauri-plugin-runtime-v*` tag 进入受保护 environment `aplg-npm-release`，使用 OIDC `id-token: write`、固定 action commit、checkout 不持久凭据，并校验 tag 属于默认分支。
 - 首次推送后 CI 立即失败：workflow 中 `pnpm/action-setup` 的固定 SHA 不存在（`Unable to resolve action`），实际校验发现该哈希从未对应任何 commit。已改为真实 `v4` tag 解引用后的 commit `b906affcce14559ad1aafd4ab0e942779e9f58b1`，并用 GitHub API 逐个核对四个固定 action SHA 均可解析。
-- 两包 README 已说明候选 tag、latest 提升、锁文件建议和真实 npm/OIDC/scope 仍需外部授权配置。真实 npm 发布、GitHub Release、OIDC 与 trusted publisher 配置未执行，不以 dry-run 假称已发布；不推送、不打 tag。
+- 首次推送后 CI 暴露三处缺陷并已修复：(1) `pnpm/action-setup` 的固定 SHA 从未对应任何 commit，已改为真实 `v4` tag 解引用后的 commit；(2) `.gitattributes` 漏声明 `*.mjs`，Windows runner checkout 出 CRLF 导致 `validators.generated.mjs` 字节比对失败，已加 `*.mjs text eol=lf` 并补生成物换行符守卫测试；(3) Playwright 浏览器安装排在测试之后且仅限 ubuntu，devkit 的 `vitest run` 内含真实 Chromium/WebKit 用例因而必然失败，已把安装提前并按平台区分 `--with-deps`。
 ### D8（2026-09-18）
 
 - 按 TDD 新增真实双 tarball 外部消费者：`pnpm pack` 生成 runtime/devkit 发布包，在 `os.tmpdir()` 安装，断言无 workspace symlink、devkit 发布元数据无 `workspace:`，并运行打包后的 CLI `init → install → Vite build → validate --stage dist → pack → inspect`。
