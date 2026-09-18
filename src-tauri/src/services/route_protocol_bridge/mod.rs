@@ -163,7 +163,12 @@ pub fn prepare_request(
         };
     }
 
-    if platform == PlatformId::Claude && is_messages {
+    // Inbound Anthropic Messages. Gated on the path rather than the pool's
+    // platform: the wire shape is the client's, and a Codex pool is just as
+    // reachable by a Messages-speaking harness as a Claude pool is. The
+    // `ClaudeTo*` converters below are platform-agnostic — they only depend on
+    // the inbound and upstream dialects — so Codex reuses them unchanged.
+    if is_messages {
         return match upstream_dialect {
             ApiDialect::OpenAi => Ok(PreparedBridgeRequest {
                 kind: Some(ProtocolBridgeKind::ClaudeToChat),
@@ -507,6 +512,99 @@ mod tests {
                 prepare_request(PlatformId::Claude, dialect, "/v1/messages", body).unwrap();
             assert_eq!(prepared.kind, expected_kind);
             assert_eq!(prepared.upstream_path, expected_path);
+        }
+    }
+
+    /// A Codex pool must also accept an inbound Anthropic Messages request and
+    /// bridge it to whatever its accounts speak. Codex's own clients speak
+    /// Responses, but relays and harnesses point at the same pool with the
+    /// Messages wire shape, and the `ClaudeTo*` converters are platform-agnostic.
+    #[test]
+    fn selects_codex_messages_bridge_matrix() {
+        let body = br#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hello"}],"max_tokens":16}"#;
+        let cases = [
+            (
+                ApiDialect::OpenAi,
+                Some(ProtocolBridgeKind::ClaudeToChat),
+                "/chat/completions",
+            ),
+            (
+                ApiDialect::OpenAiResponses,
+                Some(ProtocolBridgeKind::ClaudeToResponses),
+                "/responses",
+            ),
+            (ApiDialect::Anthropic, None, "/v1/messages"),
+            (
+                ApiDialect::Gemini,
+                Some(ProtocolBridgeKind::ClaudeToGemini),
+                "/v1beta/models/claude-sonnet-4-20250514:generateContent",
+            ),
+        ];
+
+        for (dialect, expected_kind, expected_path) in cases {
+            let prepared =
+                prepare_request(PlatformId::Codex, dialect, "/v1/messages", body).unwrap();
+            assert_eq!(prepared.kind, expected_kind, "dialect={dialect:?}");
+            assert_eq!(prepared.upstream_path, expected_path, "dialect={dialect:?}");
+        }
+    }
+
+    /// Messages inbound must not shadow the Codex Responses matrix: a Codex
+    /// client's `/v1/responses` request keeps its own routing, and an unrelated
+    /// path is still passed through untouched.
+    #[test]
+    fn codex_messages_bridge_does_not_affect_other_paths() {
+        let responses_body = br#"{"model":"gpt-5","input":"hi"}"#;
+        let prepared = prepare_request(
+            PlatformId::Codex,
+            ApiDialect::OpenAi,
+            "/v1/responses",
+            responses_body,
+        )
+        .expect("responses request");
+        assert_eq!(prepared.kind, Some(ProtocolBridgeKind::ResponsesToChat));
+        assert_eq!(prepared.upstream_path, "/chat/completions");
+
+        // A path that is neither responses nor messages still passes through.
+        let other = br#"{"model":"gpt-5"}"#;
+        let prepared = prepare_request(PlatformId::Codex, ApiDialect::OpenAi, "/v1/other", other)
+            .expect("other request");
+        assert_eq!(prepared.kind, None);
+        assert_eq!(prepared.body, other);
+    }
+
+    /// The Messages branch is path-based like the Chat Completions one, so the
+    /// remaining pools accept the wire shape too. A Gemini pool only ever holds
+    /// `gemini` accounts, so a Messages request must bridge to generateContent.
+    #[test]
+    fn gemini_pool_bridges_messages_inbound_to_generate_content() {
+        let body = br#"{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#;
+        let prepared =
+            prepare_request(PlatformId::Gemini, ApiDialect::Gemini, "/v1/messages", body).unwrap();
+        assert_eq!(prepared.kind, Some(ProtocolBridgeKind::ClaudeToGemini));
+        assert_eq!(
+            prepared.upstream_path,
+            "/v1beta/models/gemini-2.5-flash:generateContent"
+        );
+    }
+
+    /// The Claude pool keeps routing Messages exactly as before: the shared
+    /// branch must not change its behaviour.
+    #[test]
+    fn claude_messages_bridge_is_unchanged_by_the_shared_branch() {
+        let body = br#"{"model":"claude-sonnet-4","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#;
+        for (dialect, expected_kind) in [
+            (ApiDialect::OpenAi, Some(ProtocolBridgeKind::ClaudeToChat)),
+            (
+                ApiDialect::OpenAiResponses,
+                Some(ProtocolBridgeKind::ClaudeToResponses),
+            ),
+            (ApiDialect::Anthropic, None),
+            (ApiDialect::Gemini, Some(ProtocolBridgeKind::ClaudeToGemini)),
+        ] {
+            let prepared =
+                prepare_request(PlatformId::Claude, dialect, "/v1/messages", body).unwrap();
+            assert_eq!(prepared.kind, expected_kind, "dialect={dialect:?}");
         }
     }
 

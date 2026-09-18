@@ -3980,7 +3980,7 @@ fn build_api_upstream_request(
         )
         && is_responses_path(&upstream_path);
     if (responses_custom_tool_compat_enabled(config) || bridge_requires_custom_tool_compat)
-        && should_rewrite_custom_tools_for_api(interface_format, &upstream_path)
+        && should_rewrite_custom_tools_for_api(&upstream_path)
     {
         rewritten_body = apply_responses_custom_tool_compat(&rewritten_body);
         // Third-party Responses gateways (Xiaomi MiMo, …) reject OpenAI-hosted
@@ -4960,8 +4960,15 @@ fn string_value<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|item| !item.is_empty())
 }
 
-fn should_rewrite_custom_tools_for_api(interface_format: &str, path: &str) -> bool {
-    interface_format == "openai-responses" || is_responses_path(path)
+/// Whether the Responses-only `custom`-tool rewrite applies to this request.
+///
+/// Gated on the inbound path alone. `custom` tools are a Responses shape, and
+/// the account dialect is not a proxy for the wire shape: an Anthropic Messages
+/// or Chat Completions body bridged to a Responses account carries tools in its
+/// own schema. Rewriting those would replace a real `input_schema` with an empty
+/// `parameters` object, silently destroying the tool definition.
+fn should_rewrite_custom_tools_for_api(path: &str) -> bool {
+    is_responses_path(path)
 }
 
 pub fn normalize_api_upstream_path(interface_format: &str, path: &str) -> String {
@@ -11236,6 +11243,188 @@ mod tests {
             assert_eq!(account.transient_failure_count, 0);
             RouteProxyService::stop(&runtime).await.expect("stop");
         }
+    }
+
+    /// A Codex pool reached with the Anthropic Messages wire shape must bridge
+    /// the request to its own upstream dialect and translate the answer back.
+    /// Before this, `/v1/messages` fell through to passthrough: an Anthropic
+    /// body was sent verbatim to a Responses/Chat/Gemini upstream.
+    #[tokio::test]
+    async fn codex_pool_accepts_anthropic_messages_inbound() {
+        // Upstream answers in OpenAI Chat Completions shape.
+        let app = Router::new().fallback(|| async {
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                r#"{"id":"chatcmpl_1","object":"chat.completion","model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}"#,
+            )
+        });
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream = format!("http://{}/v1", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let credential_id = create_proxy_api_credential_with_config(
+            &pool,
+            "codex chat upstream",
+            &upstream,
+            json!({
+                "interface_format": "openai",
+                "model_mappings": [{"from": "claude-sonnet-4", "to": "up-model"}]
+            }),
+        )
+        .await;
+        RoutePoolRepository::replace_members(&pool, "codex", std::slice::from_ref(&credential_id))
+            .await
+            .expect("members");
+        let route_key = RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-test")
+            .await
+            .expect("key");
+        let runtime = RouteProxyRuntimeState::default();
+        let proxy = RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+            .await
+            .expect("proxy");
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/v1/messages",
+                proxy.base_url.as_deref().unwrap()
+            ))
+            .bearer_auth(&route_key)
+            .json(&json!({
+                "model": "claude-sonnet-4",
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .expect("proxy response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = response.json().await.expect("json body");
+        // The client asked for Anthropic Messages and must get that shape back,
+        // not the upstream's Chat Completions payload.
+        assert_eq!(body["type"], "message", "body: {body}");
+        assert_eq!(body["role"], "assistant", "body: {body}");
+        assert_eq!(body["content"][0]["type"], "text", "body: {body}");
+        assert_eq!(body["content"][0]["text"], "ok", "body: {body}");
+
+        RouteProxyService::stop(&runtime).await.expect("stop");
+    }
+
+    /// The account-level `responses_custom_tool_compat` switch keys off the
+    /// account's dialect, not the inbound path, so it stays armed when a Messages
+    /// request lands on an `openai-responses` account. Real Anthropic tools carry
+    /// only `name`/`description`/`input_schema` and no Responses `type`, so the
+    /// rewrite must be a no-op on them — the bridge below is what converts them.
+    #[test]
+    fn messages_inbound_is_untouched_by_responses_tool_rewrites() {
+        let request = json!({
+            "model": "claude-sonnet-4",
+            "max_tokens": 64,
+            "tools": [
+                {"name": "lookup", "description": "Lookup", "input_schema": {"type": "object"}},
+                {"name": "apply_patch", "input_schema": {"type": "object"}}
+            ],
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}
+                ]}
+            ]
+        });
+        let config = json!({
+            "base_url": "https://api.example.com/v1",
+            "interface_format": "openai-responses",
+            "model_mappings": [],
+            "responses_custom_tool_compat": true
+        });
+        let account = api_credential_with_config("probe", &config.to_string());
+        let (_, _, body) = build_upstream_request(
+            &account,
+            "codex",
+            "/v1/messages",
+            None,
+            HeaderMap::new(),
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .expect("request");
+        // The account is a Responses account, so the Messages body is bridged
+        // into Responses. What matters is that both tools arrived as plain
+        // functions with their schemas intact, rather than being mangled by the
+        // custom-tool rewrite into a description-wrapped stub.
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        let tools = value["tools"].as_array().expect("tools");
+        assert_eq!(tools.len(), 2, "body={value}");
+        assert_eq!(tools[0]["type"], "function", "body={value}");
+        assert_eq!(
+            tools[0]["parameters"],
+            json!({"type": "object"}),
+            "body={value}"
+        );
+        assert_eq!(
+            tools[1]["parameters"],
+            json!({"type": "object"}),
+            "body={value}"
+        );
+        assert!(
+            !tools[1]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Original tool definition"),
+            "the Responses custom-tool rewrite must not fire on an Anthropic tool: {value}"
+        );
+    }
+
+    /// Anthropic's own tool `type` defaults to `custom`, so a real Messages
+    /// request may legitimately carry `{"type":"custom","name":…,"input_schema":…}`.
+    /// The Responses custom-tool rewrite must not touch it: that rewrite exists for
+    /// Codex `custom` tools, and applying it here replaces `input_schema` with an
+    /// empty `parameters` object, silently destroying the tool's schema.
+    #[test]
+    fn messages_inbound_keeps_anthropic_custom_typed_tools_intact() {
+        let request = json!({
+            "model": "claude-sonnet-4",
+            "max_tokens": 64,
+            "tools": [{
+                "type": "custom",
+                "name": "apply_patch",
+                "description": "Patch files",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"input": {"type": "string"}},
+                    "required": ["input"]
+                }
+            }],
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let config = json!({
+            "base_url": "https://api.example.com/v1",
+            "interface_format": "openai-responses",
+            "model_mappings": [],
+            "responses_custom_tool_compat": true
+        });
+        let account = api_credential_with_config("probe", &config.to_string());
+        let (_, _, body) = build_upstream_request(
+            &account,
+            "codex",
+            "/v1/messages",
+            None,
+            HeaderMap::new(),
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .expect("request");
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        let tool = &value["tools"][0];
+        assert_eq!(
+            tool["parameters"]["properties"]["input"]["type"], "string",
+            "the Anthropic input_schema must survive the bridge: {value}"
+        );
+        assert_eq!(
+            tool["parameters"]["required"],
+            json!(["input"]),
+            "the Anthropic input_schema must survive the bridge: {value}"
+        );
     }
 
     #[test]

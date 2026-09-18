@@ -90,27 +90,32 @@ Laid out as "local entry × upstream dialect":
 | Local entry | Upstream `openai` | Upstream `openai-responses` | Upstream `anthropic` | Upstream `gemini` |
 | --- | --- | --- | --- | --- |
 | Codex `/responses` | `ResponsesToChat` | `ResponsesToResponses` | `ResponsesToAnthropic` | `ResponsesToGemini` |
-| Claude `/v1/messages` | `ClaudeToChat` | `ClaudeToResponses` | Passthrough (no bridge) | `ClaudeToGemini` |
+| `/v1/messages` on any pool | `ClaudeToChat` | `ClaudeToResponses` | Passthrough (no bridge) | `ClaudeToGemini` |
+| `/chat/completions` on any pool | Passthrough | `ChatToResponses` | `ChatToAnthropic` | `ChatToGemini` |
 | Any other entry / path | Passthrough | Passthrough | Passthrough | Passthrough |
 
 Every link converts in both directions: the request side rewrites the entry format into the upstream format, and the response side rewrites the upstream answer back. Response conversion dispatches on `kind`, so each link has its own matched pair of implementations.
 
 ### When bridging actually happens
 
-The condition is narrow — only two branches ever reach a bridge:
+The condition is narrow — only three branches ever reach a bridge:
 
 ```rust
 if platform == PlatformId::Codex && is_responses { /* … */ }
-if platform == PlatformId::Claude && is_messages { /* … */ }
+if is_messages { /* … */ }
+if is_create_path(&normalized_path, "chat/completions") { /* … */ }
 ```
+
+The `is_responses` branch keys off the platform (Codex's native entry); the other two key off the path alone — **the wire shape a client speaks is the client's choice, not the pool's**. An Anthropic Messages request therefore reaches a Codex pool just as well as a Claude pool, and either one bridges it to whatever dialect its accounts actually use.
 
 Everything else lands in `passthrough_request`: body forwarded verbatim, path normalized. Which means:
 
 - **Entry-path matching ignores version segments.** `/responses`, `/v1/responses`, and `/v1/v1/responses` all count as the Responses creation path; same for messages.
-- **Only creation endpoints get bridged.** A Codex request to something like `/v1/chat/completions` is not bridged.
-- **Claude → `anthropic` is pure passthrough**, with an empty bridge kind. Same protocol on both sides needs no translation.
+- **Only creation endpoints get bridged.** A request to something like `/v1/models` is not bridged.
+- **Messages → `anthropic` is pure passthrough**, with an empty bridge kind. Same protocol on both sides needs no translation.
 - **Codex → `openai-responses` still counts as a bridge** (`ResponsesToResponses`). Both sides are the Responses API, but third-party Responses gateways differ enough in implementation to need a normalization pass, so this is not a plain passthrough.
-- **Traffic entering from Gemini CLI is never bridged.** `PlatformId::Gemini` does not appear in either branch, so Gemini CLI requests always pass through. That is the current capability boundary: Gemini CLI can only route to `gemini`-dialect accounts. The model test's dialect validation hardcodes the same rule — platform `gemini` permits only the `gemini` dialect.
+- **The Messages and Chat Completions entries ignore the platform.** Both key off the path alone, so an Anthropic Messages request reaches any pool (Codex, Claude, Gemini, Grok, the OpenCode family), and the account dialect decides where it gets translated. The Claude pool supports it natively; the rest gained it here.
+- **Gemini CLI's own traffic is still never bridged.** Gemini CLI sends `/v1beta/models/{model}:generateContent`, which is neither `/responses` nor `/v1/messages`, so it falls back to passthrough. That is the current capability boundary: Gemini CLI can only route to `gemini`-dialect accounts. The model test's dialect validation hardcodes the same rule — platform `gemini` permits only the `gemini` dialect.
 
 ### Streaming and non-streaming
 

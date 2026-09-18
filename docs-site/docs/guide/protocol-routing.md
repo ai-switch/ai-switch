@@ -90,27 +90,32 @@ pub enum ProtocolBridgeKind {
 | 本地入口 | 上游 `openai` | 上游 `openai-responses` | 上游 `anthropic` | 上游 `gemini` |
 | --- | --- | --- | --- | --- |
 | Codex `/responses` | `ResponsesToChat` | `ResponsesToResponses` | `ResponsesToAnthropic` | `ResponsesToGemini` |
-| Claude `/v1/messages` | `ClaudeToChat` | `ClaudeToResponses` | 直通（无桥接） | `ClaudeToGemini` |
+| 任意池的 `/v1/messages` | `ClaudeToChat` | `ClaudeToResponses` | 直通（无桥接） | `ClaudeToGemini` |
+| 任意池的 `/chat/completions` | 直通 | `ChatToResponses` | `ChatToAnthropic` | `ChatToGemini` |
 | 其他入口 / 其他路径 | 直通 | 直通 | 直通 | 直通 |
 
 每条链路都要做双向转换：请求方向把入口格式改写成上游格式，响应方向把上游回答改写回入口格式。响应转换是按 `kind` 分发的，所以每条链路都有自己成对的转换实现。
 
 ### 桥接在什么时候发生
 
-判定条件很窄，只有两个分支会命中桥接：
+判定条件很窄，只有三个分支会命中桥接：
 
 ```rust
 if platform == PlatformId::Codex && is_responses { /* … */ }
-if platform == PlatformId::Claude && is_messages { /* … */ }
+if is_messages { /* … */ }
+if is_create_path(&normalized_path, "chat/completions") { /* … */ }
 ```
+
+`is_responses` 分支按平台判定（Codex 的原生入口），后两个只按路径判定——**客户端说什么协议由客户端决定，不由池子决定**。所以 Anthropic Messages 请求既能打进 Claude 池，也能打进 Codex 池，两边都会桥接到账号实际使用的方言。
 
 其余所有组合都落到 `passthrough_request`——请求体原样转发，只做路径规范化。这意味着：
 
 - **入口路径判定会跳过版本段。** `/responses`、`/v1/responses`、`/v1/v1/responses` 都算 Responses 创建路径；messages 同理。
-- **只有创建端点会被桥接。** Codex 打 `/v1/chat/completions` 这类非创建路径时不桥接。
-- **Claude → `anthropic` 是纯直通**，桥接种类为空。同协议不需要翻译。
+- **只有创建端点会被桥接。** 打 `/v1/models` 这类非创建路径时不桥接。
+- **Messages → `anthropic` 是纯直通**，桥接种类为空。同协议不需要翻译。
 - **Codex → `openai-responses` 仍然算一条桥接**（`ResponsesToResponses`）。虽然两边都是 Responses API，但第三方 Responses 网关的实现差异需要一层清洗，所以它不是简单的直通。
-- **Gemini CLI 入口的流量永远不桥接。** 判定分支里没有 `PlatformId::Gemini`，所以 Gemini CLI 发出的请求一律直通。这也是当前的能力边界：Gemini CLI 只能路由到 `gemini` 方言的账号。模型测试的方言校验里同样写死了这一点——平台 `gemini` 只允许 `gemini` 方言。
+- **Messages 与 Chat Completions 两条入口不看平台。** 它们只按路径判定，所以 Anthropic Messages 请求可以打进任何池（Codex、Claude、Gemini、Grok、OpenCode 家族），再由账号方言决定往哪翻译。Claude 池是原生支持，其余池是这次补齐的能力。
+- **Gemini CLI 自己的流量仍然不桥接。** Gemini CLI 发的是 `/v1beta/models/{model}:generateContent`，既不是 `/responses` 也不是 `/v1/messages`，所以落回直通。这是当前的能力边界：Gemini CLI 只能路由到 `gemini` 方言的账号。模型测试的方言校验里同样写死了这一点——平台 `gemini` 只允许 `gemini` 方言。
 
 ### 流式与非流式
 
