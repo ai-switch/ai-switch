@@ -1,6 +1,6 @@
 import type { TranslationKey } from "../../lib/i18n";
 
-export const OFFICIAL_SITE_URL = "https://ijry.github.io/ai-switch/";
+export const OFFICIAL_SITE_URL = "https://ai-switch.github.io/ai-switch/";
 export const REPOSITORY_URL = "https://github.com/ai-switch/ai-switch";
 
 /**

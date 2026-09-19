@@ -4,7 +4,7 @@ const REPO = "https://github.com/ai-switch/ai-switch";
 const RELEASES = `${REPO}/releases/latest`;
 // Trailing slash is required: generateSitemap feeds SitemapStream relative paths,
 // so a hostname without it silently drops the /ai-switch/ segment from every <loc>.
-const HOSTNAME = "https://ijry.github.io/ai-switch/";
+const HOSTNAME = "https://ai-switch.github.io/ai-switch/";
 
 /* ----------------------------- 简体中文 ----------------------------- */
 

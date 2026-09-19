@@ -43,7 +43,7 @@ export const PACKAGE = {
   wingetIdentifier: "Lingyun.AISwitch",
   name: "AI Switch",
   desc: "Switch provider accounts and API routes for AI coding CLIs",
-  homepage: "https://ijry.github.io/ai-switch/",
+  homepage: "https://ai-switch.github.io/ai-switch/",
   bundleIdentifier: "io.xyito.ai-switch",
   // Every bit of local state, credentials included. Only ever removed by an
   // explicit `brew uninstall --zap`.
