@@ -2162,25 +2162,139 @@ fn diagnostic_notes(
     let Some(final_text) = final_response.and_then(|bytes| std::str::from_utf8(bytes).ok()) else {
         return Vec::new();
     };
-    let completed = final_text.contains("\"type\":\"response.completed\"")
-        || final_text.contains("\"status\":\"completed\"")
-        || final_text.contains("\"stop_reason\"");
-    if !completed {
+    // A streamed Responses answer opens with `response.created` /
+    // `response.in_progress` scaffolding whose `output` is always `[]`, so a
+    // substring scan of the whole body reports every streamed turn as empty.
+    // Inspect the terminal completed frame (or the buffered JSON body) instead.
+    let Some(final_body) = terminal_diagnostic_body(final_text) else {
         return Vec::new();
-    }
+    };
     let mut notes = Vec::new();
-    if final_text.contains("\"output\":[]") {
+    if diagnostic_output_is_empty(&final_body) {
         notes.push("上游返回空输出（无文本/推理/工具调用）".to_string());
         return notes;
     }
-    let has_tool_call = final_text.contains("\"type\":\"function_call\"")
-        || final_text.contains("\"type\":\"tool_use\"")
-        || final_text.contains("response.function_call_arguments");
+    let has_tool_call = diagnostic_body_has_tool_call(&final_body);
     let request_offered_tools = client_request.is_some_and(|request| request.contains("\"tools\""));
     if request_offered_tools && !has_tool_call {
         notes.push("上游未发起工具调用（纯文本回合，agent 可能就此停止）".to_string());
     }
     notes
+}
+
+/// The response object a completed turn should be judged on.
+///
+/// For a streamed body it is the `response` payload of the terminal
+/// `response.completed` / `response.incomplete` / `response.failed` frame, so the
+/// empty `output` on the opening scaffolding frames is ignored. For a buffered
+/// JSON body it is the document itself. `None` means the turn never completed,
+/// which is not something to annotate.
+fn terminal_diagnostic_body(final_text: &str) -> Option<Value> {
+    let looks_sse = final_text
+        .lines()
+        .any(|line| line.trim_start().starts_with("data:"));
+    if looks_sse {
+        let mut terminal = None;
+        for block in final_text.replace("\r\n", "\n").split("\n\n") {
+            let data = block
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("data:").map(str::trim))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(&data) else {
+                continue;
+            };
+            let is_terminal = matches!(
+                value.get("type").and_then(Value::as_str),
+                Some("response.completed" | "response.incomplete" | "response.failed")
+            );
+            if is_terminal {
+                // Prefer the wrapped `response` payload; fall back to the frame.
+                terminal = Some(value.get("response").cloned().unwrap_or(value));
+            }
+        }
+        return terminal;
+    }
+    let value = serde_json::from_str::<Value>(final_text).ok()?;
+    let completed = value.get("status").and_then(Value::as_str) == Some("completed")
+        || value.get("stop_reason").is_some()
+        || value.get("choices").is_some();
+    completed.then_some(value)
+}
+
+/// True when a completed response carries no visible output — no message text,
+/// reasoning, tool call, Anthropic content block, or chat choice content.
+fn diagnostic_output_is_empty(body: &Value) -> bool {
+    // Responses shape: an `output` array of typed items, plus `output_text`.
+    if let Some(output) = body.get("output").and_then(Value::as_array) {
+        let has_output_text = body
+            .get("output_text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty());
+        return output.is_empty() && !has_output_text;
+    }
+    // Anthropic shape: a `content` block array.
+    if let Some(content) = body.get("content").and_then(Value::as_array) {
+        return content.is_empty();
+    }
+    // Chat shape: choices carrying message content or tool calls.
+    if let Some(choices) = body.get("choices").and_then(Value::as_array) {
+        return !choices.iter().any(|choice| {
+            let message = choice.get("message").or_else(|| choice.get("delta"));
+            let Some(message) = message else {
+                return false;
+            };
+            let has_text = message
+                .get("content")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty());
+            let has_tool_calls = message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty());
+            has_text || has_tool_calls
+        });
+    }
+    // An unrecognized shape is not judged as empty.
+    false
+}
+
+/// Whether a completed response contains a tool call in any of the three shapes.
+fn diagnostic_body_has_tool_call(body: &Value) -> bool {
+    if let Some(output) = body.get("output").and_then(Value::as_array) {
+        if output.iter().any(|item| {
+            matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("function_call" | "custom_tool_call" | "local_shell_call")
+            )
+        }) {
+            return true;
+        }
+    }
+    if let Some(content) = body.get("content").and_then(Value::as_array) {
+        if content
+            .iter()
+            .any(|item| item.get("type").and_then(Value::as_str) == Some("tool_use"))
+        {
+            return true;
+        }
+    }
+    if let Some(choices) = body.get("choices").and_then(Value::as_array) {
+        if choices.iter().any(|choice| {
+            choice
+                .get("message")
+                .or_else(|| choice.get("delta"))
+                .and_then(|message| message.get("tool_calls"))
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty())
+        }) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Above this many bytes, a system-prompt-shaped field is replaced with a short
@@ -6521,12 +6635,95 @@ mod tests {
         assert!(notes[0].contains("未发起工具调用"));
     }
 
+    /// A bridged response that DID produce output is streamed as Responses SSE,
+    /// whose `response.created` / `response.in_progress` scaffolding always
+    /// carries `"output":[]`. The empty-output note must key off the terminal
+    /// completed event, not a naive substring that the scaffolding also matches.
+    #[test]
+    fn does_not_flag_bridged_output_when_only_the_scaffolding_is_empty() {
+        let response = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "event: response.in_progress\n",
+            "data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\"}]}}\n\n",
+        );
+        let notes = diagnostic_notes(
+            true,
+            Some("codex"),
+            Some("{\"input\":\"hi\"}"),
+            Some(response.as_bytes()),
+        );
+        assert!(
+            notes.is_empty(),
+            "a bridged answer with real output must not be flagged as empty: {notes:?}"
+        );
+    }
+
     #[test]
     fn flags_bridged_empty_output() {
         let response = br#"data: {"type":"response.completed","response":{"output":[]}}"#;
         let notes = diagnostic_notes(true, Some("codex"), Some("{\"tools\":[]}"), Some(response));
         assert_eq!(notes.len(), 1);
         assert!(notes[0].contains("空输出"));
+    }
+
+    /// A buffered (non-SSE) Responses answer carrying real output_text must not
+    /// be flagged, even though nothing streamed.
+    #[test]
+    fn does_not_flag_buffered_json_answer_with_output_text() {
+        let response =
+            br#"{"status":"completed","output":[{"type":"message"}],"output_text":"hi"}"#;
+        let notes = diagnostic_notes(
+            true,
+            Some("codex"),
+            Some("{\"input\":\"x\"}"),
+            Some(response),
+        );
+        assert!(notes.is_empty(), "notes={notes:?}");
+    }
+
+    /// A buffered Responses answer whose output is genuinely empty is flagged.
+    #[test]
+    fn flags_buffered_json_empty_output() {
+        let response = br#"{"status":"completed","output":[],"output_text":""}"#;
+        let notes = diagnostic_notes(
+            true,
+            Some("codex"),
+            Some("{\"input\":\"x\"}"),
+            Some(response),
+        );
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("空输出"));
+    }
+
+    /// The empty-output detector understands the Anthropic and Chat shapes the
+    /// Claude and Chat bridges emit, not only the Responses shape.
+    #[test]
+    fn detects_empty_output_across_bridge_shapes() {
+        let anthropic_empty = br#"{"stop_reason":"end_turn","content":[]}"#;
+        assert!(
+            diagnostic_notes(true, Some("claude"), Some("{}"), Some(anthropic_empty))
+                .iter()
+                .any(|note| note.contains("空输出"))
+        );
+
+        let anthropic_answer =
+            br#"{"stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}"#;
+        assert!(
+            diagnostic_notes(true, Some("claude"), Some("{}"), Some(anthropic_answer)).is_empty()
+        );
+
+        let chat_empty = br#"{"choices":[{"message":{"role":"assistant","content":""}}]}"#;
+        assert!(
+            diagnostic_notes(true, Some("codex"), Some("{}"), Some(chat_empty))
+                .iter()
+                .any(|note| note.contains("空输出"))
+        );
+
+        let chat_answer = br#"{"choices":[{"message":{"role":"assistant","content":"hi"}}]}"#;
+        assert!(diagnostic_notes(true, Some("codex"), Some("{}"), Some(chat_answer)).is_empty());
     }
 
     #[test]
