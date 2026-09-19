@@ -9,6 +9,9 @@ export default defineConfig({
       ...configDefaults.exclude,
       "packages/**",
       "examples/**",
+      // Standalone fixture packages own their Node test runner; Vitest must
+      // not collect node:test files from them as root test suites.
+      "fixtures/**",
       "**/.codex-run/**",
       "**/.worktrees/**",
       // Agent worktrees live here and hold a full checkout, so without this
