@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
-import { publishNpm } from "./publish-npm.mjs";
+import { publishNpm, resolveNpmCli } from "./publish-npm.mjs";
 
 function tarWithPackageJson(metadata) {
   const body = Buffer.from(JSON.stringify(metadata));
@@ -134,4 +134,12 @@ test("a failed devkit publish surfaces the error and a rerun skips the published
       assert.deepEqual(retried.results.map((item) => item.status), ["already-published", "published"]);
     });
   } finally { await files.cleanup(); }
+});
+
+test("resolveNpmCli returns a real npm entry script, never a bare command", async () => {
+  const cli = await resolveNpmCli();
+  assert.match(cli, /npm-cli\.js$|npm\.js$/);
+  const stats = await import("node:fs/promises").then((m) => m.lstat(cli));
+  assert.equal(stats.isFile(), true);
+  await assert.rejects(resolveNpmCli({ env: {}, candidates: ["/nonexistent/npm"] }), /npm CLI/);
 });

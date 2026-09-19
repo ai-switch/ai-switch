@@ -1,13 +1,31 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { planRelease } from "./plan-release.mjs";
 import { runNodeCommand } from "../../packages/tauri-plugin-runtime/scripts/verification-process.mjs";
 
 function fail(message) {
   throw Object.assign(new Error(`E_NPM_PUBLISH: ${message}`), { code: "E_NPM_PUBLISH" });
+}
+
+// npm publish must run through the real npm CLI file, executed by Node. A bare
+// "npm" string would be handed to `node`, which then fails with
+// `Cannot find module .../npm`. pnpm sets npm_execpath to pnpm, so only accept
+// an actual npm entry script.
+export async function resolveNpmCli({ env = process.env, candidates } = {}) {
+  const executable = await realpath(process.execPath);
+  const list = candidates ?? [
+    env.npm_execpath,
+    join(dirname(executable), "node_modules/npm/bin/npm-cli.js"),
+    join(dirname(executable), "../lib/node_modules/npm/bin/npm-cli.js"),
+    "/usr/share/nodejs/npm/bin/npm-cli.js",
+  ];
+  for (const candidate of list) {
+    if (candidate && /(?:npm-cli\.js|npm\.js)$/.test(candidate) && await lstat(candidate).then((s) => s.isFile()).catch(() => false)) return candidate;
+  }
+  fail("npm CLI was not found alongside Node; install npm for this Node toolchain.");
 }
 
 function parse(argv) {
@@ -94,9 +112,8 @@ export async function publishNpm(options) {
     if (existing === integrities[name]) { results.push({ name, version: plan.version, status: "already-published" }); continue; }
     if (existing !== null) fail(`${name}@${plan.version} already exists with a different integrity.`);
     if (!options.execute) { results.push({ name, version: plan.version, status: "dry-run" }); continue; }
-    const npm = process.env.npm_execpath ?? "npm";
     if (options.publish) await options.publish({ name, version: plan.version, tarball: tarballs[name], tag: plan.stableTag, registry });
-    else await runNodeCommand([npm, "publish", tarballs[name], "--ignore-scripts", "--provenance", "--access", "public", "--tag", plan.stableTag, "--registry", registry], { cwd: process.cwd(), env: { ...process.env }, capture: true, timeout: 180_000 });
+    else await runNodeCommand([await resolveNpmCli(), "publish", tarballs[name], "--ignore-scripts", "--provenance", "--access", "public", "--tag", plan.stableTag, "--registry", registry], { cwd: process.cwd(), env: { ...process.env }, capture: true, timeout: 180_000 });
     results.push({ name, version: plan.version, status: "published" });
   }
   if (!options.execute) return { ...plan, registry, execute: false, results };
