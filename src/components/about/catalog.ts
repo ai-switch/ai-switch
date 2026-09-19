@@ -98,6 +98,7 @@ export type FriendlyLink = {
 
 export const FRIENDLY_LINKS: FriendlyLink[] = [
   { name: "MCode", url: "https://getmcode.lingyun.net" },
+  { name: "OTools", url: "https://otools.lingyun.net/" },
   {
     name: "DeepSeek Harness Desktop Ultra",
     url: "https://ijry.github.io/DeepSeek-Harness-Desktop-Ultra/",
