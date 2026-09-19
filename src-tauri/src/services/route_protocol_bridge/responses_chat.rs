@@ -1642,27 +1642,52 @@ fn reasoning_text(item: &Value) -> Option<String> {
             }
         }
     }
-    let summary = item
-        .get("summary")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|part| {
-            matches!(
-                part.get("type").and_then(Value::as_str),
-                Some("summary_text" | "reasoning_text")
-            )
-            .then(|| part.get("text").and_then(Value::as_str))
-            .flatten()
-        })
-        .collect::<Vec<_>>()
-        .join("");
-    if !summary.is_empty() {
-        return Some(summary);
+    // Responses providers differ on where they expose replayable plaintext:
+    // `summary` is normally a part array, while some gateways use a string or
+    // put `reasoning_text` parts under `content`. Match WorkBuddy's compatibility
+    // shape so either representation reaches Chat's `reasoning_content`.
+    for key in ["summary", "content"] {
+        if let Some(text) = reasoning_field_text(item.get(key)) {
+            return Some(text);
+        }
     }
-    item.get("content")
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
+    None
+}
+
+fn reasoning_field_text(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        Value::Array(parts) => {
+            let text = parts
+                .iter()
+                .filter_map(|part| match part {
+                    Value::String(text) => Some(text.as_str()),
+                    Value::Object(object) => {
+                        let part_type = object.get("type").and_then(Value::as_str)?;
+                        matches!(
+                            part_type,
+                            "summary_text"
+                                | "reasoning_text"
+                                | "input_text"
+                                | "output_text"
+                                | "text"
+                        )
+                        .then(|| object.get("text").and_then(Value::as_str))
+                        .flatten()
+                    }
+                    _ => None,
+                })
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.trim().is_empty()).then_some(text)
+        }
+        _ => None,
+    }
 }
 
 fn function_call_to_chat(
@@ -2244,6 +2269,54 @@ mod tests {
             .expect("replayed tool call");
 
         assert_eq!(replayed, "lookup", "converted={converted}");
+    }
+
+    /// WorkBuddy2API-Hub v1.4.0 also accepts reasoning history where
+    /// `summary` is a string or the plaintext rides in `content` parts. Our
+    /// converter must recover both forms before attaching them to the next
+    /// assistant/tool-call turn.
+    #[test]
+    fn extracts_reasoning_text_from_string_summary_and_content_parts() {
+        let body = serde_json::json!({
+            "model": "deepseek-reasoner",
+            "input": [
+                {"type": "reasoning", "summary": "summary as a string"},
+                {"type": "function_call", "call_id": "call_1", "name": "first", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "one"},
+                {
+                    "type": "reasoning",
+                    "summary": [],
+                    "content": [
+                        {"type": "reasoning_text", "text": "content part one"},
+                        {"type": "reasoning_text", "text": "content part two"}
+                    ]
+                },
+                {"type": "function_call", "call_id": "call_2", "name": "second", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_2", "output": "two"}
+            ],
+            "tools": [
+                {"type": "function", "name": "first", "parameters": {"type": "object", "properties": {}}},
+                {"type": "function", "name": "second", "parameters": {"type": "object", "properties": {}}}
+            ]
+        });
+
+        let converted: Value = serde_json::from_slice(
+            &responses_request_to_chat(&serde_json::to_vec(&body).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let assistant = converted["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .collect::<Vec<_>>();
+
+        assert_eq!(assistant.len(), 2);
+        assert_eq!(assistant[0]["reasoning_content"], "summary as a string");
+        assert_eq!(
+            assistant[1]["reasoning_content"],
+            "content part one\ncontent part two"
+        );
     }
 
     /// Streamed chat responses omit usage unless this is set, which would leave
