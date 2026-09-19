@@ -13,6 +13,9 @@ use std::collections::BTreeMap;
 /// Stand-in id for a response whose body or stream never named one. Chat clients
 /// key their accumulator on `id`, so it cannot be empty.
 const DEFAULT_RESPONSE_ID: &str = "chatcmpl-bridge";
+/// DeepSeek accepts a non-empty placeholder for a tool-call turn whose real
+/// plaintext reasoning was lost; an empty string is rejected just like absence.
+const DEEPSEEK_REASONING_PLACEHOLDER: &str = " ";
 
 pub(super) fn chat_request_to_responses(body: &[u8]) -> Result<Vec<u8>, String> {
     let value = serde_json::from_slice::<Value>(body)
@@ -26,11 +29,20 @@ pub(super) fn chat_request_to_responses(body: &[u8]) -> Result<Vec<u8>, String> 
         result.insert("model".to_string(), model.clone());
     }
 
+    let replay_deepseek_reasoning = object
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(|model| model.to_ascii_lowercase().contains("deepseek"));
     let mut instructions = Vec::new();
     let mut input = Vec::new();
     if let Some(items) = object.get("messages").and_then(Value::as_array) {
         for item in items {
-            convert_message(item, &mut instructions, &mut input)?;
+            convert_message(
+                item,
+                &mut instructions,
+                &mut input,
+                replay_deepseek_reasoning,
+            )?;
         }
     }
     // Responses keeps the system prompt in `instructions`, outside the item list a
@@ -124,6 +136,7 @@ fn convert_message(
     message: &Value,
     instructions: &mut Vec<String>,
     input: &mut Vec<Value>,
+    replay_deepseek_reasoning: bool,
 ) -> Result<(), String> {
     let object = message
         .as_object()
@@ -144,7 +157,7 @@ fn convert_message(
             }
             Ok(())
         }
-        "assistant" => push_assistant_items(object, input),
+        "assistant" => push_assistant_items(object, input, replay_deepseek_reasoning),
         "tool" => {
             let call_id = object
                 .get("tool_call_id")
@@ -224,10 +237,29 @@ fn convert_image_part(part: &Value) -> Result<Value, String> {
 /// message fans out into a `message` item followed by one `function_call` item per
 /// call.
 ///
-/// A replayed `reasoning_content` is dropped: Responses reasoning items are opaque
-/// objects the model itself issued, and a synthesized one is rejected.
-fn push_assistant_items(object: &Map<String, Value>, input: &mut Vec<Value>) -> Result<(), String> {
+/// Official Responses reasoning items are opaque and cannot be synthesized. A
+/// DeepSeek Responses upstream is the exception: its thinking mode requires the
+/// plaintext reasoning back on tool-call history, otherwise a continuation gets
+/// `The reasoning_text in the thinking mode must be passed back to the API`.
+fn push_assistant_items(
+    object: &Map<String, Value>,
+    input: &mut Vec<Value>,
+    replay_deepseek_reasoning: bool,
+) -> Result<(), String> {
     let text = message_text(object.get("content"))?;
+    let tool_calls = object
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .filter(|calls| !calls.is_empty());
+    if replay_deepseek_reasoning && tool_calls.is_some() {
+        let reasoning = chat_reasoning_text(object)
+            .unwrap_or_else(|| DEEPSEEK_REASONING_PLACEHOLDER.to_string());
+        input.push(json!({
+            "type": "reasoning",
+            "summary": [],
+            "content": [{"type": "reasoning_text", "text": reasoning}]
+        }));
+    }
     if !text.is_empty() {
         input.push(json!({
             "type": "message",
@@ -235,12 +267,7 @@ fn push_assistant_items(object: &Map<String, Value>, input: &mut Vec<Value>) -> 
             "content": [{"type": "output_text", "text": text}]
         }));
     }
-    for call in object
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
+    for call in tool_calls.into_iter().flatten() {
         let call_id = call
             .get("id")
             .and_then(Value::as_str)
@@ -263,6 +290,17 @@ fn push_assistant_items(object: &Map<String, Value>, input: &mut Vec<Value>) -> 
         }));
     }
     Ok(())
+}
+
+fn chat_reasoning_text(object: &Map<String, Value>) -> Option<String> {
+    for key in ["reasoning_content", "reasoning"] {
+        if let Some(text) = object.get(key).and_then(Value::as_str) {
+            if !text.trim().is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Chat nests a declaration under `function`; Responses keeps the same fields flat
@@ -889,6 +927,79 @@ mod tests {
         assert_eq!(value["max_output_tokens"], 256);
         assert!(value.get("max_tokens").is_none());
         assert_eq!(value["stream"], true);
+    }
+
+    /// DeepSeek's native Responses endpoint rejects replayed tool history when
+    /// the assistant tool-call turn's plaintext reasoning was dropped. Chat
+    /// clients carry it as `reasoning_content`/`reasoning`; replay it as the
+    /// spec-shaped reasoning item DeepSeek requires.
+    #[test]
+    fn replays_deepseek_chat_reasoning_before_the_tool_call() {
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "user", "content": "run"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "I should call the tool.",
+                    "reasoning_content": "I should call the tool.",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "run", "arguments": "{}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "ok"}
+            ]
+        });
+
+        let converted = chat_request_to_responses(&serde_json::to_vec(&body).unwrap()).unwrap();
+        let value: Value = serde_json::from_slice(&converted).unwrap();
+        let input = value["input"].as_array().unwrap();
+
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["summary"], json!([]));
+        assert_eq!(input[1]["content"][0]["type"], "reasoning_text");
+        assert_eq!(input[1]["content"][0]["text"], "I should call the tool.");
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["call_id"], "call_1");
+        assert_eq!(input[3]["type"], "function_call_output");
+    }
+
+    /// A tool-call turn can reach the bridge after client-side compaction or a
+    /// reasoning-free model turn, leaving the plaintext field empty. DeepSeek
+    /// rejects a missing/empty `reasoning_text`, so a neutral non-empty
+    /// placeholder keeps the replayed history valid.
+    #[test]
+    fn fills_missing_deepseek_tool_reasoning_with_a_placeholder() {
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "user", "content": "run"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": "",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "run", "arguments": "{}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "ok"}
+            ]
+        });
+
+        let converted = chat_request_to_responses(&serde_json::to_vec(&body).unwrap()).unwrap();
+        let value: Value = serde_json::from_slice(&converted).unwrap();
+        let input = value["input"].as_array().unwrap();
+
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["content"][0]["type"], "reasoning_text");
+        assert_eq!(input[1]["content"][0]["text"], " ");
+        assert_eq!(input[2]["type"], "function_call");
     }
 
     #[test]
