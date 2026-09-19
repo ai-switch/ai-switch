@@ -92,6 +92,41 @@ mod tests {
         assert_eq!(converted["tools"][0]["input_schema"]["type"], "object");
     }
 
+    /// Codex Responses Lite puts its base instructions in an inline developer
+    /// message. Anthropic messages only accept user/assistant roles, so that
+    /// text has to be folded into the top-level system prompt.
+    #[test]
+    fn folds_inline_developer_message_into_anthropic_system() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "instructions": "base instruction",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "developer reminder"}]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}]
+                }
+            ]
+        });
+
+        let converted: Value = serde_json::from_slice(
+            &responses_request_to_anthropic(&serde_json::to_vec(&body).unwrap()).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(converted["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(converted["messages"][0]["role"], "user");
+        let system = converted["system"].as_array().unwrap();
+        assert_eq!(system.len(), 2, "system={system:?}");
+        assert_eq!(system[0]["text"], "base instruction");
+        assert_eq!(system[1]["text"], "developer reminder");
+    }
+
     #[test]
     fn forwards_metadata_so_claude_code_gated_relays_accept_the_request() {
         // Relays gating on the Claude Code signature parse `metadata.user_id` and
@@ -562,15 +597,20 @@ pub(super) fn responses_request_to_anthropic(body: &[u8]) -> Result<Vec<u8>, Str
     if let Some(model) = object.get("model") {
         result.insert("model".to_string(), model.clone());
     }
+    let mut system_blocks = Vec::new();
     if let Some(instructions) = object.get("instructions") {
         let system = text_value(instructions, "instructions")?;
         if !system.is_empty() {
-            result.insert("system".to_string(), Value::String(system));
+            system_blocks.push(text_block(&system));
         }
     }
     let mut messages = Vec::new();
     if let Some(input) = object.get("input") {
         messages.extend(convert_input(input)?);
+    }
+    fold_system_messages_into_system(&mut messages, &mut system_blocks)?;
+    if !system_blocks.is_empty() {
+        result.insert("system".to_string(), Value::Array(system_blocks));
     }
     result.insert("messages".to_string(), Value::Array(messages));
     // Anthropic requires max_tokens, but the Responses API treats
@@ -917,6 +957,91 @@ fn convert_input(input: &Value) -> Result<Vec<Value>, String> {
         Value::Null => Ok(Vec::new()),
         _ => Err("Responses input must be a string or array".to_string()),
     }
+}
+
+/// Anthropic only permits `user` and `assistant` in `messages`; instruction
+/// roles live in the top-level `system` field. Codex Responses Lite can move
+/// its base instructions out of the top-level `instructions` field and into an
+/// inline `developer` message, which strict Anthropic-to-Kiro relays reject.
+///
+/// The Responses instruction hierarchy gives `system` and `developer` the same
+/// authority, above user content, so both become top-level system blocks in
+/// source order. Downgrading them to user turns would change their semantics.
+fn fold_system_messages_into_system(
+    messages: &mut Vec<Value>,
+    system_blocks: &mut Vec<Value>,
+) -> Result<(), String> {
+    let mut conversation = Vec::with_capacity(messages.len());
+    for message in messages.drain(..) {
+        let is_system = message
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| matches!(role, "system" | "developer"));
+        if !is_system {
+            conversation.push(message);
+            continue;
+        }
+        let start = system_blocks.len();
+        match message.get("content") {
+            Some(Value::String(text)) => {
+                if !text.is_empty() {
+                    system_blocks.push(text_block(text));
+                }
+            }
+            Some(Value::Array(parts)) => {
+                for part in parts {
+                    if let Some(block) = system_content_block(part)? {
+                        system_blocks.push(block);
+                    }
+                }
+            }
+            Some(Value::Null) | None => {}
+            _ => return Err("Responses system message content must be text".to_string()),
+        }
+        // Responses cache markers belong on the last system block produced by
+        // the message. Preserve them, but never override a part-level marker.
+        if system_blocks.len() > start {
+            if let (Some(last), Some(cache_control)) =
+                (system_blocks.last_mut(), message.get("cache_control"))
+            {
+                if last.get("cache_control").is_none() {
+                    last["cache_control"] = cache_control.clone();
+                }
+            }
+        }
+    }
+    *messages = conversation;
+    Ok(())
+}
+
+/// Anthropic's top-level `system` field accepts text blocks only. Conversely,
+/// `text_value` joins blocks, which would erase the source block boundaries and
+/// part-level cache markers during this conversion.
+fn system_content_block(part: &Value) -> Result<Option<Value>, String> {
+    let object = part
+        .as_object()
+        .ok_or_else(|| "Responses system message content parts must be objects".to_string())?;
+    let part_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !matches!(part_type, "input_text" | "output_text" | "text") {
+        return Err(format!(
+            "Responses system message content type '{part_type}' is not supported by Anthropic"
+        ));
+    }
+    let Some(text) = object
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    else {
+        return Ok(None);
+    };
+    let mut block = text_block(text);
+    if let Some(cache_control) = object.get("cache_control") {
+        block["cache_control"] = cache_control.clone();
+    }
+    Ok(Some(block))
 }
 
 fn convert_input_items(items: &[Value]) -> Result<Vec<Value>, String> {
