@@ -209,7 +209,7 @@ Download and install instructions are in [installation](/en/guide/installation).
 
 Yes. It is **MIT** licensed, `Copyright (c) 2026 xyito`.
 
-Repository: <https://github.com/ijry/ai-switch>
+Repository: <https://github.com/ai-switch/ai-switch>
 
 MIT means you can use, modify, and redistribute it freely, including commercially, as long as you keep the copyright and license notice. Third-party dependency licenses are listed in the repository's `LICENSES/` directory and `THIRD_PARTY_NOTICES.md`.
 

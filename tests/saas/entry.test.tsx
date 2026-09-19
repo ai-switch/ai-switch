@@ -37,7 +37,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 describe("SaaS user portal", () => {
   it("keeps the project footer independent of the site name", async () => {
     render(<SaasPortal />);
-    expect(await screen.findByRole("link", { name: "AISwitch" })).toHaveAttribute("href", "https://github.com/ijry/ai-switch");
+    expect(await screen.findByRole("link", { name: "AISwitch" })).toHaveAttribute("href", "https://github.com/ai-switch/ai-switch");
   });
   it("shows GitHub login without fetching private data", async () => {
     render(<SaasPortal />);

@@ -143,7 +143,7 @@ This only permits startup; it does not disable panel-token or compute-pool API-k
 On an x86_64 or aarch64 Linux server, install the latest Release with the command below; the installer detects the current architecture automatically:
 
 ```bash
-AI_SWITCH_PORT=19527 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ijry/ai-switch/main/scripts/install-server.sh)"
+AI_SWITCH_PORT=19527 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ai-switch/ai-switch/main/scripts/install-server.sh)"
 ```
 
 Replace `AI_SWITCH_PORT=19527` with the port you want; the default bind is `127.0.0.1`, and external access requires setting `AI_SWITCH_HOST`. The installer creates the `ai-switch` system user, installs the program under `/opt/ai-switch`, persists the token and port in `/etc/ai-switch/server.env`, and installs, enables, and starts `ai-switch-server.service`. When it finishes, it prints the panel URL, service status, and the command for reading the access token. Before upgrading, it stops the old service so replacing the binary does not fail with `Text file busy`.

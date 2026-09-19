@@ -1,6 +1,6 @@
 import { defineConfig, type DefaultTheme } from "vitepress";
 
-const REPO = "https://github.com/ijry/ai-switch";
+const REPO = "https://github.com/ai-switch/ai-switch";
 const RELEASES = `${REPO}/releases/latest`;
 // Trailing slash is required: generateSitemap feeds SitemapStream relative paths,
 // so a hostname without it silently drops the /ai-switch/ segment from every <loc>.

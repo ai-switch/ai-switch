@@ -1,7 +1,7 @@
 import type { TranslationKey } from "../../lib/i18n";
 
 export const OFFICIAL_SITE_URL = "https://ijry.github.io/ai-switch/";
-export const REPOSITORY_URL = "https://github.com/ijry/ai-switch";
+export const REPOSITORY_URL = "https://github.com/ai-switch/ai-switch";
 
 /**
  * Official QQ group. The invite link is short-lived by QQ's own design, so the

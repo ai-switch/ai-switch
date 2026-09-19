@@ -17,7 +17,7 @@
 - Desktop bundle targets are Windows `nsis`, macOS `dmg`, and Linux `deb` plus `appimage`.
 - Updater signing requires `TAURI_SIGNING_PRIVATE_KEY`; `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is optional.
 - If updater signing is not configured, release builds fail before publishing assets.
-- The updater endpoint remains `https://github.com/ijry/ai-switch/releases/latest/download/latest.json`.
+- The updater endpoint remains `https://github.com/ai-switch/ai-switch/releases/latest/download/latest.json`.
 - Existing local development commands keep working.
 - Do not overwrite the unrelated existing working tree modification in `src-tauri/Cargo.toml`.
 
@@ -45,7 +45,7 @@
 **Interfaces:**
 - Consumes: release asset directories named by updater platform, for example `release-assets/windows-x86_64`.
 - Produces: `latest.json` with `version`, `notes`, `pub_date`, and `platforms`.
-- CLI: `node scripts/create-updater-manifest.mjs --assets-dir release-assets --tag v0.1.0 --repo ijry/ai-switch --output release-assets/latest.json`
+- CLI: `node scripts/create-updater-manifest.mjs --assets-dir release-assets --tag v0.1.0 --repo ai-switch/ai-switch --output release-assets/latest.json`
 
 - [ ] **Step 1: Add the failing test file**
 
@@ -80,7 +80,7 @@ test("creates updater manifest from signed platform assets", async () => {
     await createManifest({
       assetsDir: root,
       tag: "v0.1.0",
-      repo: "ijry/ai-switch",
+      repo: "ai-switch/ai-switch",
       output,
       pubDate: "2026-07-17T00:00:00.000Z",
     });
@@ -92,7 +92,7 @@ test("creates updater manifest from signed platform assets", async () => {
     assert.equal(manifest.platforms["linux-x86_64"].signature, "linux-signature");
     assert.equal(
       manifest.platforms["windows-x86_64"].url,
-      "https://github.com/ijry/ai-switch/releases/download/v0.1.0/ai-switch_v0.1.0_windows-x86_64_setup.exe",
+      "https://github.com/ai-switch/ai-switch/releases/download/v0.1.0/ai-switch_v0.1.0_windows-x86_64_setup.exe",
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -112,7 +112,7 @@ test("fails when a platform directory has no signed updater asset", async () => 
         createManifest({
           assetsDir: root,
           tag: "v0.1.0",
-          repo: "ijry/ai-switch",
+          repo: "ai-switch/ai-switch",
           output: path.join(root, "latest.json"),
           pubDate: "2026-07-17T00:00:00.000Z",
         }),

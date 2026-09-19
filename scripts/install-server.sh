@@ -3,7 +3,7 @@ set -euo pipefail
 
 # One-click Linux installer for the latest standalone AI Switch release.
 # Override AI_SWITCH_VERSION (for example, v0.8.4) to install a specific tag.
-REPOSITORY="${AI_SWITCH_REPOSITORY:-ijry/ai-switch}"
+REPOSITORY="${AI_SWITCH_REPOSITORY:-ai-switch/ai-switch}"
 VERSION="${AI_SWITCH_VERSION:-}"
 INSTALL_DIR="/opt/ai-switch"
 ENV_FILE="/etc/ai-switch/server.env"

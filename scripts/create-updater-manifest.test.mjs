@@ -26,7 +26,7 @@ test("creates updater manifest from signed platform assets", async () => {
     await createManifest({
       assetsDir: root,
       tag: "v0.1.0",
-      repo: "ijry/ai-switch",
+      repo: "ai-switch/ai-switch",
       output,
       pubDate: "2026-07-17T00:00:00.000Z",
     });
@@ -38,7 +38,7 @@ test("creates updater manifest from signed platform assets", async () => {
     assert.equal(manifest.platforms["linux-x86_64"].signature, "linux-signature");
     assert.equal(
       manifest.platforms["windows-x86_64"].url,
-      "https://github.com/ijry/ai-switch/releases/download/v0.1.0/ai-switch-0.1.0-windows-x86_64-setup.exe",
+      "https://github.com/ai-switch/ai-switch/releases/download/v0.1.0/ai-switch-0.1.0-windows-x86_64-setup.exe",
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -61,7 +61,7 @@ test("includes release notes from a file", async () => {
     await createManifest({
       assetsDir: root,
       tag: "v0.1.0",
-      repo: "ijry/ai-switch",
+      repo: "ai-switch/ai-switch",
       output,
       notesFile,
     });
@@ -86,7 +86,7 @@ test("fails when a platform directory has no signed updater asset", async () => 
         createManifest({
           assetsDir: root,
           tag: "v0.1.0",
-          repo: "ijry/ai-switch",
+          repo: "ai-switch/ai-switch",
           output: path.join(root, "latest.json"),
           pubDate: "2026-07-17T00:00:00.000Z",
         }),
@@ -115,7 +115,7 @@ test("prefers macOS updater archive over signed installer image", async () => {
     await createManifest({
       assetsDir: root,
       tag: "v0.1.0",
-      repo: "ijry/ai-switch",
+      repo: "ai-switch/ai-switch",
       output,
       pubDate: "2026-07-17T00:00:00.000Z",
     });
@@ -124,7 +124,7 @@ test("prefers macOS updater archive over signed installer image", async () => {
     assert.equal(manifest.platforms["darwin-aarch64"].signature, "archive-signature");
     assert.equal(
       manifest.platforms["darwin-aarch64"].url,
-      "https://github.com/ijry/ai-switch/releases/download/v0.1.0/AI%20Switch.app.tar.gz",
+      "https://github.com/ai-switch/ai-switch/releases/download/v0.1.0/AI%20Switch.app.tar.gz",
     );
   } finally {
     await rm(root, { recursive: true, force: true });

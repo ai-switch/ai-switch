@@ -9,10 +9,10 @@ const isEn = computed(() => localeIndex.value === "en");
 // withBase only prepends base when the path starts with a slash.
 const link = (path: string) => withBase(`${isEn.value ? "/en" : ""}${path}.html`);
 
-const REPO = "https://github.com/ijry/ai-switch";
+const REPO = "https://github.com/ai-switch/ai-switch";
 const RELEASES = `${REPO}/releases/latest`;
 const LINUX_INSTALL_COMMAND =
-  'AI_SWITCH_PORT=19527 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ijry/ai-switch/main/scripts/install-server.sh)"';
+  'AI_SWITCH_PORT=19527 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ai-switch/ai-switch/main/scripts/install-server.sh)"';
 const SHOT =
   "https://github.com/user-attachments/assets/fbd3932e-29a7-4e3f-a980-e93fb093b643";
 

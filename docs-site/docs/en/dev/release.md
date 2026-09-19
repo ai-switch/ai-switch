@@ -122,7 +122,7 @@ Tauri's updater requires minisign signatures alongside the installers. The key i
 The matching public key is committed in `plugins.updater.pubkey` in `src-tauri/tauri.conf.json`, and the update endpoint points at:
 
 ```text
-https://github.com/ijry/ai-switch/releases/latest/download/latest.json
+https://github.com/ai-switch/ai-switch/releases/latest/download/latest.json
 ```
 
 `bundle.createUpdaterArtifacts: true` is what makes Tauri emit the updater artifacts and their `.sig` files during packaging.
@@ -220,7 +220,7 @@ A successful run attaches the following to the GitHub Release, in the order the 
 - **Per target:** `ai-switch-tsnet_<tag>_<platform>.zip` (Tailscale sidecar)
 - **macOS:** `ai-switch-updater-<version>-darwin-aarch64.app.tar.gz` and `ai-switch-updater-<version>-darwin-x86_64.app.tar.gz` (only the auto-updater downloads them)
 - **`latest.json`:** the Tauri updater manifest that drives desktop auto-updates
-- **Docker Hub:** `ijry/ai-switch:<version>`, `ijry/ai-switch:<major>.<minor>`, and `latest` for stable releases (prereleases never take `latest`)
+- **Docker Hub:** `ai-switch/ai-switch:<version>`, `ai-switch/ai-switch:<major>.<minor>`, and `latest` for stable releases (prereleases never take `latest`)
 
 The `.sig` files are not published as separate assets; their signatures live inside `latest.json`. The release body also opens with a download table pointing straight at the first three groups above.
 
@@ -238,7 +238,7 @@ Images receive three kinds of tags: the full version (for example `0.8.7`), `maj
 | --- | --- | --- |
 | `DOCKERHUB_USERNAME` | secret | Docker Hub username, or a bot account with push access to the organization |
 | `DOCKERHUB_TOKEN` | secret | Docker Hub access token with read/write permission |
-| `DOCKERHUB_REPOSITORY` | variable, optional | Image repository, defaults to `ijry/ai-switch` |
+| `DOCKERHUB_REPOSITORY` | variable, optional | Image repository, defaults to `ai-switch/ai-switch` |
 
 Create the repository on Docker Hub first and confirm the account can write to it. If the secrets are missing, `publish-image` fails with an explicit error; the GitHub Release is already published at that point, so add the secrets and rerun that job without rebuilding the installers.
 
@@ -323,7 +323,7 @@ Once both setups above are done and each channel has its first version landed:
 
 ```bash
 # macOS — same command on Apple Silicon and Intel; the cask picks the arch
-brew tap ijry/ai-switch
+brew tap ai-switch/ai-switch
 brew install --cask ai-switch
 ```
 

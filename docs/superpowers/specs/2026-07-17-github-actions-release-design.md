@@ -69,7 +69,7 @@ sidecar 二进制文件会在执行 `pnpm tauri:build` 前写入 `src-tauri/taur
 更新接口保持不变：
 
 ```text
-https://github.com/ijry/ai-switch/releases/latest/download/latest.json
+https://github.com/ai-switch/ai-switch/releases/latest/download/latest.json
 ```
 
 ## 签名

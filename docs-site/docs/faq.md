@@ -209,7 +209,7 @@ Windows、macOS、Linux 三平台，每次发布都由 CI 在三个平台上分�
 
 是。许可为 **MIT**，`Copyright (c) 2026 xyito`。
 
-源码仓库：<https://github.com/ijry/ai-switch>
+源码仓库：<https://github.com/ai-switch/ai-switch>
 
 MIT 意味着你可以自由使用、修改、分发，包括商用，只需保留版权与许可声明。第三方依赖的许可信息见仓库的 `LICENSES/` 目录与 `THIRD_PARTY_NOTICES.md`。
 

@@ -44,7 +44,7 @@ test("puts a labelled download table above the changelog", async () => {
     await createReleaseBody({
       assetsDir: root,
       tag: "v0.8.0",
-      repo: "ijry/ai-switch",
+      repo: "ai-switch/ai-switch",
       notesFile: path.join(root, "release-notes.md"),
       output,
     });
@@ -61,7 +61,7 @@ test("puts a labelled download table above the changelog", async () => {
     );
     assert.match(
       rows[0],
-      /\[ai-switch-0\.8\.0-windows-x86_64-setup\.exe\]\(https:\/\/github\.com\/ijry\/ai-switch\/releases\/download\/v0\.8\.0\/ai-switch-0\.8\.0-windows-x86_64-setup\.exe\)/,
+      /\[ai-switch-0\.8\.0-windows-x86_64-setup\.exe\]\(https:\/\/github\.com\/ai-switch\/ai-switch\/releases\/download\/v0\.8\.0\/ai-switch-0\.8\.0-windows-x86_64-setup\.exe\)/,
     );
     // The AppImage and the .deb share the Linux row; neither is the "main" one.
     assert.match(rows[2], /AppImage\).+·.+\.deb\)/);
@@ -71,7 +71,7 @@ test("puts a labelled download table above the changelog", async () => {
     assert.match(body, /Standalone server:.+\[Linux \(ARM64\)\]/);
     assert.match(
       body,
-      /AI_SWITCH_PORT=19527 \/bin\/bash -c "\$\(curl -fsSL https:\/\/raw\.githubusercontent\.com\/ijry\/ai-switch\/main\/scripts\/install-server\.sh\)"/,
+      /AI_SWITCH_PORT=19527 \/bin\/bash -c "\$\(curl -fsSL https:\/\/raw\.githubusercontent\.com\/ai-switch\/ai-switch\/main\/scripts\/install-server\.sh\)"/,
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -161,7 +161,7 @@ test("shows the one-click installer when only the Linux ARM64 server is availabl
     await createReleaseBody({
       assetsDir: root,
       tag: "v0.8.0",
-      repo: "ijry/ai-switch",
+      repo: "ai-switch/ai-switch",
       notesFile: path.join(root, "release-notes.md"),
       output,
     });
@@ -182,7 +182,7 @@ test("keeps the tag message intact so the client can still split it", async () =
     await createReleaseBody({
       assetsDir: root,
       tag: "v0.8.0",
-      repo: "ijry/ai-switch",
+      repo: "ai-switch/ai-switch",
       notesFile: path.join(root, "release-notes.md"),
       output,
     });
@@ -203,7 +203,7 @@ test("falls back to the changelog alone when a build produced no installer", asy
     const body = await createReleaseBody({
       assetsDir: root,
       tag: "v0.8.0",
-      repo: "ijry/ai-switch",
+      repo: "ai-switch/ai-switch",
       notesFile: path.join(root, "release-notes.md"),
       output,
     });

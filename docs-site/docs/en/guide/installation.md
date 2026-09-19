@@ -9,7 +9,7 @@ AI Switch desktop builds come from GitHub Releases, with prebuilt packages for a
 
 ## Download
 
-Open the [latest release page](https://github.com/ijry/ai-switch/releases/latest). The release body starts with a download table — one row per platform, with Apple Silicon and Intel macOS on separate rows, so click the link for your system.
+Open the [latest release page](https://github.com/ai-switch/ai-switch/releases/latest). The release body starts with a download table — one row per platform, with Apple Silicon and Intel macOS on separate rows, so click the link for your system.
 
 If you would rather scan the asset list: the desktop installers are named `ai-switch-<version>-<platform>` (for example `ai-switch-0.8.0-windows-x86_64-setup.exe`) and sort to the top of it. Below them come the standalone server, the Tailscale sidecar, and the `ai-switch-updater-*` archives plus `latest.json` that only the built-in updater needs.
 
@@ -55,7 +55,7 @@ AI Switch is a Tauri app and depends on the system WebKitGTK. If your distributi
 If you do not need the desktop shell and only want the standalone web service on an x86_64 or aarch64 Linux server, use the one-click installer; it detects the current architecture automatically:
 
 ```bash
-AI_SWITCH_PORT=19527 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ijry/ai-switch/main/scripts/install-server.sh)"
+AI_SWITCH_PORT=19527 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ai-switch/ai-switch/main/scripts/install-server.sh)"
 ```
 
 Replace `19527` with the port you want. The installer creates the system user and service, starts `ai-switch-server.service` when finished, and prints the panel URL, service status, and how to read the access token. See the [standalone server guide](/en/deploy/standalone-server) for details.
@@ -73,7 +73,7 @@ The first time you open AI Switch on macOS, you will most likely hit one of thes
 
 AI Switch's macOS builds are **not Apple code-signed or notarized**. Notarization requires a paid Apple Developer Program account, which this project does not currently have configured. Gatekeeper blocks unsigned apps, and "damaged" is one of the messages it uses when it does.
 
-Which also means: **Apple has not scanned this package for you.** Whether to bypass the block is a trust decision on your side, not just a technical step. To keep the risk down, download only from the [official GitHub Releases page](https://github.com/ijry/ai-switch/releases/latest) — never a third-party mirror. To avoid the issue entirely, [build from source](/en/dev/local-setup).
+Which also means: **Apple has not scanned this package for you.** Whether to bypass the block is a trust decision on your side, not just a technical step. To keep the risk down, download only from the [official GitHub Releases page](https://github.com/ai-switch/ai-switch/releases/latest) — never a third-party mirror. To avoid the issue entirely, [build from source](/en/dev/local-setup).
 :::
 
 ### Option 1: "Open Anyway" in System Settings (recommended)
@@ -115,7 +115,7 @@ Most macOS unlocking guides online were written years ago. Two of their standard
 
 The Releases page **does not currently publish SHA-256 checksums**, so there is no official hash to compare against. What you can do:
 
-- **Check where it came from.** The URL must be under `github.com/ijry/ai-switch/releases/…` and the filename must be `ai-switch-<version>-darwin-aarch64.dmg` or `ai-switch-<version>-darwin-x86_64.dmg`.
+- **Check where it came from.** The URL must be under `github.com/ai-switch/ai-switch/releases/…` and the filename must be `ai-switch-<version>-darwin-aarch64.dmg` or `ai-switch-<version>-darwin-x86_64.dmg`.
 - **The `.app.tar.gz` carries a verifiable minisign signature.** `ai-switch-updater-<version>-darwin-<arch>.app.tar.gz` ships with a matching `.sig`, and the public key is in the repo at `src-tauri/tauri.conf.json` (`plugins.updater.pubkey`). Note that **the `.dmg` has no `.sig`** — that signature exists for the auto-updater and does not cover the dmg installer.
 
 Neither substitutes for Apple notarization: notarization means Apple scanned the contents, whereas a signature only proves the file came from whoever holds that private key and was not swapped in transit.

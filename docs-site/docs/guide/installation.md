@@ -9,7 +9,7 @@ AI Switch 桌面端从 GitHub Releases 获取，三个平台都有预构建的�
 
 ## 下载
 
-打开 [Releases 页面](https://github.com/ijry/ai-switch/releases/latest)，正文顶部有一张下载表格，每个平台各占一行（macOS 的 Apple Silicon 和 Intel 分开两行），点对应你系统的那个链接就行。
+打开 [Releases 页面](https://github.com/ai-switch/ai-switch/releases/latest)，正文顶部有一张下载表格，每个平台各占一行（macOS 的 Apple Silicon 和 Intel 分开两行），点对应你系统的那个链接就行。
 
 想直接翻资产列表也可以：桌面端安装包命名为 `ai-switch-<版本>-<平台>`（如 `ai-switch-0.8.0-windows-x86_64-setup.exe`），排在列表最前面。往后是独立服务器、Tailscale sidecar，以及自动更新才会用到的 `ai-switch-updater-*` 和 `latest.json`。
 
@@ -55,7 +55,7 @@ AI Switch 是 Tauri 应用，依赖系统的 WebKitGTK。发行版没预装的�
 如果不需要桌面端，只想在 Linux x86_64 或 aarch64 服务器上运行独立 Web 服务，可以用一键安装命令；脚本会自动识别当前架构：
 
 ```bash
-AI_SWITCH_PORT=19527 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ijry/ai-switch/main/scripts/install-server.sh)"
+AI_SWITCH_PORT=19527 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ai-switch/ai-switch/main/scripts/install-server.sh)"
 ```
 
 把 `19527` 换成需要的端口即可。安装器会创建系统用户和服务，安装完成后自动启动 `ai-switch-server.service`，并输出面板地址、服务状态和读取访问令牌的命令。详细说明见[独立服务器](/deploy/standalone-server)。
@@ -73,7 +73,7 @@ AI_SWITCH_PORT=19527 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.co
 
 原因是 AI Switch 的 macOS 包**没有经过 Apple 代码签名和公证（notarization）**。公证需要付费的 Apple Developer Program 账号，本项目目前没有配置。Gatekeeper 对未签名应用一律拦下，而「已损坏」是它在这种情况下会给出的措辞之一。
 
-这也意味着：**Apple 没有替你扫描过这个包**。是否绕过这道拦截，是你自己的信任判断，不只是一个技术步骤。要降低风险，只从 [GitHub Releases 官方页面](https://github.com/ijry/ai-switch/releases/latest)下载，别用第三方转载的包。想彻底避开这个问题，就[从源码构建](/dev/local-setup)。
+这也意味着：**Apple 没有替你扫描过这个包**。是否绕过这道拦截，是你自己的信任判断，不只是一个技术步骤。要降低风险，只从 [GitHub Releases 官方页面](https://github.com/ai-switch/ai-switch/releases/latest)下载，别用第三方转载的包。想彻底避开这个问题，就[从源码构建](/dev/local-setup)。
 :::
 
 ### 方法一：系统设置里「仍要打开」（推荐）
@@ -115,7 +115,7 @@ xattr -dr com.apple.quarantine "/Applications/AI Switch.app"
 
 Release 页面目前**不公布 SHA-256 校验值**，所以没法拿官方哈希来核对。能做的是这两件事：
 
-- **确认下载来源**。地址必须是 `github.com/ijry/ai-switch/releases/…`，文件名符合 `ai-switch-<版本>-darwin-aarch64.dmg` 或 `ai-switch-<版本>-darwin-x86_64.dmg`。
+- **确认下载来源**。地址必须是 `github.com/ai-switch/ai-switch/releases/…`，文件名符合 `ai-switch-<版本>-darwin-aarch64.dmg` 或 `ai-switch-<版本>-darwin-x86_64.dmg`。
 - **`.app.tar.gz` 带 minisign 签名可验**。资产列表里 `ai-switch-updater-<版本>-darwin-<架构>.app.tar.gz` 有配套的 `.sig` 文件，公钥在仓库的 `src-tauri/tauri.conf.json` 里（`plugins.updater.pubkey`）。注意 **`.dmg` 没有 `.sig`** —— 这个签名是给自动更新用的，不覆盖 dmg 安装包。
 
 这些都替代不了 Apple 公证：公证的价值在于 Apple 扫描过内容，而签名只能证明文件出自持有该私钥的一方、传输途中没被换掉。

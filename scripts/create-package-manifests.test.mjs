@@ -14,7 +14,7 @@ function asset(name, digest = null) {
   return {
     name,
     digest,
-    browser_download_url: `https://github.com/ijry/ai-switch/releases/download/v0.8.0/${name}`,
+    browser_download_url: `https://github.com/ai-switch/ai-switch/releases/download/v0.8.0/${name}`,
   };
 }
 
@@ -61,7 +61,7 @@ const DUAL_ARCH_ASSETS = [
   "latest.json",
 ].map((name) => asset(name));
 
-const DMG_BASE = "https://github.com/ijry/ai-switch/releases/download/v0.9.0/ai-switch-0.9.0-darwin";
+const DMG_BASE = "https://github.com/ai-switch/ai-switch/releases/download/v0.9.0/ai-switch-0.9.0-darwin";
 
 // Stanza order per the Cask Cookbook, which brew style's Cask/StanzaOrder cop
 // enforces. `arch` leads its own group ahead of `version` when it is present.
@@ -186,10 +186,10 @@ test("derives the package version and prerelease flag from the tag", () => {
 test("interpolates every copy of the version the asset name repeats", () => {
   assert.equal(
     interpolateVersion(
-      "https://github.com/ijry/ai-switch/releases/download/v0.8.0/ai-switch_v0.8.0_darwin-aarch64_AI-Switch_0.8.0_aarch64.dmg",
+      "https://github.com/ai-switch/ai-switch/releases/download/v0.8.0/ai-switch_v0.8.0_darwin-aarch64_AI-Switch_0.8.0_aarch64.dmg",
       "0.8.0",
     ),
-    "https://github.com/ijry/ai-switch/releases/download/v#{version}/ai-switch_v#{version}_darwin-aarch64_AI-Switch_#{version}_aarch64.dmg",
+    "https://github.com/ai-switch/ai-switch/releases/download/v#{version}/ai-switch_v#{version}_darwin-aarch64_AI-Switch_#{version}_aarch64.dmg",
   );
 });
 
@@ -197,8 +197,8 @@ test("renders a cask whose stanzas match the release it was built from", () => {
   const cask = renderHomebrewCask({
     version: "0.8.0",
     sha256: "8857d20e9990b38d43654c82b4dd5f9fb1c089507623b171d1c4ed2f40d72bd5",
-    url: "https://github.com/ijry/ai-switch/releases/download/v0.8.0/ai-switch-0.8.0-darwin-aarch64.dmg",
-    repo: "ijry/ai-switch",
+    url: "https://github.com/ai-switch/ai-switch/releases/download/v0.8.0/ai-switch-0.8.0-darwin-aarch64.dmg",
+    repo: "ai-switch/ai-switch",
   });
 
   assert.match(cask, /^cask "ai-switch" do$/m);
@@ -206,9 +206,9 @@ test("renders a cask whose stanzas match the release it was built from", () => {
   assert.match(cask, /^ {2}sha256 "8857d20e[0-9a-f]{56}"$/m);
   assert.match(
     cask,
-    /^ {2}url "https:\/\/github\.com\/ijry\/ai-switch\/releases\/download\/v#\{version\}\/ai-switch-#\{version\}-darwin-aarch64\.dmg",$/m,
+    /^ {2}url "https:\/\/github\.com\/ai-switch\/ai-switch\/releases\/download\/v#\{version\}\/ai-switch-#\{version\}-darwin-aarch64\.dmg",$/m,
   );
-  assert.match(cask, /^ {6}verified: "github\.com\/ijry\/ai-switch\/"$/m);
+  assert.match(cask, /^ {6}verified: "github\.com\/ai-switch\/ai-switch\/"$/m);
   assert.match(cask, /^ {2}app "AI Switch\.app"$/m);
   // Only Apple Silicon has a dmg in this release, so an Intel Mac must be told
   // rather than handed an arm64 bundle. The bare :macos is what brew style's
@@ -229,7 +229,7 @@ test("renders one arch-templated cask when both macOS dmgs are published", () =>
     sha256: "a".repeat(64),
     url: `${DMG_BASE}-aarch64.dmg`,
     intel: { sha256: "b".repeat(64), url: `${DMG_BASE}-x86_64.dmg` },
-    repo: "ijry/ai-switch",
+    repo: "ai-switch/ai-switch",
   });
 
   assert.match(cask, /^ {2}arch arm: "aarch64", intel: "x86_64"$/m);
@@ -239,9 +239,9 @@ test("renders one arch-templated cask when both macOS dmgs are published", () =>
   // One url stanza for both: #{arch} resolves to the token for the running Mac.
   assert.match(
     cask,
-    /^ {2}url "https:\/\/github\.com\/ijry\/ai-switch\/releases\/download\/v#\{version\}\/ai-switch-#\{version\}-darwin-#\{arch\}\.dmg",$/m,
+    /^ {2}url "https:\/\/github\.com\/ai-switch\/ai-switch\/releases\/download\/v#\{version\}\/ai-switch-#\{version\}-darwin-#\{arch\}\.dmg",$/m,
   );
-  assert.match(cask, /^ {6}verified: "github\.com\/ijry\/ai-switch\/"$/m);
+  assert.match(cask, /^ {6}verified: "github\.com\/ai-switch\/ai-switch\/"$/m);
   // An Intel Mac now has something to install, so the refusal has to go with it.
   assert.match(cask, /^ {2}depends_on :macos$/m);
   assert.doesNotMatch(cask, /arch: :arm64/);
@@ -256,12 +256,12 @@ test("refuses to guess a URL template when the two dmgs are not named alike", ()
       renderHomebrewCask({
         version: "0.9.0",
         sha256: "a".repeat(64),
-        url: "https://github.com/ijry/ai-switch/releases/download/v0.9.0/ai-switch_v0.9.0_darwin-aarch64_AI-Switch_0.9.0_aarch64.dmg",
+        url: "https://github.com/ai-switch/ai-switch/releases/download/v0.9.0/ai-switch_v0.9.0_darwin-aarch64_AI-Switch_0.9.0_aarch64.dmg",
         intel: {
           sha256: "b".repeat(64),
-          url: "https://github.com/ijry/ai-switch/releases/download/v0.9.0/ai-switch_v0.9.0_darwin-x86_64_AI-Switch_0.9.0_x64.dmg",
+          url: "https://github.com/ai-switch/ai-switch/releases/download/v0.9.0/ai-switch_v0.9.0_darwin-x86_64_AI-Switch_0.9.0_x64.dmg",
         },
-        repo: "ijry/ai-switch",
+        repo: "ai-switch/ai-switch",
       }),
     /do not share one arch-templated URL/,
   );
@@ -271,8 +271,8 @@ test("keeps the cask stanzas in the order brew style expects", () => {
   const cask = renderHomebrewCask({
     version: "0.8.0",
     sha256: "a".repeat(64),
-    url: "https://github.com/ijry/ai-switch/releases/download/v0.8.0/ai-switch-0.8.0-darwin-aarch64.dmg",
-    repo: "ijry/ai-switch",
+    url: "https://github.com/ai-switch/ai-switch/releases/download/v0.8.0/ai-switch-0.8.0-darwin-aarch64.dmg",
+    repo: "ai-switch/ai-switch",
   });
 
   assertStanzaOrder(cask, CASK_STANZA_ORDER);
@@ -284,7 +284,7 @@ test("keeps the dual-arch cask stanzas in order too, with arch leading", () => {
     sha256: "a".repeat(64),
     url: `${DMG_BASE}-aarch64.dmg`,
     intel: { sha256: "b".repeat(64), url: `${DMG_BASE}-x86_64.dmg` },
-    repo: "ijry/ai-switch",
+    repo: "ai-switch/ai-switch",
   });
 
   assertStanzaOrder(cask, ["arch ", ...CASK_STANZA_ORDER]);
@@ -294,8 +294,8 @@ test("keeps the cask description inside the length Homebrew audits for", () => {
   const cask = renderHomebrewCask({
     version: "0.8.0",
     sha256: "a".repeat(64),
-    url: "https://github.com/ijry/ai-switch/releases/download/v0.8.0/ai-switch-0.8.0-darwin-aarch64.dmg",
-    repo: "ijry/ai-switch",
+    url: "https://github.com/ai-switch/ai-switch/releases/download/v0.8.0/ai-switch-0.8.0-darwin-aarch64.dmg",
+    repo: "ai-switch/ai-switch",
   });
 
   const desc = /^ {2}desc "(.+)"$/m.exec(cask)?.[1];
@@ -345,7 +345,7 @@ test("writes the cask and a summary the workflow can read back", async () => {
     const summary = await createPackageManifests({
       releaseFile,
       tag: "v0.8.0",
-      repo: "ijry/ai-switch",
+      repo: "ai-switch/ai-switch",
       outDir,
       fetchImpl: () => {
         throw new Error("must not download when every asset reports a digest");
@@ -395,7 +395,7 @@ test("carries both macOS checksums from the release into the cask", async () => 
     const summary = await createPackageManifests({
       releaseFile,
       tag: "v0.9.0",
-      repo: "ijry/ai-switch",
+      repo: "ai-switch/ai-switch",
       outDir,
       fetchImpl: () => {
         throw new Error("must not download when every asset reports a digest");

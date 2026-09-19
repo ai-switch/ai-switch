@@ -1,4 +1,4 @@
-module github.com/ijry/ai-switch/sidecar/ai-switch-tsnet
+module github.com/ai-switch/ai-switch/sidecar/ai-switch-tsnet
 
 go 1.24.0
 

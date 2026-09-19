@@ -230,7 +230,7 @@ export function UpdatesScreen() {
             <div>
               <p className="text-[13px] font-semibold text-stone-950">{t("updates.releaseSource")}</p>
               <p className="mt-1 break-all text-[12px] text-stone-500">
-                https://github.com/ijry/ai-switch/releases/latest/download/latest.json
+                https://github.com/ai-switch/ai-switch/releases/latest/download/latest.json
               </p>
             </div>
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] leading-5 text-amber-900">

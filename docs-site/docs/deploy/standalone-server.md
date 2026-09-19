@@ -143,7 +143,7 @@ export AI_SWITCH_ALLOW_INSECURE_HTTP=1
 Linux x86_64 / aarch64 服务器可以直接运行下面的命令安装最新 Release；安装器会自动识别当前架构：
 
 ```bash
-AI_SWITCH_PORT=19527 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ijry/ai-switch/main/scripts/install-server.sh)"
+AI_SWITCH_PORT=19527 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ai-switch/ai-switch/main/scripts/install-server.sh)"
 ```
 
 把 `AI_SWITCH_PORT=19527` 换成需要的端口；默认监听 `127.0.0.1`，需要外部访问时可再设置 `AI_SWITCH_HOST`。安装器会创建 `ai-switch` 系统用户，将程序安装到 `/opt/ai-switch`，把令牌和端口持久化到 `/etc/ai-switch/server.env`，并安装、启用、启动 `ai-switch-server.service`。安装完成后会输出面板地址、服务状态和读取访问令牌的命令。升级前会先停止旧服务，避免替换二进制时出现 `Text file busy`。

@@ -122,7 +122,7 @@ Tauri 的更新器要求安装包附带 minisign 签名，签名密钥通过仓�
 对应的公钥硬编码在 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`，更新端点指向：
 
 ```text
-https://github.com/ijry/ai-switch/releases/latest/download/latest.json
+https://github.com/ai-switch/ai-switch/releases/latest/download/latest.json
 ```
 
 `bundle.createUpdaterArtifacts: true` 让 Tauri 在打包时额外产出更新器资源与 `.sig` 签名文件。
@@ -220,7 +220,7 @@ git tag -d v0.6.8
 - **每个目标**：`ai-switch-tsnet_<tag>_<平台>.zip`（Tailscale sidecar）
 - **macOS**：`ai-switch-updater-<版本>-darwin-aarch64.app.tar.gz` 与 `ai-switch-updater-<版本>-darwin-x86_64.app.tar.gz`（只有自动更新会下载）
 - **`latest.json`**：Tauri 更新器清单，桌面端自动更新的数据源
-- **Docker Hub**：`ijry/ai-switch:<版本>`、`ijry/ai-switch:<major>.<minor>`，正式版另有 `latest`（预发布不打 `latest`）
+- **Docker Hub**：`ai-switch/ai-switch:<版本>`、`ai-switch/ai-switch:<major>.<minor>`，正式版另有 `latest`（预发布不打 `latest`）
 
 `.sig` 不作为独立资产发布，签名内联在 `latest.json` 里。Release 正文顶部另有一张下载表，直接指向上面前三类文件。
 
@@ -238,7 +238,7 @@ git tag -d v0.6.8
 | --- | --- | --- |
 | `DOCKERHUB_USERNAME` | secret | Docker Hub 用户名或组织内有推送权限的机器人账号 |
 | `DOCKERHUB_TOKEN` | secret | Docker Hub Access Token，需要读写权限 |
-| `DOCKERHUB_REPOSITORY` | variable，可选 | 镜像仓库，默认 `ijry/ai-switch` |
+| `DOCKERHUB_REPOSITORY` | variable，可选 | 镜像仓库，默认 `ai-switch/ai-switch` |
 
 先在 Docker Hub 创建对应仓库，并确认该账号对仓库有写权限。缺少 secrets 时，`publish-image` 作业会明确失败；此时 GitHub Release 已经发布，可以补齐 secrets 后重新运行该 job，不需要重新构建安装包。
 
@@ -323,7 +323,7 @@ Tauri 的 NSIS 安装包默认是 `currentUser` 模式，不需要提权；`Inst
 
 ```bash
 # macOS（Apple Silicon 与 Intel 同一条命令，cask 自己认架构）
-brew tap ijry/ai-switch
+brew tap ai-switch/ai-switch
 brew install --cask ai-switch
 ```
 
