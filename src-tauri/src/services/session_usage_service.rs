@@ -663,22 +663,57 @@ fn parse_codex_file(path: &Path) -> ParsedFile {
             continue;
         }
 
+        // A rollout without a recorded model still represents real spend;
+        // attribute it to a placeholder so it appears as unpriced rather than
+        // vanishing from the totals.
+        let entry_model = model.clone().unwrap_or_else(|| "unknown".to_string());
+        let response_id = pending_response_id.take();
+        let timestamp_ms = entry_timestamp_ms(&entry);
         entries.push(UsageEntry {
             provider: "codex",
-            // A rollout without a recorded model still represents real spend;
-            // attribute it to a placeholder so it appears as unpriced rather
-            // than vanishing from the totals.
-            model: model.clone().unwrap_or_else(|| "unknown".to_string()),
-            // Codex has no cross-file message id; the response id below is the
-            // merge key, not a dedup key.
-            dedup_key: None,
-            response_id: pending_response_id.take(),
-            timestamp_ms: entry_timestamp_ms(&entry),
+            // Codex has no cross-file message id, but a resumed thread can replay
+            // an earlier turn's `token_count` into a second file (the fork case is
+            // already dropped above; a plain resume that spawns a new file is
+            // not). The upstream response id identifies one response exactly, so
+            // it doubles as the cross-file dedup key when present; when it is
+            // absent, an exact fingerprint stands in — a replay copies the same
+            // model, token counts and timestamp verbatim, while two genuinely
+            // distinct turns never share an exact-millisecond timestamp with
+            // identical tokens.
+            dedup_key: codex_dedup_key(response_id.as_deref(), &entry_model, &usage, timestamp_ms),
+            model: entry_model,
+            response_id,
+            timestamp_ms,
             usage,
         });
     }
 
     ParsedFile { entries }
+}
+
+/// Cross-file dedup key for one Codex turn.
+///
+/// A resumed thread can write the same `token_count` event into a second file.
+/// The upstream response id names one response exactly, so it is the key when
+/// present. Without it, a fingerprint of the model, every token counter and the
+/// exact millisecond timestamp stands in: a replay is a verbatim copy of all
+/// four, and two distinct turns do not collide on an exact timestamp with
+/// identical token counts. `None` — no id and no timestamp — cannot be
+/// deduplicated, so the turn is kept (under-counting is the wrong direction).
+fn codex_dedup_key(
+    response_id: Option<&str>,
+    model: &str,
+    usage: &TokenUsage,
+    timestamp_ms: Option<i64>,
+) -> Option<String> {
+    if let Some(id) = response_id.map(str::trim).filter(|id| !id.is_empty()) {
+        return Some(format!("codex:id:{id}"));
+    }
+    let timestamp = timestamp_ms?;
+    Some(format!(
+        "codex:fp:{model}:{}:{}:{}:{}:{timestamp}",
+        usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, usage.cache_write_tokens
+    ))
 }
 
 /// True when a rollout opens with its parent thread's history replayed.
@@ -1113,6 +1148,95 @@ mod tests {
         );
 
         assert_eq!(stats.totals.request_count, 1);
+    }
+
+    /// A resumed Codex thread can replay an earlier turn's `token_count` into a
+    /// second file. With no cross-file id these turns used to be counted twice;
+    /// the response id (or an exact fingerprint) now deduplicates them.
+    #[test]
+    fn codex_turns_are_deduplicated_across_files_by_response_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = write_jsonl(
+            dir.path(),
+            "a.jsonl",
+            &[
+                r#"{"timestamp":"2026-08-19T03:41:50.476Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#,
+                r#"{"timestamp":"2026-08-19T03:41:52.000Z","type":"response_item","payload":{"type":"reasoning","id":"rs_shared-uuid"}}"#,
+                &codex_token_count("2026-08-19T03:42:00.000Z", 100, 0, 10),
+            ],
+        );
+        let second = write_jsonl(
+            dir.path(),
+            "b.jsonl",
+            &[
+                r#"{"timestamp":"2026-08-19T03:41:50.476Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#,
+                r#"{"timestamp":"2026-08-19T03:41:52.000Z","type":"response_item","payload":{"type":"reasoning","id":"rs_shared-uuid"}}"#,
+                &codex_token_count("2026-08-19T03:42:00.000Z", 100, 0, 10),
+            ],
+        );
+
+        let stats = aggregate(
+            &[(&first, Provider::Codex), (&second, Provider::Codex)],
+            TimeWindow::default(),
+        );
+
+        assert_eq!(
+            stats.totals.request_count, 1,
+            "the same response id in two files must be counted once"
+        );
+        assert_eq!(stats.totals.input_tokens, 100);
+    }
+
+    /// Without a response id, an exact fingerprint (model + tokens + millisecond
+    /// timestamp) still collapses a verbatim replay across files.
+    #[test]
+    fn codex_turns_without_id_deduplicate_on_an_exact_fingerprint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let make = |name: &str| {
+            write_jsonl(
+                dir.path(),
+                name,
+                &[
+                    r#"{"timestamp":"2026-08-19T03:41:50.476Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#,
+                    &codex_token_count("2026-08-19T03:42:00.000Z", 100, 0, 10),
+                ],
+            )
+        };
+        let first = make("a.jsonl");
+        let second = make("b.jsonl");
+
+        let stats = aggregate(
+            &[(&first, Provider::Codex), (&second, Provider::Codex)],
+            TimeWindow::default(),
+        );
+
+        assert_eq!(
+            stats.totals.request_count, 1,
+            "a verbatim replay with no id must dedup on its fingerprint"
+        );
+    }
+
+    /// Two genuinely distinct turns that happen to share a model must not be
+    /// folded together: different timestamps keep their fingerprints apart.
+    #[test]
+    fn codex_distinct_turns_are_not_merged_by_fingerprint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_jsonl(
+            dir.path(),
+            "rollout.jsonl",
+            &[
+                r#"{"timestamp":"2026-08-19T03:41:50.476Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#,
+                &codex_token_count("2026-08-19T03:42:00.000Z", 100, 0, 10),
+                &codex_token_count("2026-08-19T03:43:00.000Z", 300, 0, 30),
+            ],
+        );
+
+        let stats = aggregate_codex(&path);
+
+        assert_eq!(
+            stats.totals.request_count, 2,
+            "distinct-timestamp turns must both count"
+        );
     }
 
     #[test]

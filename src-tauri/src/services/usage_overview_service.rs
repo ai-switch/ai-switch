@@ -499,8 +499,19 @@ pub fn group_all(rows: &[UsageOverviewRow]) -> UsageOverviewGroups {
     }
 }
 
+/// Grouping key for a row's model.
+///
+/// The two sides spell the same model differently: a transcript records what
+/// the CLI used (`claude-opus-4-8`), while a proxy-only row carries the
+/// account's `upstream_model`/`requested_model`, which may be prefixed, mapped,
+/// or suffixed (`anthropic/claude-opus-4-8`, `claude-opus-4-8[1m]`). Grouping on
+/// the raw string splits one model into two rows. Normalizing to the billable
+/// model id — the same key the price table uses — collapses them, and only the
+/// grouping/trend keys use it: `row.model` still shows the original name in the
+/// request list. An unbillable or unrecognized id (e.g. a placeholder) keeps its
+/// trimmed original so it still appears rather than folding into one bucket.
 fn model_key(row: &UsageOverviewRow) -> String {
-    row.model.clone()
+    model_pricing::normalize_model_id(&row.model).unwrap_or_else(|| row.model.trim().to_string())
 }
 
 fn platform_key(row: &UsageOverviewRow) -> String {
@@ -1167,6 +1178,71 @@ mod tests {
         assert_eq!(groups.by_account[0].key, "未经代理");
         assert_eq!(groups.by_account[0].totals.request_count, 2);
         assert_eq!(groups.by_account[0].totals.cost_micros, 5_000);
+    }
+
+    /// The transcript side records the model the CLI used, while a proxy-only
+    /// row carries the account's upstream/mapped name — often prefixed or
+    /// suffixed. Grouping must fold those into one model row, or the same model
+    /// reads as two lines (the "duplicate" the user reported).
+    #[test]
+    fn model_grouping_folds_prefixed_and_suffixed_names_of_one_model() {
+        let rows = vec![
+            row_with(
+                UsageRowSource::Matched,
+                "claude",
+                "claude-opus-4-8",
+                Some("A"),
+                1_000,
+            ),
+            row_with(
+                UsageRowSource::ProxyOnly,
+                "claude",
+                "anthropic/claude-opus-4-8",
+                Some("B"),
+                2_000,
+            ),
+            row_with(
+                UsageRowSource::SessionOnly,
+                "claude",
+                "claude-opus-4-8[1m]",
+                None,
+                3_000,
+            ),
+        ];
+
+        let groups = group_all(&rows);
+
+        assert_eq!(
+            groups.by_model.len(),
+            1,
+            "one model must not split across name spellings: {:?}",
+            groups.by_model
+        );
+        assert_eq!(groups.by_model[0].key, "claude-opus-4-8");
+        assert_eq!(groups.by_model[0].totals.request_count, 3);
+        assert_eq!(groups.by_model[0].totals.cost_micros, 6_000);
+    }
+
+    /// An unbillable/unrecognized model id has no normalized form, so it must
+    /// keep its own (trimmed) name rather than folding every such row into one
+    /// bucket.
+    #[test]
+    fn model_grouping_keeps_unrecognized_ids_distinct() {
+        let rows = vec![
+            row_with(UsageRowSource::ProxyOnly, "codex", "unknown", Some("A"), 1),
+            row_with(
+                UsageRowSource::ProxyOnly,
+                "codex",
+                "  spaced  ",
+                Some("B"),
+                1,
+            ),
+        ];
+
+        let groups = group_all(&rows);
+        let keys: Vec<&str> = groups.by_model.iter().map(|row| row.key.as_str()).collect();
+        assert!(keys.contains(&"unknown"), "keys={keys:?}");
+        assert!(keys.contains(&"spaced"), "keys={keys:?}");
     }
 
     #[test]
