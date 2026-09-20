@@ -768,7 +768,7 @@ impl RoutePoolRepository {
             "SELECT a.id, a.display_name, a.status, a.route_priority, a.max_concurrency
              FROM route_pool_members rpm
              INNER JOIN route_credentials a ON a.id = rpm.route_credential_id
-             WHERE rpm.group_id = ? AND a.archived_at IS NULL
+             WHERE rpm.group_id = ?
              ORDER BY a.route_priority ASC, rpm.sort_order ASC, rpm.created_at ASC",
         )
         .bind(group_id)
@@ -1438,29 +1438,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn member_accounts_excludes_archived_but_membership_ids_are_preserved() {
+    async fn member_accounts_route_by_group_membership_regardless_of_archived_flag() {
+        // 甲-1: group membership is the single source of truth for routing.
+        // The `archived_at` audit marker no longer removes an account from its
+        // active group's routable members, so a stale marker cannot silently
+        // starve a group that the user explicitly activated.
         let pool = crate::database::create_memory_pool().await.unwrap();
         crate::database::run_migrations(&pool).await.unwrap();
-        let archived = create_credential(&pool, "codex", "Archived").await;
+        let flagged = create_credential(&pool, "codex", "Flagged").await;
         let active = create_credential(&pool, "codex", "Active").await;
-        RoutePoolRepository::replace_members(&pool, "codex", &[archived.clone(), active.clone()])
+        RoutePoolRepository::replace_members(&pool, "codex", &[flagged.clone(), active.clone()])
             .await
             .unwrap();
-        RouteCredentialRepository::set_archived(&pool, std::slice::from_ref(&archived), true)
+        // A leftover audit marker must not change routing anymore.
+        RouteCredentialRepository::set_archived(&pool, std::slice::from_ref(&flagged), true)
             .await
             .unwrap();
 
         let runtime_members = RoutePoolRepository::member_accounts(&pool, "codex")
             .await
             .unwrap();
-        assert_eq!(runtime_members.len(), 1);
-        assert_eq!(runtime_members[0].id, active);
-        assert_eq!(
-            RoutePoolRepository::list_member_ids(&pool, "codex")
-                .await
-                .unwrap(),
-            vec![archived, runtime_members[0].id.clone()]
-        );
+        let runtime_ids: Vec<String> = runtime_members.iter().map(|m| m.id.clone()).collect();
+        assert!(runtime_ids.contains(&flagged));
+        assert!(runtime_ids.contains(&active));
+        assert_eq!(runtime_members.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn activating_the_archived_group_routes_its_members() {
+        // 甲-1: activating any group (including `<platform>-archived`) must route
+        // exactly that group's members.
+        let pool = crate::database::create_memory_pool().await.unwrap();
+        crate::database::run_migrations(&pool).await.unwrap();
+        let member = create_credential(&pool, "codex", "Archived member").await;
+        RoutePoolRepository::move_group_members(
+            &pool,
+            "codex",
+            "codex-archived",
+            std::slice::from_ref(&member),
+        )
+        .await
+        .unwrap();
+
+        let group_members = RoutePoolRepository::member_accounts_for_group(&pool, "codex-archived")
+            .await
+            .unwrap();
+        assert_eq!(group_members.len(), 1);
+        assert_eq!(group_members[0].id, member);
     }
 
     #[tokio::test]

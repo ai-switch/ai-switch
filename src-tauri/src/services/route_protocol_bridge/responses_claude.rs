@@ -185,6 +185,78 @@ mod tests {
         );
     }
 
+    /// Responses `reasoning` items must survive the trip to a Claude upstream and
+    /// back: encoded into a leading thinking block on the way out, decoded into
+    /// the exact original item on the way in. Otherwise a stateless tool loop
+    /// loses the chain of thought that justified each tool call.
+    #[test]
+    fn reasoning_survives_the_round_trip_to_anthropic_and_back() {
+        // Request: a Codex turn with a summarized, encrypted reasoning item before
+        // a tool call. The reasoning must ride along as a leading thinking block,
+        // not be dropped.
+        let request = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "input": [
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "read it"}]},
+                {"type": "reasoning", "id": "rs_1",
+                 "summary": [{"type": "summary_text", "text": "Need to read the file."}],
+                 "encrypted_content": "cipher"},
+                {"type": "function_call", "call_id": "call_1", "name": "read",
+                 "arguments": "{}"}
+            ]
+        });
+        let converted: Value = serde_json::from_slice(
+            &responses_request_to_anthropic(&serde_json::to_vec(&request).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let assistant = &converted["messages"][1];
+        assert_eq!(assistant["role"], "assistant");
+        // thinking leads, tool_use follows, in the same assistant message.
+        assert_eq!(assistant["content"][0]["type"], "thinking");
+        assert_eq!(
+            assistant["content"][0]["thinking"],
+            "Need to read the file."
+        );
+        assert_eq!(assistant["content"][1]["type"], "tool_use");
+
+        // Response: the upstream echoes the same thinking block back. It must
+        // decode into the exact original reasoning item, not leak as output_text.
+        let signature = assistant["content"][0]["signature"].as_str().unwrap();
+        let upstream = serde_json::json!({
+            "id": "msg_1",
+            "model": "claude-sonnet-4-5",
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "thinking", "thinking": "Need to read the file.", "signature": signature},
+                {"type": "text", "text": "done"}
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+        let back = anthropic_response_to_responses(
+            200,
+            Some("application/json"),
+            &serde_json::to_vec(&upstream).unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&back.body).unwrap();
+        let reasoning = value["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "reasoning")
+            .expect("reasoning item recovered from the thinking block");
+        assert_eq!(reasoning["id"], "rs_1");
+        assert_eq!(reasoning["encrypted_content"], "cipher");
+        assert_eq!(reasoning["summary"][0]["text"], "Need to read the file.");
+        let rendered = serde_json::to_string(&value).unwrap();
+        assert!(
+            !rendered.contains("Need to read the file.\",\"type\":\"output_text"),
+            "reasoning must not leak into visible output",
+        );
+    }
+
     /// Codex replays its own transcript on every turn, and after the first
     /// `apply_patch` that transcript contains item types no Anthropic client ever
     /// sends. Rejecting one fails the whole request, so the relay looks dead
@@ -219,11 +291,17 @@ mod tests {
         // The freeform call keeps the `{"input": …}` spelling the tool was
         // declared with, so the replayed turn agrees with its own schema.
         assert_eq!(messages[1]["role"], "assistant");
-        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
-        assert_eq!(messages[1]["content"][0]["name"], "apply_patch");
-        assert_eq!(messages[1]["content"][0]["id"], "call_1");
+        // The ciphertext-only reasoning item leads the tool-use turn as a
+        // redacted_thinking block, then the freeform call follows.
+        assert_eq!(messages[1]["content"][0]["type"], "redacted_thinking");
+        assert!(messages[1]["content"][0]["data"]
+            .as_str()
+            .is_some_and(|data| data.starts_with("ai-switch-openai-reasoning-v1:")));
+        assert_eq!(messages[1]["content"][1]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][1]["name"], "apply_patch");
+        assert_eq!(messages[1]["content"][1]["id"], "call_1");
         assert_eq!(
-            messages[1]["content"][0]["input"]["input"],
+            messages[1]["content"][1]["input"]["input"],
             "*** Begin Patch\n*** End Patch\n"
         );
         assert_eq!(messages[2]["content"][0]["type"], "tool_result");
@@ -1050,6 +1128,16 @@ fn convert_input_items(items: &[Value]) -> Result<Vec<Value>, String> {
 
     for item in items {
         if is_reasoning_input_item(item) {
+            // Recover the reasoning as an Anthropic thinking block instead of
+            // dropping it, so a stateless tool loop against a Claude upstream
+            // keeps the chain of thought that justified each tool call. Empty
+            // reasoning items (no summary, no ciphertext) carry nothing and are
+            // skipped by `anthropic_block_from_openai_reasoning_item`.
+            if let Some(block) =
+                super::reasoning_bridge::anthropic_block_from_openai_reasoning_item(item)
+            {
+                pending.push_thinking(&mut messages, block);
+            }
             continue;
         }
         convert_input_item(item, &mut messages, &mut pending)?;
@@ -1072,11 +1160,23 @@ fn convert_input_items(items: &[Value]) -> Result<Vec<Value>, String> {
 /// pairing Anthropic documents.
 #[derive(Default)]
 struct PendingToolTurn {
+    /// Thinking blocks recovered from Responses `reasoning` items, buffered so
+    /// they lead the assistant message they belong to (Anthropic requires a
+    /// thinking block to be the first content of its assistant turn).
+    thinking: Vec<Value>,
     tool_uses: Vec<Value>,
     tool_results: Vec<Value>,
 }
 
 impl PendingToolTurn {
+    /// Buffer a thinking block to lead the next assistant message (tool-use turn
+    /// or plain assistant text). A tool result closes the assistant turn, so any
+    /// thinking still buffered then is stale and dropped by `flush_tool_results`.
+    fn push_thinking(&mut self, messages: &mut Vec<Value>, block: Value) {
+        self.flush_tool_results(messages);
+        self.thinking.push(block);
+    }
+
     /// A new call opens a new tool turn, so results buffered from the previous
     /// one have to land before it.
     fn push_tool_use(&mut self, messages: &mut Vec<Value>, block: Value) {
@@ -1096,11 +1196,34 @@ impl PendingToolTurn {
 
     fn flush_tool_uses(&mut self, messages: &mut Vec<Value>) {
         if self.tool_uses.is_empty() {
+            // Thinking with no tool_use to lead becomes its own assistant turn so
+            // the reasoning is not lost when the model answered without a tool.
+            self.flush_thinking_as_message(messages);
+            return;
+        }
+        let mut content = std::mem::take(&mut self.thinking);
+        content.extend(std::mem::take(&mut self.tool_uses));
+        messages.push(json!({
+            "role": "assistant",
+            "content": content
+        }));
+    }
+
+    /// Take the buffered thinking blocks so a caller can lead an assistant
+    /// message with them directly.
+    fn take_thinking(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.thinking)
+    }
+
+    /// Emit buffered thinking as a standalone assistant message. Used when a
+    /// reasoning item is followed by something other than a tool call.
+    fn flush_thinking_as_message(&mut self, messages: &mut Vec<Value>) {
+        if self.thinking.is_empty() {
             return;
         }
         messages.push(json!({
             "role": "assistant",
-            "content": std::mem::take(&mut self.tool_uses)
+            "content": std::mem::take(&mut self.thinking)
         }));
     }
 
@@ -1108,6 +1231,10 @@ impl PendingToolTurn {
         if self.tool_results.is_empty() {
             return;
         }
+        // A tool result belongs to a tool_use already emitted; any thinking still
+        // buffered here has no assistant turn left to lead, so discard it rather
+        // than attach it to the user (tool_result) message.
+        self.thinking.clear();
         messages.push(json!({
             "role": "user",
             "content": std::mem::take(&mut self.tool_results)
@@ -1248,13 +1375,25 @@ fn convert_input_item(
             messages.push(json!({"role": role, "content": content}));
         }
         Some("message") | None if object.contains_key("role") => {
-            pending.flush(messages);
             let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
-            let content = object
-                .get("content")
-                .map(convert_message_content)
-                .transpose()?
-                .unwrap_or_else(Vec::new);
+            // Buffered thinking leads the assistant turn it belongs to; flushing
+            // tool state first keeps prior tool pairs correctly ordered. For a
+            // non-assistant message the thinking has no turn to lead, so it is
+            // emitted as its own assistant message ahead of this one.
+            let leading_thinking = if role == "assistant" {
+                pending.take_thinking()
+            } else {
+                Vec::new()
+            };
+            pending.flush(messages);
+            let mut content = leading_thinking;
+            content.extend(
+                object
+                    .get("content")
+                    .map(convert_message_content)
+                    .transpose()?
+                    .unwrap_or_else(Vec::new),
+            );
             messages.push(json!({"role": role, "content": content}));
         }
         // Codex control items with no conversable content.
@@ -1396,9 +1535,18 @@ fn anthropic_content_to_responses_output(
                 output.push(function_call);
             }
             // Thinking blocks arrive because the request path enables thinking.
-            // They are reasoning, not visible output, so they must not be pushed
-            // into output_text — drop them rather than failing the transform.
-            Some("thinking") | Some("redacted_thinking") => {}
+            // When the block carries one of our envelopes (see reasoning_bridge),
+            // decode it back into the exact Responses `reasoning` item so the
+            // client can replay it next turn. A native thinking block (real
+            // upstream signature, no envelope) is reasoning, not visible output,
+            // so it is still dropped rather than leaked into output_text.
+            Some("thinking") | Some("redacted_thinking") => {
+                if let Some(reasoning) =
+                    super::reasoning_bridge::openai_reasoning_item_from_anthropic_block(item)
+                {
+                    output.push(reasoning);
+                }
+            }
             Some(_) | None => {}
         }
     }

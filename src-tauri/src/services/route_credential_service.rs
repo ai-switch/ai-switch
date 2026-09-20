@@ -175,6 +175,11 @@ impl RouteCredentialService {
                 .responses_encrypted_content_aggressive_strip
                 .unwrap_or(false),
         });
+        // Omitted rather than written as `false`, so an account that never opts in
+        // carries no trace of the feature in its config.
+        if input.force_reasoning_content.unwrap_or(false) {
+            config["force_reasoning_content"] = json!(true);
+        }
         if let Some(api_key_field) = api_key_field {
             config["api_key_field"] = json!(api_key_field);
         }
@@ -414,20 +419,51 @@ impl RouteCredentialService {
         Ok(())
     }
 
+    /// Archiving is now a shortcut for "move into the platform's `<platform>-archived`
+    /// group". Group membership is the single source of truth for routing and
+    /// billing, so the account leaves whatever group it was in and lands in the
+    /// reserved archived group. `archived_at` is still stamped as an audit marker
+    /// but no longer gates any candidate query.
     pub async fn archive(pool: &SqlitePool, ids: Vec<String>) -> Result<(), AppError> {
-        let platforms = platforms_of(pool, &ids).await;
-        RouteCredentialRepository::set_archived(pool, &ids, true).await?;
-        for platform in platforms {
-            best_effort_sync(pool, &platform).await;
-        }
-        Ok(())
+        Self::move_to_reserved_group(pool, ids, "archived", true).await
     }
 
+    /// Restoring is the inverse shortcut: move the account into the platform's
+    /// `<platform>-out` (未入池) group and clear the audit marker. The user can then
+    /// move it into an active group when they want it routed again.
     pub async fn restore(pool: &SqlitePool, ids: Vec<String>) -> Result<(), AppError> {
-        let platforms = platforms_of(pool, &ids).await;
-        RouteCredentialRepository::set_archived(pool, &ids, false).await?;
-        for platform in platforms {
-            best_effort_sync(pool, &platform).await;
+        Self::move_to_reserved_group(pool, ids, "out", false).await
+    }
+
+    /// Shared implementation for archive/restore. Groups the ids by platform,
+    /// moves each batch into the platform-specific reserved group (`archived` or
+    /// `out`), then updates the `archived_at` audit marker to match.
+    async fn move_to_reserved_group(
+        pool: &SqlitePool,
+        ids: Vec<String>,
+        slug: &str,
+        archived: bool,
+    ) -> Result<(), AppError> {
+        let mut by_platform: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for id in &ids {
+            if let Ok(platform) = RouteCredentialRepository::platform_of(pool, id).await {
+                by_platform.entry(platform).or_default().push(id.clone());
+            }
+        }
+
+        // Stamp/clear the audit marker first so history views stay consistent even
+        // if a platform has no reserved group to move into.
+        RouteCredentialRepository::set_archived(pool, &ids, archived).await?;
+
+        for (platform, platform_ids) in &by_platform {
+            let group_id = format!("{platform}-{slug}");
+            RoutePoolRepository::move_group_members(pool, platform, &group_id, platform_ids)
+                .await?;
+        }
+
+        for platform in by_platform.keys() {
+            best_effort_sync(pool, platform).await;
         }
         Ok(())
     }
@@ -1703,6 +1739,7 @@ mod tests {
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
@@ -1746,6 +1783,7 @@ mod tests {
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
@@ -1792,6 +1830,7 @@ mod tests {
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
@@ -1875,6 +1914,7 @@ mod tests {
                 responses_custom_tool_compat: Some(true),
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: Some("shared-client/1.0".into()),
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
@@ -1960,6 +2000,7 @@ mod tests {
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
@@ -2011,6 +2052,7 @@ mod tests {
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
@@ -2060,6 +2102,7 @@ mod tests {
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
@@ -2110,6 +2153,7 @@ mod tests {
                 responses_custom_tool_compat: Some(true),
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
@@ -2157,6 +2201,7 @@ mod tests {
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: Some("new_api".into()),
                 relay_balance_access_token: Some("pat-panel-token".into()),
@@ -2278,6 +2323,7 @@ mod tests {
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
@@ -2329,6 +2375,7 @@ mod tests {
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
@@ -2432,6 +2479,7 @@ mod tests {
                 responses_custom_tool_compat: Some(true),
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
@@ -2471,6 +2519,7 @@ mod tests {
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
@@ -2510,6 +2559,7 @@ mod tests {
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: Some("  MyGrokClient/9.9.9  ".into()),
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
@@ -2549,6 +2599,7 @@ mod tests {
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: Some("   ".into()),
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
@@ -2607,29 +2658,56 @@ mod tests {
         RouteCredentialService::archive(&pool, vec![first.id.clone(), second.id.clone()])
             .await
             .expect("archive");
+        // Archiving now stamps the audit marker AND moves the account into the
+        // reserved `codex-archived` group, so it leaves the active group.
         assert!(RouteCredentialRepository::get(&pool, &first.id)
             .await
             .expect("first archived")
             .archived_at
             .is_some());
-        assert_eq!(
+        assert!(
             crate::database::repositories::route_pool_repository::RoutePoolRepository::list_member_ids(
                 &pool,
                 "codex",
             )
             .await
-            .expect("members"),
-            vec![first.id.clone()]
+            .expect("members")
+            .is_empty(),
+            "archived accounts leave the active group",
         );
+        for id in [&first.id, &second.id] {
+            assert_eq!(
+                crate::database::repositories::route_pool_repository::RoutePoolRepository::group_id_for_account(
+                    &pool, "codex", id,
+                )
+                .await
+                .expect("group id")
+                .as_deref(),
+                Some("codex-archived"),
+            );
+        }
 
         RouteCredentialService::restore(&pool, vec![first.id.clone(), second.id.clone()])
             .await
             .expect("restore");
+        // Restoring clears the marker AND moves the account into `codex-out`
+        // (未入池), ready for the user to reassign it to an active group.
         assert!(RouteCredentialRepository::get(&pool, &first.id)
             .await
             .expect("first restored")
             .archived_at
             .is_none());
+        for id in [&first.id, &second.id] {
+            assert_eq!(
+                crate::database::repositories::route_pool_repository::RoutePoolRepository::group_id_for_account(
+                    &pool, "codex", id,
+                )
+                .await
+                .expect("group id")
+                .as_deref(),
+                Some("codex-out"),
+            );
+        }
     }
 
     #[tokio::test]
@@ -2655,6 +2733,7 @@ mod tests {
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: Some("new_api".into()),
                 relay_balance_access_token: None,
@@ -2697,6 +2776,7 @@ mod tests {
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: Some("new_api".into()),
                 relay_balance_access_token: Some("  pat-panel-token  ".into()),
@@ -2744,6 +2824,7 @@ mod tests {
                     responses_custom_tool_compat: None,
                     responses_encrypted_content_cleanup: None,
                     responses_encrypted_content_aggressive_strip: None,
+                    force_reasoning_content: None,
                     user_agent: None,
                     relay_balance_provider: Some("new_api".into()),
                     relay_balance_access_token: token.clone(),
@@ -2786,6 +2867,7 @@ mod tests {
                     responses_custom_tool_compat: None,
                     responses_encrypted_content_cleanup: None,
                     responses_encrypted_content_aggressive_strip: None,
+                    force_reasoning_content: None,
                     user_agent: None,
                     relay_balance_provider: provider.clone(),
                     relay_balance_access_token: None,
@@ -2827,6 +2909,7 @@ mod tests {
                     responses_custom_tool_compat: None,
                     responses_encrypted_content_cleanup: None,
                     responses_encrypted_content_aggressive_strip: None,
+                    force_reasoning_content: None,
                     user_agent: None,
                     relay_balance_provider: Some(provider.into()),
                     relay_balance_access_token: None,

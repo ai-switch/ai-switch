@@ -24,7 +24,7 @@ use crate::services::official_agent_identity_service::{
 use crate::services::platform_capability_service::PlatformCapabilityService;
 use crate::services::response_failure_service::{
     detect_response_failed, is_cross_resource_item_failure, is_encrypted_content_failure,
-    is_insufficient_permissions_failure, is_quota_exhaustion_failure,
+    is_insufficient_permissions_failure, is_missing_reasoning_failure, is_quota_exhaustion_failure,
     is_text_only_chat_content_failure, is_thinking_signature_failure,
     stream_disconnected_before_completion, STREAM_DISCONNECTED_FAILURE_MESSAGE,
 };
@@ -47,7 +47,8 @@ use crate::services::route_pool_model_mode::{
     accepted_prefixes, is_official_model_prefix, split_prefixed_model, PoolModelMode,
 };
 use crate::services::route_protocol_bridge::{
-    is_anthropic_count_tokens_path, prepare_request as prepare_protocol_bridge_request,
+    force_reasoning_content_on_chat_body, is_anthropic_count_tokens_path,
+    prepare_request as prepare_protocol_bridge_request,
     transform_response_with_tool_namespaces as transform_protocol_bridge_response, turn_reminder,
     PreparedBridgeRequest, ProtocolBridgeKind,
 };
@@ -1003,6 +1004,9 @@ pub(crate) async fn forward_request(
     // cleanup is idempotent and must not spend the account's retry budget.
     let mut thinking_stripped = false;
     let mut reasoning_sanitized = false;
+    // Set once the missing-reasoning self-heal has rewritten this request, so a
+    // still-failing upstream falls through to normal failover instead of looping.
+    let mut reasoning_forced = false;
 
     while let Some((credential_index, credential_retry_count)) = retry_queue.pop_front() {
         attempt += 1;
@@ -1171,6 +1175,22 @@ pub(crate) async fn forward_request(
             }
         };
         let bridge_name = bridge_kind.map(|kind| format!("{kind:?}"));
+        // Guarantee `reasoning_content` on every assistant turn when either the
+        // account opted in proactively, or the missing-reasoning self-heal below
+        // armed `reasoning_forced` after a prior 11155 rejection. Thinking upstreams
+        // (DeepSeek/MiMo behind new-api) reject a follow-up otherwise. Chat bridge
+        // only: `reasoning_content` is a Chat-only field.
+        let mut outbound_body = outbound_body;
+        if bridge_kind == Some(ProtocolBridgeKind::ResponsesToChat)
+            && (reasoning_forced
+                || force_reasoning_content_enabled(
+                    &parse_json_object(&credential.config_json, "config").unwrap_or(Value::Null),
+                ))
+        {
+            if let Some(forced) = force_reasoning_content_on_chat_body(&outbound_body) {
+                outbound_body = forced;
+            }
+        }
         let upstream_request_bytes = outbound_body.clone();
         let upstream_model = requested_model_from_body(&outbound_body);
         let upstream = client
@@ -1761,6 +1781,24 @@ pub(crate) async fn forward_request(
             // well. Its own answer names the problem better than the aggregated
             // "all route credentials failed" error a pool walk would end in.
             return proxy_upstream_response(status, upstream_headers, response_bytes.to_vec());
+        }
+
+        // A thinking upstream (DeepSeek/MiMo behind new-api) rejected the turn
+        // because a prior assistant message carried no `reasoning_content`
+        // (`reasoning_content_missing` / code 11155). The credential and model
+        // are both fine; the request body is just missing a field the bridge can
+        // supply. Arm the forced-reasoning rebuild and re-ask the *same* account
+        // once. A second failure falls through to normal failover. The failure
+        // policy's retry budget is untouched: this asks a different question.
+        if bridge_kind == Some(ProtocolBridgeKind::ResponsesToChat)
+            && !reasoning_forced
+            && semantic_failure
+                .as_ref()
+                .is_some_and(is_missing_reasoning_failure)
+        {
+            reasoning_forced = true;
+            retry_queue.push_front((credential_index, credential_retry_count));
+            continue;
         }
 
         // A resource-scoped reference cannot be recreated from its ID. Preserve
@@ -3270,7 +3308,6 @@ async fn load_scoped_candidates(
          INNER JOIN route_pool_groups groups ON groups.id = rpm.group_id
          WHERE rpm.platform = c.platform AND groups.platform = c.platform
            AND groups.deleted_at IS NULL
-           AND c.archived_at IS NULL
            AND c.status = 'ok'
            AND (c.primary_remain IS NULL OR c.primary_remain > 0)
            AND (c.weekly_remain IS NULL OR c.weekly_remain > 0)
@@ -5139,6 +5176,17 @@ fn responses_encrypted_content_aggressive_strip_enabled(config: &Value) -> bool 
             .get("responses_encrypted_content_aggressive_strip")
             .and_then(Value::as_bool)
             == Some(true)
+}
+
+/// The account opted in to always sending `reasoning_content` on assistant
+/// turns of a Responses→Chat request, instead of waiting to be told it is
+/// missing. Trades one guaranteed field for skipping the first-request retry
+/// against thinking upstreams (DeepSeek/MiMo behind new-api) that mandate it.
+fn force_reasoning_content_enabled(config: &Value) -> bool {
+    config
+        .get("force_reasoning_content")
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 fn responses_cleanup_mode(config: &Value) -> ReasoningCleanupMode {
@@ -7335,6 +7383,80 @@ mod tests {
         (format!("http://{address}/v1"), calls, bodies)
     }
 
+    #[derive(Clone)]
+    struct MissingReasoningUpstreamState {
+        calls: Arc<AtomicUsize>,
+        bodies: Arc<std::sync::Mutex<Vec<Value>>>,
+    }
+
+    /// A thinking Chat upstream (DeepSeek/MiMo behind new-api): it rejects any
+    /// request whose assistant messages do not all carry a non-empty
+    /// `reasoning_content`, with the exact 11155 body the user reported. Once the
+    /// proxy supplies the field it answers 200.
+    async fn missing_reasoning_upstream_handler(
+        AxumState(state): AxumState<MissingReasoningUpstreamState>,
+        body: axum::body::Bytes,
+    ) -> Response {
+        state.calls.fetch_add(1, Ordering::SeqCst);
+        let body: Value = serde_json::from_slice(&body).expect("request JSON");
+        state
+            .bodies
+            .lock()
+            .expect("record chat upstream body")
+            .push(body.clone());
+        let assistant_missing_reasoning =
+            body["messages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|message| {
+                    message["role"] == "assistant"
+                        && !message
+                            .get("reasoning_content")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| !text.trim().is_empty())
+                });
+        let (status, response_body) = if assistant_missing_reasoning {
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"code":11155,"msg":"the reasoning content from the previous turn must be passed back in thinking mode","requestId":"3d756099a4f609f734f62c52d5f9ae90","extError":{"code":"reasoning_content_missing","message":"the reasoning content from the previous turn must be passed back in thinking mode","param":"","type":"invalid_request_error","StatusCode":400}}"#,
+            )
+        } else {
+            (
+                StatusCode::OK,
+                r#"{"id":"chatcmpl_1","object":"chat.completion","model":"deepseek-reasoner","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+            )
+        };
+        Response::builder()
+            .status(status)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(response_body))
+            .expect("missing reasoning response")
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn start_missing_reasoning_upstream(
+    ) -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<Value>>>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = Router::new()
+            .fallback(missing_reasoning_upstream_handler)
+            .with_state(MissingReasoningUpstreamState {
+                calls: Arc::clone(&calls),
+                bodies: Arc::clone(&bodies),
+            });
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind missing reasoning upstream");
+        let address = listener.local_addr().expect("missing reasoning address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve missing reasoning upstream");
+        });
+        (format!("http://{address}/v1"), calls, bodies)
+    }
+
     /// A Claude-platform account speaking Anthropic natively, so `/v1/messages`
     /// reaches the upstream as a passthrough and carries the client's own
     /// `thinking` blocks.
@@ -9227,6 +9349,151 @@ mod tests {
     }
 
     /// When the stripped body is refused too, the pool walk is pointless: every
+    /// Default behaviour (no opt-in switch): a Codex Responses client hits a Chat
+    /// upstream that mandates `reasoning_content`. The first turn is missing it and
+    /// the upstream returns 11155. The proxy must self-heal by supplying the field
+    /// and re-asking the *same* account once, so the client never sees the 400.
+    #[tokio::test]
+    async fn missing_reasoning_is_self_healed_by_one_forced_retry() {
+        use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
+        use crate::database::{create_memory_pool, run_migrations};
+
+        let (upstream, calls, bodies) = start_missing_reasoning_upstream().await;
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let credential_id = create_proxy_api_credential_with_config(
+            &pool,
+            "deepseek-relay",
+            &upstream,
+            json!({"model_mappings": [{"from": "gpt-5", "to": "deepseek-reasoner"}]}),
+        )
+        .await;
+        RoutePoolRepository::replace_members(&pool, "codex", std::slice::from_ref(&credential_id))
+            .await
+            .expect("pool members");
+        let route_key =
+            RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-mr")
+                .await
+                .expect("route key");
+        let runtime = RouteProxyRuntimeState::default();
+        let proxy = RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+            .await
+            .expect("start proxy");
+
+        // Responses history whose assistant turn carries no reasoning — the 11155
+        // trigger. No tool calls, so the tool-call reasoning guarantee never fires.
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/v1/responses",
+                proxy.base_url.as_deref().expect("base url")
+            ))
+            .bearer_auth(&route_key)
+            .header(ROUTE_PROXY_PLATFORM_HEADER, "codex")
+            .json(&json!({
+                "model": "gpt-5",
+                "input": [
+                    {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "hi"}]},
+                    {"type": "message", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "earlier answer"}]},
+                    {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "continue"}]}
+                ]
+            }))
+            .send()
+            .await
+            .expect("proxy response");
+
+        // Client never sees the 400.
+        assert_eq!(response.status(), StatusCode::OK);
+        // Exactly one rejection then one healed retry — not a pool walk.
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let recorded = bodies.lock().expect("recorded bodies").clone();
+        let first_assistant_has_reasoning = recorded[0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["role"] == "assistant" && m.get("reasoning_content").is_some());
+        assert!(
+            !first_assistant_has_reasoning,
+            "first attempt is the bare body"
+        );
+        let second_assistant_has_reasoning =
+            recorded[1]["messages"].as_array().unwrap().iter().any(|m| {
+                m["role"] == "assistant"
+                    && m.get("reasoning_content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| !t.trim().is_empty())
+            });
+        assert!(
+            second_assistant_has_reasoning,
+            "retry supplies reasoning_content"
+        );
+
+        RouteProxyService::stop(&runtime).await.expect("stop proxy");
+    }
+
+    /// With the opt-in switch on, the very first request already carries
+    /// `reasoning_content`, so the upstream accepts it without a retry round trip.
+    #[tokio::test]
+    async fn force_reasoning_switch_sends_reasoning_on_the_first_request() {
+        use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
+        use crate::database::{create_memory_pool, run_migrations};
+
+        let (upstream, calls, _bodies) = start_missing_reasoning_upstream().await;
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let credential_id = create_proxy_api_credential_with_config(
+            &pool,
+            "deepseek-relay",
+            &upstream,
+            json!({
+                "force_reasoning_content": true,
+                "model_mappings": [{"from": "gpt-5", "to": "deepseek-reasoner"}]
+            }),
+        )
+        .await;
+        RoutePoolRepository::replace_members(&pool, "codex", std::slice::from_ref(&credential_id))
+            .await
+            .expect("pool members");
+        let route_key =
+            RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-fr")
+                .await
+                .expect("route key");
+        let runtime = RouteProxyRuntimeState::default();
+        let proxy = RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+            .await
+            .expect("start proxy");
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/v1/responses",
+                proxy.base_url.as_deref().expect("base url")
+            ))
+            .bearer_auth(&route_key)
+            .header(ROUTE_PROXY_PLATFORM_HEADER, "codex")
+            .json(&json!({
+                "model": "gpt-5",
+                "input": [
+                    {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "hi"}]},
+                    {"type": "message", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "earlier answer"}]},
+                    {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "continue"}]}
+                ]
+            }))
+            .send()
+            .await
+            .expect("proxy response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // No retry: the field was there on attempt one.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        RouteProxyService::stop(&runtime).await.expect("stop proxy");
+    }
+
     /// remaining account refuses the same history for the same reason, and each
     /// one would be parked for it. The upstream's own answer goes back instead.
     #[tokio::test]

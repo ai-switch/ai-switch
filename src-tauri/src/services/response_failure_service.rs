@@ -147,6 +147,55 @@ pub fn is_thinking_signature_failure(text: &str) -> bool {
     names_a_replayed_block && rejected
 }
 
+/// Returns whether a Chat upstream rejected a follow-up turn because the
+/// assistant's reasoning from the previous turn was not passed back.
+///
+/// DeepSeek/MiMo-style thinking models require every replayed assistant turn to
+/// carry its original `reasoning_content`. When it is missing they answer with
+/// HTTP 400 and a code such as `reasoning_content_missing` (seen wrapped by
+/// new-api/one-api gateways as `{"code":11155,...}`). Unlike the tool-call case
+/// this also fires on plain (no tool_calls) assistant turns, which the tool-call
+/// reasoning guarantee does not cover. The credential and model are both fine —
+/// only the request body is missing a field — so recovery is to add the
+/// reasoning and re-ask the same account, not to fail over.
+///
+/// Matches on the field name plus a missing/required marker (or the numeric
+/// gateway code) so relay prose and either spelling still resolve. Requiring the
+/// field name keeps generic "field is required" validation errors out.
+pub fn is_missing_reasoning_failure(failure: &SemanticResponseFailure) -> bool {
+    let code = failure
+        .code
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['_', '-', ':', ' '], "");
+    if code == "reasoningcontentmissing" || code == "11155" {
+        return true;
+    }
+
+    let message = failure
+        .message
+        .to_ascii_lowercase()
+        .replace(['`', '_'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if message.contains("11155") {
+        return true;
+    }
+    let names_reasoning = message.contains("reasoning content") || message.contains("reasoning");
+    let names_thinking_mode = message.contains("thinking mode");
+    let missing_marker = message.contains("must be passed back")
+        || message.contains("must be passed")
+        || message.contains("is missing")
+        || message.contains("is required")
+        || message.contains("missing")
+        || message.contains("必须") // "reasoning_content 必须回传"
+        || message.contains("缺少");
+    names_reasoning && names_thinking_mode && missing_marker
+}
+
 pub fn is_encrypted_content_failure(failure: &SemanticResponseFailure) -> bool {
     let code = failure
         .code
@@ -300,29 +349,48 @@ fn detect_value(value: &Value) -> Option<SemanticResponseFailure> {
     let has_error = value
         .pointer("/response/error")
         .or_else(|| value.pointer("/error"))
+        // new-api/one-api gateways wrap the real upstream error under `extError`.
+        .or_else(|| value.pointer("/extError"))
         .is_some_and(|error| {
             error.is_object()
                 && (error.get("message").and_then(Value::as_str).is_some()
                     || error.get("code").and_then(Value::as_str).is_some())
         })
-        || (value.get("code").and_then(Value::as_str).is_some()
-            && value.get("message").and_then(Value::as_str).is_some());
+        // A gateway envelope with a top-level code (string or numeric, e.g.
+        // new-api's `{"code":11155,"msg":...}`) plus a human message under
+        // `message` or `msg`.
+        || ((value.get("code").and_then(Value::as_str).is_some()
+            || value.get("code").and_then(Value::as_i64).is_some())
+            && (value.get("message").and_then(Value::as_str).is_some()
+                || value.get("msg").and_then(Value::as_str).is_some()));
     if !failed && !has_error {
         return None;
     }
     let code = value
         .pointer("/response/error/code")
         .or_else(|| value.pointer("/error/code"))
+        .or_else(|| value.pointer("/extError/code"))
         .or_else(|| value.get("code"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|code| !code.is_empty())
-        .map(str::to_string);
+        .map(str::to_string)
+        // Fall back to a numeric gateway code (`{"code":11155}`) rendered as text.
+        .or_else(|| {
+            value
+                .pointer("/response/error/code")
+                .or_else(|| value.pointer("/error/code"))
+                .or_else(|| value.pointer("/extError/code"))
+                .or_else(|| value.get("code"))
+                .and_then(Value::as_i64)
+                .map(|code| code.to_string())
+        });
     // Only the error object's own `type` — a top-level one names the envelope
     // (`error`, `response.failed`), not the error family.
     let error_type = value
         .pointer("/response/error/type")
         .or_else(|| value.pointer("/error/type"))
+        .or_else(|| value.pointer("/extError/type"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|error_type| !error_type.is_empty())
@@ -330,7 +398,9 @@ fn detect_value(value: &Value) -> Option<SemanticResponseFailure> {
     let message = value
         .pointer("/response/error/message")
         .or_else(|| value.pointer("/error/message"))
+        .or_else(|| value.pointer("/extError/message"))
         .or_else(|| value.get("message"))
+        .or_else(|| value.get("msg"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|message| !message.is_empty())
@@ -562,6 +632,78 @@ data: {"type":"response.failed","error":{"message":"down"}}
         assert!(is_thinking_signature_failure(&failure.message));
         // Not the account's fault, so it must not read as spent quota.
         assert!(!is_quota_exhaustion_failure(&failure));
+    }
+
+    /// The exact user-reported gateway body: new-api wraps the DeepSeek Chat
+    /// rejection as `{"code":11155,...,"extError":{"code":"reasoning_content_missing"}}`.
+    #[test]
+    fn detects_missing_reasoning_by_code_and_message() {
+        let coded = SemanticResponseFailure {
+            code: Some("reasoning_content_missing".to_string()),
+            error_type: Some("invalid_request_error".to_string()),
+            message:
+                "the reasoning content from the previous turn must be passed back in thinking mode"
+                    .to_string(),
+        };
+        assert!(is_missing_reasoning_failure(&coded));
+
+        let numeric = SemanticResponseFailure {
+            code: Some("11155".to_string()),
+            error_type: None,
+            message:
+                "the reasoning content from the previous turn must be passed back in thinking mode"
+                    .to_string(),
+        };
+        assert!(is_missing_reasoning_failure(&numeric));
+
+        let message_only = SemanticResponseFailure {
+            code: None,
+            error_type: None,
+            message: "The reasoning_content in the thinking mode must be passed back to the API"
+                .to_string(),
+        };
+        assert!(is_missing_reasoning_failure(&message_only));
+    }
+
+    /// The verbatim gateway body from the user report: numeric top-level `code`,
+    /// `msg` (not `message`), and the real error nested under `extError`. The
+    /// detector must extract it and the rule must recognise it.
+    #[test]
+    fn detects_missing_reasoning_from_verbatim_new_api_envelope() {
+        let failure = detect_response_failed(
+            br#"{"code":11155,"msg":"the reasoning content from the previous turn must be passed back in thinking mode","requestId":"3d756099a4f609f734f62c52d5f9ae90","extError":{"code":"reasoning_content_missing","message":"the reasoning content from the previous turn must be passed back in thinking mode","param":"","type":"invalid_request_error","StatusCode":400}}"#,
+        )
+        .expect("gateway envelope is a semantic failure");
+        assert!(is_missing_reasoning_failure(&failure));
+    }
+
+    /// Must not fire on unrelated validation or on the sibling thinking-signature
+    /// failure, which has its own recovery.
+    #[test]
+    fn missing_reasoning_rule_stays_narrow() {
+        for failure in [
+            SemanticResponseFailure {
+                code: Some("invalid_request_error".to_string()),
+                error_type: None,
+                message: "field `model` is required".to_string(),
+            },
+            SemanticResponseFailure {
+                code: None,
+                error_type: None,
+                message: "Invalid `signature` in `thinking` block".to_string(),
+            },
+            SemanticResponseFailure {
+                code: None,
+                error_type: None,
+                message: "reasoning_effort must be one of low, medium, high".to_string(),
+            },
+        ] {
+            assert!(
+                !is_missing_reasoning_failure(&failure),
+                "{}",
+                failure.message
+            );
+        }
     }
 
     #[test]

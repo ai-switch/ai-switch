@@ -1367,6 +1367,47 @@ fn ensure_tool_call_reasoning(messages: &mut [Value]) {
     }
 }
 
+/// Guarantee that *every* assistant message in a converted Chat request carries
+/// a non-empty `reasoning_content`, inserting the neutral placeholder when the
+/// real reasoning is gone. This is the no-tool-turn counterpart to
+/// [`ensure_tool_call_reasoning`]: some thinking upstreams (DeepSeek/MiMo behind
+/// new-api) reject a follow-up with `reasoning_content_missing` / code 11155
+/// whenever a prior *plain* assistant turn lacks the field.
+///
+/// Applied only when the account opted in (`force_reasoning_content`) or after
+/// the upstream actually returned that error (self-heal), so upstreams that do
+/// not want the field never see it. Operates on the final Chat body bytes and
+/// returns `Some` only when something changed.
+pub(crate) fn force_reasoning_content_on_chat_body(body: &[u8]) -> Option<Vec<u8>> {
+    let mut value = serde_json::from_slice::<Value>(body).ok()?;
+    let messages = value.get_mut("messages")?.as_array_mut()?;
+    let mut changed = false;
+    for message in messages.iter_mut() {
+        let Some(object) = message.as_object_mut() else {
+            continue;
+        };
+        if object.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let has_reasoning = object
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty());
+        if has_reasoning {
+            continue;
+        }
+        object.insert(
+            "reasoning_content".to_string(),
+            Value::String(TOOL_CALL_REASONING_PLACEHOLDER.to_string()),
+        );
+        changed = true;
+    }
+    if !changed {
+        return None;
+    }
+    serde_json::to_vec(&value).ok()
+}
+
 fn convert_input_item(
     item: &Value,
     tool_namespaces: &ResponsesToolNamespaces,
@@ -2010,9 +2051,63 @@ fn copy_fields(source: &Map<String, Value>, target: &mut Map<String, Value>, fie
 
 #[cfg(test)]
 mod tests {
-    use super::{chat_response_to_responses, responses_request_to_chat};
+    use super::{
+        chat_response_to_responses, force_reasoning_content_on_chat_body,
+        responses_request_to_chat, TOOL_CALL_REASONING_PLACEHOLDER,
+    };
     use serde_json::Value;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn force_reasoning_fills_missing_reasoning_on_plain_assistant_turns() {
+        // A no-tool assistant turn without reasoning_content is exactly the
+        // 11155 case. The forcer must add the placeholder without touching turns
+        // that already carry real reasoning, and never touch user/system turns.
+        let body = serde_json::json!({
+            "model": "deepseek-reasoner",
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "first answer"},
+                {"role": "user", "content": "again"},
+                {"role": "assistant", "content": "second", "reasoning_content": "kept"}
+            ]
+        });
+        let forced = force_reasoning_content_on_chat_body(body.to_string().as_bytes())
+            .expect("a plain assistant turn was missing reasoning_content");
+        let value: Value = serde_json::from_slice(&forced).unwrap();
+        let messages = value["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[0].get("reasoning_content"),
+            None,
+            "system untouched"
+        );
+        assert_eq!(messages[1].get("reasoning_content"), None, "user untouched");
+        assert_eq!(
+            messages[2]["reasoning_content"].as_str(),
+            Some(TOOL_CALL_REASONING_PLACEHOLDER),
+            "missing reasoning filled with placeholder",
+        );
+        assert_eq!(
+            messages[4]["reasoning_content"].as_str(),
+            Some("kept"),
+            "real reasoning preserved",
+        );
+    }
+
+    #[test]
+    fn force_reasoning_is_a_noop_when_every_assistant_turn_already_has_reasoning() {
+        let body = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "a", "reasoning_content": "r"}
+            ]
+        });
+        assert!(
+            force_reasoning_content_on_chat_body(body.to_string().as_bytes()).is_none(),
+            "no change means no rewrite so callers can skip the retry",
+        );
+    }
 
     fn to_responses(status: u16, content_type: &str, body: &str) -> String {
         String::from_utf8(

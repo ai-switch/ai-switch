@@ -204,6 +204,10 @@ pub struct CreateApiRouteCredentialInput {
     /// well-formed reasoning ciphertext instead of only malformed values.
     #[serde(default)]
     pub responses_encrypted_content_aggressive_strip: Option<bool>,
+    /// Always send `reasoning_content` on assistant turns of a Responses→Chat
+    /// request instead of waiting to be told it is missing.治 11155.
+    #[serde(default)]
+    pub force_reasoning_content: Option<bool>,
     #[serde(default)]
     pub user_agent: Option<String>,
     /// Which relay panel dialect the account's balance is read with. Only the

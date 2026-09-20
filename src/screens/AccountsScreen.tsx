@@ -732,6 +732,16 @@ function shouldShowResponsesCustomToolCompatForFormat(
   return shouldShowResponsesCustomToolCompat(platform) && interfaceFormat === "openai-responses";
 }
 
+// The forced-reasoning switch only matters on the Responses→Chat bridge: a Codex
+// (Responses) client routed to an "openai" (Chat Completions) upstream. Other
+// dialects carry reasoning differently and never see `reasoning_content`.
+function shouldShowForceReasoningContentForFormat(
+  platform: PlatformKey,
+  interfaceFormat: InterfaceFormat,
+) {
+  return platform === "codex" && interfaceFormat === "openai";
+}
+
 /// The four upstream dialects a per-turn reminder can be written into are all
 /// reachable from these three platforms. Grok and the OpenCode-family platforms
 /// are excluded by scope, not by any technical limit — the writers cover every
@@ -1146,6 +1156,10 @@ function responsesCustomToolCompatFromConfig(config: Record<string, unknown>): b
   return config.responses_custom_tool_compat === true;
 }
 
+function forceReasoningContentFromConfig(config: Record<string, unknown>): boolean {
+  return config.force_reasoning_content === true;
+}
+
 function ResponsesEncryptedContentCleanupOption({
   checked,
   onChange,
@@ -1525,6 +1539,7 @@ function apiConfigJsonWithFields(
   turnReminderText = "",
   responsesEncryptedContentCleanup = false,
   responsesEncryptedContentAggressiveStrip = false,
+  forceReasoningContent = false,
 ) {
   const config = parseJsonObject(configJson);
   config.base_url = baseUrl.trim();
@@ -1536,6 +1551,13 @@ function apiConfigJsonWithFields(
   // own, so turning cleanup off cannot leave a live stripping flag behind.
   config.responses_encrypted_content_aggressive_strip =
     responsesEncryptedContentCleanup && responsesEncryptedContentAggressiveStrip;
+  // Omitted rather than written as `false`, so an account that never opts in
+  // carries no trace of the feature in its config.
+  if (forceReasoningContent) {
+    config.force_reasoning_content = true;
+  } else {
+    delete config.force_reasoning_content;
+  }
   config.inline_remote_images = inlineRemoteImages;
   // Omitted rather than written as `false`/`""`, so an account that never opts in
   // carries no trace of the feature in its config.
@@ -3005,6 +3027,7 @@ export function AccountsScreen({
     defaultInterfaceFormat(activePlatform),
   );
   const [apiResponsesCustomToolCompat, setApiResponsesCustomToolCompat] = useState(false);
+  const [apiForceReasoningContent, setApiForceReasoningContent] = useState(false);
   const [apiResponsesEncryptedContentCleanup, setApiResponsesEncryptedContentCleanup] = useState(false);
   const [apiResponsesEncryptedContentAggressiveStrip, setApiResponsesEncryptedContentAggressiveStrip] = useState(false);
   const [apiUserAgent, setApiUserAgent] = useState("");
@@ -3052,6 +3075,7 @@ export function AccountsScreen({
   const [editApiBaseUrlAdjustment, setEditApiBaseUrlAdjustment] = useState<CodexBaseUrlAdjustment | null>(null);
   const [editApiInterfaceFormat, setEditApiInterfaceFormat] = useState<InterfaceFormat>("openai");
   const [editResponsesCustomToolCompat, setEditResponsesCustomToolCompat] = useState(false);
+  const [editForceReasoningContent, setEditForceReasoningContent] = useState(false);
   const [editResponsesEncryptedContentCleanup, setEditResponsesEncryptedContentCleanup] = useState(false);
   const [editResponsesEncryptedContentAggressiveStrip, setEditResponsesEncryptedContentAggressiveStrip] = useState(false);
   const [editInlineRemoteImages, setEditInlineRemoteImages] = useState(false);
@@ -3656,6 +3680,7 @@ export function AccountsScreen({
     setApiKeyOcrError(null);
     setApiInterfaceFormat(nextInterfaceFormat);
     setApiResponsesCustomToolCompat(false);
+    setApiForceReasoningContent(false);
     setApiResponsesEncryptedContentCleanup(false);
     setApiResponsesEncryptedContentAggressiveStrip(false);
     setApiUserAgent("");
@@ -3715,6 +3740,7 @@ export function AccountsScreen({
       setEditApiInterfaceFormat(interfaceFormat);
       setEditApiKeyField(anthropicApiKeyFieldFromConfig(config, "ANTHROPIC_API_KEY"));
       setEditResponsesCustomToolCompat(responsesCustomToolCompatFromConfig(config));
+      setEditForceReasoningContent(forceReasoningContentFromConfig(config));
       setEditResponsesEncryptedContentCleanup(config.responses_encrypted_content_cleanup === true);
       setEditResponsesEncryptedContentAggressiveStrip(
         config.responses_encrypted_content_aggressive_strip === true,
@@ -3733,6 +3759,7 @@ export function AccountsScreen({
       setEditApiInterfaceFormat("openai");
       setEditApiKeyField("ANTHROPIC_API_KEY");
       setEditResponsesCustomToolCompat(false);
+      setEditForceReasoningContent(false);
       setEditResponsesEncryptedContentCleanup(false);
       setEditResponsesEncryptedContentAggressiveStrip(false);
       setEditInlineRemoteImages(false);
@@ -4213,6 +4240,7 @@ export function AccountsScreen({
           preview_json: apiPreviewJson.trim() || null,
           batch_id: batch?.id ?? null,
           responses_custom_tool_compat: apiResponsesCustomToolCompat,
+          ...(apiForceReasoningContent ? { force_reasoning_content: true } : {}),
           ...(apiResponsesEncryptedContentCleanup ? { responses_encrypted_content_cleanup: true } : {}),
           ...(apiResponsesEncryptedContentCleanup && apiResponsesEncryptedContentAggressiveStrip
             ? { responses_encrypted_content_aggressive_strip: true }
@@ -4906,6 +4934,7 @@ export function AccountsScreen({
                 editTurnReminderText,
                 editResponsesEncryptedContentCleanup,
                 editResponsesEncryptedContentAggressiveStrip,
+                editForceReasoningContent,
               ),
             )
           : writeUserAgentToConfig(
@@ -8976,6 +9005,23 @@ export function AccountsScreen({
                         onChange={setApiResponsesEncryptedContentCleanup}
                       />
                     ) : null}
+                    {shouldShowForceReasoningContentForFormat(activePlatform, apiInterfaceFormat) ? (
+                      <label className="flex items-start gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12px] font-medium text-stone-700">
+                        <input
+                          aria-label="强制回传推理内容（Chat 中转）"
+                          checked={apiForceReasoningContent}
+                          className="mt-0.5"
+                          onChange={(event) => setApiForceReasoningContent(event.target.checked)}
+                          type="checkbox"
+                        />
+                        <span className="grid gap-1">
+                          <span>强制回传推理内容（Chat 中转）</span>
+                          <span className="text-[11px] font-medium text-stone-500">
+                            仅当上游为思考模型（DeepSeek/MiMo 等）且报 reasoning_content 缺失（如 11155）时勾选，会在每次请求主动回传 reasoning_content。默认不勾选：碰到该报错会自动补齐并重试一次。
+                          </span>
+                        </span>
+                      </label>
+                    ) : null}
                     <label className={labelClass}>
                       预览 JSON（可选）
                       <textarea
@@ -9789,6 +9835,23 @@ export function AccountsScreen({
                       onAggressiveStripChange={setEditResponsesEncryptedContentAggressiveStrip}
                       onChange={setEditResponsesEncryptedContentCleanup}
                     />
+                  ) : null}
+                  {shouldShowForceReasoningContentForFormat(activePlatform, editApiInterfaceFormat) ? (
+                    <label className="flex items-start gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12px] font-medium text-stone-700">
+                      <input
+                        aria-label="强制回传推理内容（Chat 中转）"
+                        checked={editForceReasoningContent}
+                        className="mt-0.5"
+                        onChange={(event) => setEditForceReasoningContent(event.target.checked)}
+                        type="checkbox"
+                      />
+                      <span className="grid gap-1">
+                        <span>强制回传推理内容（Chat 中转）</span>
+                        <span className="text-[11px] font-medium text-stone-500">
+                          仅当上游为思考模型（DeepSeek/MiMo 等）且报 reasoning_content 缺失（如 11155）时勾选，会在每次请求主动回传 reasoning_content。默认不勾选：碰到该报错会自动补齐并重试一次。
+                        </span>
+                      </span>
+                    </label>
                   ) : null}
                   <label className="flex items-start gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12px] font-medium text-stone-700">
                     <input

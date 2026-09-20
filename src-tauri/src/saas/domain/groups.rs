@@ -168,7 +168,7 @@ async fn eligible_accounts(
         "SELECT rc.id,rc.platform,rc.kind,rc.display_name,rc.config_json
          FROM route_credentials rc
          JOIN route_pool_members pm ON pm.route_credential_id=rc.id AND pm.platform=rc.platform
-         WHERE pm.group_id=? AND rc.platform=? AND rc.status='ok' AND rc.archived_at IS NULL
+         WHERE pm.group_id=? AND rc.platform=? AND rc.status='ok'
          ORDER BY rc.id",
     )
     .bind(&group.id)

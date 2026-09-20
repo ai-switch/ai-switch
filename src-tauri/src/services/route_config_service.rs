@@ -1273,6 +1273,7 @@ command = "npx"
                 responses_custom_tool_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
+                force_reasoning_content: None,
                 user_agent: None,
                 relay_balance_provider: None,
                 relay_balance_access_token: None,

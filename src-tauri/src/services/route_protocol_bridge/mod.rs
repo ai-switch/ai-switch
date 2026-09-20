@@ -7,6 +7,7 @@ mod claude_gemini;
 mod claude_responses;
 mod common;
 mod gemini_schema;
+mod reasoning_bridge;
 mod responses_chat;
 mod responses_claude;
 mod responses_gemini;
@@ -14,6 +15,8 @@ mod responses_responses;
 pub(crate) mod sse;
 mod thinking_text;
 pub(crate) mod turn_reminder;
+
+pub(crate) use responses_chat::force_reasoning_content_on_chat_body;
 
 use crate::models::platform::{ApiDialect, PlatformId};
 use std::collections::BTreeMap;

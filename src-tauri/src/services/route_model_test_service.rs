@@ -1337,7 +1337,7 @@ async fn load_account_credential(
                 secret_payload_json, config_json,
                 next_retry_at, cooldown_until
          FROM route_credentials
-         WHERE id = ? AND platform = ? AND archived_at IS NULL",
+         WHERE id = ? AND platform = ?",
     )
     .bind(account_id)
     .bind(platform)
