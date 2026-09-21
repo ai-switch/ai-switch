@@ -51,21 +51,42 @@ jobs:
             pnpm --dir packages/tauri-plugin-devkit exec playwright install chromium webkit
           fi
 
-      - name: Runtime typecheck, tests and build
-        run: |
-          pnpm --dir packages/tauri-plugin-runtime typecheck
-          pnpm --dir packages/tauri-plugin-runtime test
-          pnpm --dir packages/tauri-plugin-runtime build
+      # One command per step on purpose, same reason as in release.yml: this
+      # matrix includes windows-latest, where a `run:` without a `shell:` goes
+      # through pwsh and the step's exit code is the *last* command's — so a
+      # failing `typecheck` was swallowed by the successful `build` after it and
+      # the gate reported green. Splitting keeps each platform's default shell
+      # and leaves every command as the last one in its step, which is the only
+      # shape both bash (`-e`) and pwsh report correctly.
+      - name: Runtime typecheck
+        run: pnpm --dir packages/tauri-plugin-runtime typecheck
 
-      - name: Devkit typecheck, tests and build
-        run: |
-          pnpm --dir packages/tauri-plugin-devkit typecheck
-          pnpm --dir packages/tauri-plugin-devkit test
-          pnpm --dir packages/tauri-plugin-devkit run test:types
-          pnpm --dir packages/tauri-plugin-devkit run test:types:browser
-          pnpm --dir packages/tauri-plugin-devkit run test:built
-          pnpm --dir packages/tauri-plugin-devkit run check:node-types
-          pnpm --dir packages/tauri-plugin-devkit run build
+      - name: Runtime tests
+        run: pnpm --dir packages/tauri-plugin-runtime test
+
+      - name: Runtime build
+        run: pnpm --dir packages/tauri-plugin-runtime build
+
+      - name: Devkit typecheck
+        run: pnpm --dir packages/tauri-plugin-devkit typecheck
+
+      - name: Devkit tests
+        run: pnpm --dir packages/tauri-plugin-devkit test
+
+      - name: Devkit type tests
+        run: pnpm --dir packages/tauri-plugin-devkit run test:types
+
+      - name: Devkit browser type tests
+        run: pnpm --dir packages/tauri-plugin-devkit run test:types:browser
+
+      - name: Devkit built tests
+        run: pnpm --dir packages/tauri-plugin-devkit run test:built
+
+      - name: Devkit node types check
+        run: pnpm --dir packages/tauri-plugin-devkit run check:node-types
+
+      - name: Devkit build
+        run: pnpm --dir packages/tauri-plugin-devkit run build
 
       - name: Browser tests
         if: matrix.os == 'ubuntu-latest'
