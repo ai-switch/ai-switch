@@ -1,0 +1,12 @@
+# docs-site is deliberately its own workspace root.
+#
+# The repository root has a pnpm-workspace.yaml covering `packages/*` and
+# `examples/*`, and docs-site is not one of its members. Without this file pnpm
+# walks up from docs-site, adopts that root, and installs the root workspace
+# instead: `pnpm install` in docs-site reported "Scope: all 4 workspace
+# projects" and never installed vitepress, so `pnpm docs:build` failed with
+# "vitepress: not found" and the docs site stopped deploying. Stopping the
+# search here keeps docs-site standalone, which is what its own
+# pnpm-lock.yaml already assumes.
+packages:
+  - '.'
