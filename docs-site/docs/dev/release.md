@@ -33,7 +33,7 @@ v1.0.0-alpha.2
 
 | 作业 | 运行环境 | 职责 |
 | --- | --- | --- |
-| `prepare` | `ubuntu-latest` | 校验 tag 与版本一致性、校验 tag 归属分支、创建草稿 Release 并生成发布说明 |
+| `prepare` | `ubuntu-latest` | 校验 tag 与版本一致性、校验 tag 归属分支、从 tag 提交信息取发布说明并创建草稿 Release |
 | `build` | 矩阵：`windows-latest` / `macos-latest` / `macos-15-intel` / `ubuntu-latest` | 跑全量检查、构建 sidecar、打包 Tauri 安装包与独立服务器、上传产物 |
 | `publish` | `ubuntu-latest` | 汇总产物、生成并校验 `latest.json`、把草稿 Release 转为正式发布 |
 
@@ -69,9 +69,19 @@ fi
 
 tag 指向的提交必须是默认分支的祖先。在功能分支上打 tag 并推送会被拒绝——这道检查防止未合并的代码被误发布。
 
-### 3. 创建草稿 Release
+### 3. 从 tag 提交信息取发布说明，创建草稿 Release
 
-通过上述校验后，用 `ncipollo/release-action` 创建**草稿**（`draft: true`）Release 并自动生成发布说明（`generateReleaseNotes: true`）。是否标记为预发布由 tag 名判定：
+发布说明**不是**自动生成的。`prepare` 直接取 **tag 指向那个提交的完整信息**：
+
+```bash
+git log -1 --format=%B "$GITHUB_SHA" > release-notes.md   # 为空就报错退出
+```
+
+再用 `ncipollo/release-action` 以 `bodyFile: release-notes.md` 创建**草稿**（`draft: true`）Release。
+
+所以 tag 必须打在一个 `Release vX.Y.Z` 提交上，而那条提交的信息体就是双语更新日志：中文条目 → 空行 → 独占一行的 29 个连字符 → 空行 → 英文条目。这份文本同时进 GitHub Release 正文与更新清单的 `notes`，桌面端按那条分隔线切分中英文。**tag 打在功能提交上，发布说明就会变成那条功能提交的信息**——纯中文、没有分隔线，更新弹窗里会显示成一段技术描述。
+
+是否标记为预发布由 tag 名判定：
 
 ```yaml
 prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
