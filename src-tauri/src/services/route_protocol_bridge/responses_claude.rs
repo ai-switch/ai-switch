@@ -257,6 +257,69 @@ mod tests {
         );
     }
 
+    /// A fresh thinking block takes the same trip without any envelope of ours:
+    /// the signature is the upstream's own. The client has to get a summary it can
+    /// render, and the next request has to hand the upstream back the block it
+    /// signed rather than a placeholder it will reject.
+    #[test]
+    fn fresh_thinking_reaches_the_client_and_replays_verbatim() {
+        let upstream = serde_json::json!({
+            "id": "msg_1",
+            "model": "claude-sonnet-4-5",
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "thinking", "thinking": "Need the file first.", "signature": "real-sig"},
+                {"type": "tool_use", "id": "call_1", "name": "read", "input": {}}
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+        let back = anthropic_response_to_responses(
+            200,
+            Some("application/json"),
+            &serde_json::to_vec(&upstream).unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&back.body).unwrap();
+        let reasoning = value["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "reasoning")
+            .expect("thinking must become a reasoning item")
+            .clone();
+        assert_eq!(reasoning["summary"][0]["text"], "Need the file first.");
+
+        // Next turn: Codex replays that item ahead of the tool output.
+        let request = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "input": [
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "read it"}]},
+                reasoning,
+                {"type": "function_call", "call_id": "call_1", "name": "read",
+                 "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "contents"}
+            ]
+        });
+        let converted: Value = serde_json::from_slice(
+            &responses_request_to_anthropic(&serde_json::to_vec(&request).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let assistant = converted["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("assistant turn");
+        assert_eq!(assistant["content"][0]["type"], "thinking");
+        assert_eq!(assistant["content"][0]["thinking"], "Need the file first.");
+        assert_eq!(
+            assistant["content"][0]["signature"], "real-sig",
+            "the upstream's own signature must come back, not an ai-switch envelope"
+        );
+    }
+
     /// Codex replays its own transcript on every turn, and after the first
     /// `apply_patch` that transcript contains item types no Anthropic client ever
     /// sends. Rejecting one fails the whole request, so the relay looks dead
@@ -497,13 +560,47 @@ mod tests {
             "visible text must survive: {output}"
         );
         assert!(
-            !output.contains("Let me think."),
-            "reasoning must not leak into visible output: {output}"
+            output.contains("event: response.reasoning_summary_text.delta")
+                && output.contains("\"delta\":\"Let me think.\""),
+            "thinking must reach the client as a reasoning summary: {output}"
         );
+
+        let completed: Value = serde_json::from_str(
+            output
+                .split("event: response.completed")
+                .nth(1)
+                .and_then(|rest| rest.split("data: ").nth(1))
+                .expect("completed event payload")
+                .trim(),
+        )
+        .expect("completed event json");
+        assert_eq!(completed["response"]["output_text"], "42");
+        let items = completed["response"]["output"].as_array().expect("output");
+        assert_eq!(
+            items[0]["type"], "reasoning",
+            "the turn's thinking must lead the output: {completed}"
+        );
+        assert_eq!(items[0]["summary"][0]["text"], "Let me think.");
+        assert_eq!(items[1]["type"], "message");
+        // The signature has to survive the trip out, or the replayed block on the
+        // next request is not the one the upstream signed.
+        let block = super::super::reasoning_bridge::decode_anthropic_thinking_block(
+            items[0]["encrypted_content"]
+                .as_str()
+                .expect("native block envelope"),
+        )
+        .expect("native block envelope must decode");
+        assert_eq!(block["type"], "thinking");
+        assert_eq!(block["thinking"], "Let me think.");
+        assert_eq!(block["signature"], "Erf1");
     }
 
+    /// A thinking block is reasoning, not answer text. It has to reach the client
+    /// as a `reasoning` item whose summary carries the plaintext, with the signed
+    /// block in `encrypted_content` so a replayed turn matches what the upstream
+    /// signed. `redacted_thinking` has no plaintext, so it carries the payload only.
     #[test]
-    fn thinking_content_blocks_do_not_become_output_text() {
+    fn thinking_content_blocks_become_reasoning_items() {
         let upstream = serde_json::json!({
             "id": "msg_1",
             "model": "claude-sonnet-4",
@@ -525,12 +622,32 @@ mod tests {
         .expect("thinking blocks must not fail the transform");
         let value: Value = serde_json::from_slice(&converted.body).unwrap();
 
-        let rendered = serde_json::to_string(&value).unwrap();
-        assert!(
-            !rendered.contains("Internal reasoning."),
-            "reasoning must not leak into output: {rendered}"
+        let items = value["output"].as_array().expect("output");
+        assert_eq!(items[0]["type"], "reasoning");
+        assert_eq!(items[0]["summary"][0]["text"], "Internal reasoning.");
+        assert_eq!(
+            super::super::reasoning_bridge::decode_anthropic_thinking_block(
+                items[0]["encrypted_content"]
+                    .as_str()
+                    .expect("native block envelope")
+            )
+            .expect("native block envelope must decode")["signature"],
+            "sig"
         );
-        assert!(rendered.contains("The answer is 42."));
+        assert_eq!(items[1]["type"], "reasoning");
+        assert_eq!(items[1]["summary"], serde_json::json!([]));
+        assert_eq!(
+            super::super::reasoning_bridge::decode_anthropic_thinking_block(
+                items[1]["encrypted_content"]
+                    .as_str()
+                    .expect("redacted block envelope")
+            )
+            .expect("redacted block envelope must decode")["type"],
+            "redacted_thinking"
+        );
+        assert_eq!(items[2]["type"], "message");
+        assert_eq!(items[2]["content"][0]["text"], "The answer is 42.");
+        assert_eq!(value["output_text"], "The answer is 42.");
     }
 
     /// A relay that strips extended thinking, or a model answering without it,
@@ -1004,8 +1121,21 @@ impl AnthropicSseState {
                 }
             }
             // thinking_delta / signature_delta arrive whenever this bridge asked
-            // for thinking (see the request path). Reasoning has no Responses
-            // input slot here, so absorb the deltas instead of failing.
+            // for thinking (see the request path). They are accumulated onto the
+            // block so `anthropic_content_to_responses_output` can hand the
+            // client a `reasoning` item: the plaintext becomes its summary and
+            // the signature rides in `encrypted_content`, which is what makes the
+            // next turn's replayed thinking block acceptable upstream.
+            Some("thinking_delta") => {
+                let thinking = delta.get("thinking").and_then(Value::as_str).unwrap_or("");
+                let current = block.get("thinking").and_then(Value::as_str).unwrap_or("");
+                block["thinking"] = Value::String(format!("{current}{thinking}"));
+            }
+            Some("signature_delta") => {
+                let signature = delta.get("signature").and_then(Value::as_str).unwrap_or("");
+                let current = block.get("signature").and_then(Value::as_str).unwrap_or("");
+                block["signature"] = Value::String(format!("{current}{signature}"));
+            }
             Some(_) | None => {}
         }
         Ok(())
@@ -1130,11 +1260,12 @@ fn convert_input_items(items: &[Value]) -> Result<Vec<Value>, String> {
         if is_reasoning_input_item(item) {
             // Recover the reasoning as an Anthropic thinking block instead of
             // dropping it, so a stateless tool loop against a Claude upstream
-            // keeps the chain of thought that justified each tool call. Empty
-            // reasoning items (no summary, no ciphertext) carry nothing and are
-            // skipped by `anthropic_block_from_openai_reasoning_item`.
-            if let Some(block) =
-                super::reasoning_bridge::anthropic_block_from_openai_reasoning_item(item)
+            // keeps the chain of thought that justified each tool call. A block
+            // this bridge carried out to the client comes back verbatim, real
+            // signature included; anything else falls back to the plaintext or
+            // round-trip envelope. Empty reasoning items (no summary, no
+            // ciphertext) carry nothing and are skipped.
+            if let Some(block) = super::reasoning_bridge::anthropic_block_from_reasoning_item(item)
             {
                 pending.push_thinking(&mut messages, block);
             }
@@ -1494,10 +1625,14 @@ fn anthropic_content_to_responses_output(
     let mut output = Vec::new();
     let mut text = String::new();
     let mut message_content = Vec::new();
+    // Reasoning from this turn's own thinking blocks, kept aside so it can lead
+    // the output: a client that sees the answer before its reasoning renders the
+    // reasoning as a reply to it.
+    let mut native_reasoning = Vec::new();
     let Some(content) = content else {
         return Ok((output, text));
     };
-    for item in content {
+    for (block_index, item) in content.iter().enumerate() {
         match item.get("type").and_then(Value::as_str) {
             Some("text") => {
                 let item_text = item.get("text").and_then(Value::as_str).unwrap_or("");
@@ -1535,16 +1670,28 @@ fn anthropic_content_to_responses_output(
                 output.push(function_call);
             }
             // Thinking blocks arrive because the request path enables thinking.
-            // When the block carries one of our envelopes (see reasoning_bridge),
-            // decode it back into the exact Responses `reasoning` item so the
-            // client can replay it next turn. A native thinking block (real
-            // upstream signature, no envelope) is reasoning, not visible output,
-            // so it is still dropped rather than leaked into output_text.
+            // Two shapes reach here and both have to become a `reasoning` item:
+            //
+            // - the block is one the client replayed and the upstream echoed
+            //   back, so it carries our own envelope and decodes into the exact
+            //   original item (see `reasoning_bridge`);
+            // - the block is fresh thinking from this turn, signed by the
+            //   upstream. Its plaintext becomes the summary the client renders,
+            //   and the verbatim block is carried in `encrypted_content` so the
+            //   signature survives the next request. Dropping it here is what
+            //   used to leave Codex with no thinking to show at all.
             Some("thinking") | Some("redacted_thinking") => {
                 if let Some(reasoning) =
                     super::reasoning_bridge::openai_reasoning_item_from_anthropic_block(item)
                 {
                     output.push(reasoning);
+                } else if let Some(reasoning) =
+                    super::reasoning_bridge::reasoning_item_from_anthropic_block(
+                        &format!("rs_{}_{}", sanitize_id(response_id), block_index),
+                        item,
+                    )
+                {
+                    native_reasoning.push(reasoning);
                 }
             }
             Some(_) | None => {}
@@ -1592,6 +1739,13 @@ fn anthropic_content_to_responses_output(
                 "summary": [{"type": "summary_text", "text": reasoning}]
             }),
         );
+    }
+    // The turn's own thinking leads everything else. `inlined_reasoning` is the
+    // `<thinking>` fallback a relay writes into the text when its real thinking
+    // channel was never enabled, so a native block always outranks it.
+    if !native_reasoning.is_empty() {
+        native_reasoning.append(&mut output);
+        output = native_reasoning;
     }
     Ok((output, text))
 }

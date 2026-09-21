@@ -325,6 +325,103 @@ pub fn transform_response_with_tool_namespaces(
         }
     }
 }
+
+/// A bridge whose response transform runs one SSE block at a time.
+///
+/// Buffering a response is what lets the retry loop switch accounts on a failure
+/// that only shows up late in the body, so it stays the default. But a bridge
+/// that rewrites the body record by record does not actually need the whole
+/// body — and forcing it through the buffered path costs the client every
+/// incremental frame. This is the incremental counterpart of
+/// [`transform_response_with_tool_namespaces`], for the bridges that can.
+///
+/// The rest — `ResponsesToAnthropic`, the `ClaudeTo*`/`ChatTo*` family, the
+/// Gemini and image bridges — aggregate the stream into one document before
+/// re-emitting it, so they have no incremental form and stay buffered.
+#[derive(Debug)]
+pub(crate) enum IncrementalResponseBridge {
+    /// Responses → Responses. A byte-for-byte passthrough until a tool namespace
+    /// has to be restored, which is a per-record rewrite.
+    ResponsesToResponses {
+        tool_namespaces: BTreeMap<String, String>,
+    },
+    /// Responses → Chat, driven by the same state machine as the buffered path.
+    ResponsesToChat(responses_chat::ChatStreamBridge),
+}
+
+impl IncrementalResponseBridge {
+    /// The incremental transformer for `kind`, or `None` when that bridge needs
+    /// the whole body and must stay on the buffered path.
+    pub(crate) fn new(
+        kind: ProtocolBridgeKind,
+        tool_namespaces: &BTreeMap<String, String>,
+    ) -> Option<Self> {
+        match kind {
+            ProtocolBridgeKind::ResponsesToResponses => Some(Self::ResponsesToResponses {
+                tool_namespaces: tool_namespaces.clone(),
+            }),
+            ProtocolBridgeKind::ResponsesToChat => Some(Self::ResponsesToChat(
+                responses_chat::ChatStreamBridge::new(tool_namespaces.clone()),
+            )),
+            _ => None,
+        }
+    }
+
+    /// Converts one complete SSE block, its `\n\n` terminator excluded.
+    ///
+    /// The result is a complete record — terminator included — or `None` when
+    /// the block has nothing to forward: a blank keep-alive, or a record this
+    /// bridge does not re-emit.
+    pub(crate) fn push_block(&mut self, block: &str) -> Result<Option<String>, String> {
+        match self {
+            Self::ResponsesToResponses { tool_namespaces } => {
+                if tool_namespaces.is_empty() {
+                    // The buffered path is a byte-for-byte passthrough here, so
+                    // re-serializing would only reorder keys for nothing.
+                    return Ok(Some(format!("{block}\n\n")));
+                }
+                Ok(
+                    responses_responses::responses_sse_block_to_responses(block, tool_namespaces)?
+                        .map(|converted| format!("{converted}\n\n")),
+                )
+            }
+            Self::ResponsesToChat(bridge) => {
+                let data = block
+                    .lines()
+                    .filter_map(|line| line.trim().strip_prefix("data:").map(str::trim))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if data.is_empty() || data == "[DONE]" {
+                    return Ok(None);
+                }
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else {
+                    return Ok(None);
+                };
+                let output = bridge.push_value(&value)?;
+                Ok((!output.is_empty()).then_some(output))
+            }
+        }
+    }
+
+    /// Whether the upstream reported a terminal error. Once true the closing
+    /// events must not be emitted and no further block is convertible.
+    pub(crate) fn failed(&self) -> bool {
+        match self {
+            Self::ResponsesToResponses { .. } => false,
+            Self::ResponsesToChat(bridge) => bridge.failed(),
+        }
+    }
+
+    /// Emits the closing events for the turn. Empty for a bridge whose records
+    /// are self-contained.
+    pub(crate) fn finish(&mut self) -> Result<String, String> {
+        match self {
+            Self::ResponsesToResponses { .. } => Ok(String::new()),
+            Self::ResponsesToChat(bridge) => bridge.finish(),
+        }
+    }
+}
+
 fn passthrough_request(path: &str, body: &[u8], streaming: bool) -> PreparedBridgeRequest {
     PreparedBridgeRequest {
         kind: None,

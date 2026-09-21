@@ -50,10 +50,11 @@ use crate::services::route_protocol_bridge::{
     force_reasoning_content_on_chat_body, is_anthropic_count_tokens_path,
     prepare_request as prepare_protocol_bridge_request,
     transform_response_with_tool_namespaces as transform_protocol_bridge_response, turn_reminder,
-    PreparedBridgeRequest, ProtocolBridgeKind,
+    IncrementalResponseBridge, PreparedBridgeRequest, ProtocolBridgeKind,
 };
 use crate::services::route_proxy_live_log::{
-    stage_preview, RouteProxyLiveLog, RouteProxyLiveLogEntry, LIVE_LOG_STAGE_LIMIT,
+    stage_preview, truncated_stage_names, RouteProxyLiveLog, RouteProxyLiveLogEntry,
+    LIVE_LOG_ELISION_MARKER, LIVE_LOG_RAW_PREVIEW_LIMIT, LIVE_LOG_STAGE_LIMIT,
 };
 use crate::services::route_proxy_stream::StreamObserver;
 use axum::body::Body;
@@ -1085,6 +1086,7 @@ pub(crate) async fn forward_request(
                         None,
                         None,
                         None,
+                        None,
                     );
                     retry_errors.push(format!("{}: {error}", selected.display_name));
                     continue;
@@ -1166,6 +1168,7 @@ pub(crate) async fn forward_request(
                     None,
                     None,
                     Some(&body_bytes),
+                    None,
                     None,
                     None,
                     None,
@@ -1253,6 +1256,7 @@ pub(crate) async fn forward_request(
                     Some(&upstream_request_bytes),
                     None,
                     None,
+                    None,
                 );
                 if should_retry_same_credential {
                     wait_for_credential_retry(failure_policy).await;
@@ -1292,7 +1296,28 @@ pub(crate) async fn forward_request(
             status,
             &custom_tool_names,
             &credential,
+            &tool_namespaces,
         ) {
+            // The incremental transformer for a bridged response. `None` leaves
+            // the unbridged path a verbatim byte forward, as it has always been.
+            let transform = bridge_kind
+                .and_then(|kind| {
+                    IncrementalResponseBridge::new(kind, &tool_namespaces)
+                        .map(|bridge| (kind, bridge))
+                })
+                .map(|(kind, bridge)| {
+                    StreamResponseTransform::new(
+                        kind,
+                        bridge,
+                        status,
+                        upstream_headers
+                            .get(axum::http::header::CONTENT_TYPE)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string),
+                        tool_namespaces.clone(),
+                        custom_tool_names.clone(),
+                    )
+                });
             let mut stream = Box::pin(upstream.bytes_stream());
             // Wait for the first chunk while still inside the retry loop: until
             // a byte reaches the client this attempt can still be abandoned for
@@ -1437,13 +1462,23 @@ pub(crate) async fn forward_request(
                 client_request: body_bytes.clone(),
                 upstream_request: upstream_request_bytes.clone(),
                 upstream_headers: request_headers.clone(),
-                observer: StreamObserver::new(LIVE_LOG_STAGE_LIMIT, streaming_request),
+                // Keeps more raw bytes than a stage preview needs: the echo of
+                // the request inside `response.created` has to be stripped
+                // before the preview is cut, and stripping it is pointless if
+                // the bytes behind it were never retained. See
+                // `LIVE_LOG_RAW_PREVIEW_LIMIT`.
+                observer: StreamObserver::new(LIVE_LOG_RAW_PREVIEW_LIMIT, streaming_request),
                 // Held until the stream ends so the account's concurrency slot
                 // is not handed out while this response is still in flight.
                 _activity_lease: activity_lease,
             };
 
-            let body = Body::from_stream(observed_upstream_stream(first_chunk, stream, completion));
+            let body = Body::from_stream(observed_upstream_stream(
+                first_chunk,
+                stream,
+                transform,
+                completion,
+            ));
             upstream_headers.remove(axum::http::header::CONTENT_LENGTH);
             return proxy_upstream_stream_response(status, upstream_headers, body);
         }
@@ -1499,6 +1534,7 @@ pub(crate) async fn forward_request(
                     bridge_name.as_deref(),
                     Some(&body_bytes),
                     Some(&upstream_request_bytes),
+                    None,
                     None,
                     None,
                 );
@@ -1614,6 +1650,7 @@ pub(crate) async fn forward_request(
                         Some(&upstream_request_bytes),
                         Some(&raw_upstream_bytes),
                         None,
+                        None,
                     );
                     retry_errors.push(error_message);
                     continue;
@@ -1727,6 +1764,7 @@ pub(crate) async fn forward_request(
             Some(&upstream_request_bytes),
             Some(&raw_upstream_bytes),
             Some(response_bytes.as_ref()),
+            None,
         );
 
         let next_index = (credential_index + 1) % credentials.len();
@@ -2540,26 +2578,39 @@ fn proxy_upstream_stream_response(
 /// Every condition here exists because some consumer of the buffered path needs
 /// the complete body:
 ///
-/// - a protocol bridge rewrites the body wholesale, and five of the seven do it
-///   by aggregating the entire stream before re-emitting it;
 /// - a non-streaming reply has no frames to inspect incrementally, and nothing
 ///   to gain — the client waits for one JSON document either way;
 /// - a non-2xx body decides retry classification, which must happen before
 ///   anything reaches the client;
-/// - custom tool restoration rewrites frames on the way out;
 /// - official credentials parse the body for subscription/quota signals.
+///
+/// A bridge used to be on this list wholesale, because five of the seven
+/// aggregate the entire stream before re-emitting it. That is still true of
+/// those five, but it was never true of `ResponsesToResponses` or
+/// `ResponsesToChat`: both rewrite the body record by record, so
+/// [`IncrementalResponseBridge`] can drive them off a live stream. Buffering
+/// them cost the client every incremental frame — a Codex turn went silent until
+/// the upstream had finished, which for a long thinking turn is minutes.
+///
+/// Custom tool restoration was on the list for the same reason, and for the same
+/// fix: it is a per-record rewrite too, so it no longer forces a buffer once the
+/// response is framed. It still does on the unbridged path, which forwards bytes
+/// verbatim and so has nowhere to hook it.
 fn should_stream_upstream_response(
     bridge_kind: Option<ProtocolBridgeKind>,
     streaming_request: bool,
     status: StatusCode,
     custom_tool_names: &std::collections::HashSet<String>,
     credential: &SelectedCredential,
+    tool_namespaces: &std::collections::BTreeMap<String, String>,
 ) -> bool {
-    bridge_kind.is_none()
-        && streaming_request
-        && status.is_success()
-        && custom_tool_names.is_empty()
-        && credential.kind != "official"
+    if !(streaming_request && status.is_success() && credential.kind != "official") {
+        return false;
+    }
+    match bridge_kind {
+        None => custom_tool_names.is_empty(),
+        Some(kind) => IncrementalResponseBridge::new(kind, tool_namespaces).is_some(),
+    }
 }
 
 /// The per-request values a streamed response still has to report once it ends.
@@ -2641,6 +2692,7 @@ async fn handle_stream_prime_failure(
         context.bridge_name,
         Some(context.client_request),
         Some(context.upstream_request),
+        None,
         None,
         None,
     );
@@ -2817,9 +2869,168 @@ impl StreamCompletion {
 ///
 /// The completion handle is moved into the stream, so it is dropped — and the
 /// books closed — when the stream ends or the client disconnects.
+/// Rewrites a streamed upstream response as it passes through.
+///
+/// A streamed response never exists as one buffer, so the whole-body bridge
+/// transform cannot run on it. This holds the incremental counterpart: it frames
+/// the byte stream, hands each complete record to the bridge, and restores custom
+/// tool names per record. A frame split across chunks is held until its
+/// terminator arrives, so it is never emitted as two malformed halves.
+///
+/// An upstream that answers a streaming request with a single JSON document
+/// never produces a frame. The whole buffer is then handed to the buffered
+/// transform at the end, which is exactly what the buffered path would have done
+/// with it — including the error bodies that arrive that way.
+struct StreamResponseTransform {
+    framer: crate::services::route_proxy_stream::SseFramer,
+    bridge: Option<IncrementalResponseBridge>,
+    custom_tool_names: std::collections::HashSet<String>,
+    /// Present whenever `bridge` is: the request facts the buffered path would
+    /// have used, for the not-actually-SSE fallback.
+    whole_body: Option<WholeBodyTransform>,
+    saw_block: bool,
+    finished: bool,
+}
+
+/// The request facts the whole-body fallback needs.
+struct WholeBodyTransform {
+    kind: ProtocolBridgeKind,
+    status: u16,
+    content_type: Option<String>,
+    tool_namespaces: std::collections::BTreeMap<String, String>,
+}
+
+impl StreamResponseTransform {
+    fn new(
+        kind: ProtocolBridgeKind,
+        bridge: IncrementalResponseBridge,
+        status: StatusCode,
+        content_type: Option<String>,
+        tool_namespaces: std::collections::BTreeMap<String, String>,
+        custom_tool_names: std::collections::HashSet<String>,
+    ) -> Self {
+        Self {
+            framer: crate::services::route_proxy_stream::SseFramer::new(),
+            bridge: Some(bridge),
+            custom_tool_names,
+            whole_body: Some(WholeBodyTransform {
+                kind,
+                status: status.as_u16(),
+                content_type,
+                tool_namespaces,
+            }),
+            saw_block: false,
+            finished: false,
+        }
+    }
+
+    /// Rewrites one already-complete record. `record` carries its own `\n\n`.
+    fn rewrite(&mut self, record: &str) -> Result<String, String> {
+        let converted = match self.bridge.as_mut() {
+            // The bridge frames its own output, so the terminator the framer
+            // stripped has to come back for the record to stay well-formed.
+            Some(bridge) => match bridge.push_block(record.trim_end_matches("\n\n"))? {
+                Some(converted) if !converted.ends_with("\n\n") => format!("{converted}\n\n"),
+                Some(converted) => converted,
+                None => return Ok(String::new()),
+            },
+            None => format!("{record}\n\n"),
+        };
+        Ok(self.restore_custom_tools(&converted))
+    }
+
+    /// Applies the same custom-tool rewrite the buffered path runs on the whole
+    /// body.
+    ///
+    /// It is line-delimited, so one record and a whole stream go through it
+    /// identically — which is the point: every byte this transform emits has to
+    /// pass here, the closing events included. Routing only `rewrite` through it
+    /// leaves the final `output_item.done` carrying a `function_call` where the
+    /// buffered path would have written a `custom_tool_call`.
+    fn restore_custom_tools(&self, text: &str) -> String {
+        String::from_utf8_lossy(&restore_custom_tools_in_responses_payload(
+            text.as_bytes(),
+            &self.custom_tool_names,
+        ))
+        .into_owned()
+    }
+
+    /// Whether the bridge reported a terminal failure. Nothing further is
+    /// convertible once it has, and the closing events must not follow it.
+    fn failed(&self) -> bool {
+        self.bridge
+            .as_ref()
+            .is_some_and(IncrementalResponseBridge::failed)
+    }
+
+    fn finished(&self) -> bool {
+        self.finished
+    }
+
+    /// Converts whatever this chunk completes. Returns the bytes to forward —
+    /// empty while a record is still split across chunks.
+    fn push(&mut self, chunk: &[u8]) -> Result<String, String> {
+        let mut output = String::new();
+        for record in self.framer.push_blocks(chunk) {
+            self.saw_block = true;
+            output.push_str(&self.rewrite(&record)?);
+            if self.failed() {
+                return Ok(output);
+            }
+        }
+        Ok(output)
+    }
+
+    /// Flushes the trailing bytes and emits the bridge's closing events.
+    fn finish(&mut self) -> Result<String, String> {
+        if self.finished {
+            return Ok(String::new());
+        }
+        self.finished = true;
+        let mut output = String::new();
+        let tail = self.framer.finish_block();
+        if !self.saw_block {
+            // Never framed: this is one document, not a stream. Run the buffered
+            // transform on it, which also covers an error body the upstream sent
+            // in place of the stream.
+            let Some(whole_body) = self.whole_body.take() else {
+                return Ok(tail.unwrap_or_default());
+            };
+            let body = tail.unwrap_or_default().into_bytes();
+            let converted =
+                crate::services::route_protocol_bridge::transform_response_with_tool_namespaces(
+                    whole_body.kind,
+                    whole_body.status,
+                    whole_body.content_type.as_deref(),
+                    &body,
+                    &whole_body.tool_namespaces,
+                )?;
+            return Ok(
+                String::from_utf8_lossy(&restore_custom_tools_in_responses_payload(
+                    &converted.body,
+                    &self.custom_tool_names,
+                ))
+                .into_owned(),
+            );
+        }
+        if let Some(tail) = tail {
+            output.push_str(&self.rewrite(&tail)?);
+        }
+        if self.failed() {
+            return Ok(output);
+        }
+        if let Some(bridge) = self.bridge.as_mut() {
+            let closing = bridge.finish()?;
+            output.push_str(&self.restore_custom_tools(&closing));
+        }
+        Ok(output)
+    }
+}
+
 fn observed_upstream_stream(
     first_chunk: axum::body::Bytes,
     rest: impl futures_util::Stream<Item = reqwest::Result<axum::body::Bytes>> + Send + 'static,
+    transform: Option<StreamResponseTransform>,
     completion: StreamCompletion,
 ) -> impl futures_util::Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send + 'static {
     let replayed = futures_util::StreamExt::chain(
@@ -2830,34 +3041,90 @@ fn observed_upstream_stream(
         completion: Some(completion),
     };
     futures_util::stream::unfold(
-        (Box::pin(replayed), guard),
-        |(mut stream, mut guard)| async move {
-            match futures_util::StreamExt::next(&mut stream).await {
-                Some(Ok(chunk)) => {
-                    if let Some(completion) = guard.completion.as_mut() {
-                        completion.observer.observe(&chunk);
+        (Box::pin(replayed), guard, transform),
+        |(mut stream, mut guard, mut transform)| async move {
+            loop {
+                match futures_util::StreamExt::next(&mut stream).await {
+                    Some(Ok(chunk)) => {
+                        if let Some(completion) = guard.completion.as_mut() {
+                            completion.observer.observe(&chunk);
+                        }
+                        // A response that is not bridged is forwarded verbatim.
+                        let mut failure = None;
+                        let converted = match transform.as_mut() {
+                            None => Some(chunk),
+                            Some(transform) => match transform.push(&chunk) {
+                                Ok(output) => (!output.is_empty())
+                                    .then(|| axum::body::Bytes::from(output.into_bytes())),
+                                Err(error) => {
+                                    failure = Some(error);
+                                    None
+                                }
+                            },
+                        };
+                        if let Some(error) = failure {
+                            if let Some(completion) = guard.completion.take() {
+                                completion.finish().await;
+                            }
+                            return Some((
+                                Err(std::io::Error::other(error)),
+                                (stream, guard, transform),
+                            ));
+                        }
+                        match converted {
+                            Some(converted) => {
+                                return Some((Ok(converted), (stream, guard, transform)))
+                            }
+                            // Still mid-record: nothing to forward yet.
+                            None => continue,
+                        }
                     }
-                    Some((Ok(chunk), (stream, guard)))
-                }
-                Some(Err(error)) => {
-                    // Upstream died mid-body. The client already has the earlier
-                    // bytes, so this can only end the stream — but the partial
-                    // response still gets accounted for.
-                    if let Some(completion) = guard.completion.take() {
-                        completion.finish().await;
+                    Some(Err(error)) => {
+                        // Upstream died mid-body. The client already has the earlier
+                        // bytes, so this can only end the stream — but the partial
+                        // response still gets accounted for.
+                        if let Some(completion) = guard.completion.take() {
+                            completion.finish().await;
+                        }
+                        return Some((
+                            Err(std::io::Error::other(format!(
+                                "upstream stream failed: {error}"
+                            ))),
+                            (stream, guard, transform),
+                        ));
                     }
-                    Some((
-                        Err(std::io::Error::other(format!(
-                            "upstream stream failed: {error}"
-                        ))),
-                        (stream, guard),
-                    ))
-                }
-                None => {
-                    if let Some(completion) = guard.completion.take() {
-                        completion.finish().await;
+                    None => {
+                        // Flush the tail before settling the completion, so the
+                        // closing frames still reach the client.
+                        let mut failure = None;
+                        let tail = match transform.as_mut() {
+                            Some(transform) if !transform.finished() => match transform.finish() {
+                                Ok(tail) => (!tail.is_empty())
+                                    .then(|| axum::body::Bytes::from(tail.into_bytes())),
+                                Err(error) => {
+                                    failure = Some(error);
+                                    None
+                                }
+                            },
+                            _ => None,
+                        };
+                        if let Some(error) = failure {
+                            if let Some(completion) = guard.completion.take() {
+                                completion.finish().await;
+                            }
+                            return Some((
+                                Err(std::io::Error::other(error)),
+                                (stream, guard, transform),
+                            ));
+                        }
+                        if let Some(tail) = tail {
+                            return Some((Ok(tail), (stream, guard, transform)));
+                        }
+                        if let Some(completion) = guard.completion.take() {
+                            completion.finish().await;
+                        }
+                        return None;
                     }
-                    None
                 }
             }
         },
@@ -6664,6 +6931,7 @@ mod tests {
     use crate::models::route_credential_model::{
         RouteCredentialModelState, MODEL_STATUS_ERROR, MODEL_STATUS_OK, MODEL_STATUS_PAUSED,
     };
+    use crate::services::route_protocol_bridge::transform_response_with_tool_namespaces;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -8795,27 +9063,226 @@ mod tests {
         RouteProxyService::stop(&runtime).await.expect("stop proxy");
     }
 
-    /// The buffered path stays in charge whenever a bridge has to rewrite the
-    /// body: the gate must not stream a request that needs conversion.
+    /// A bridge that has to aggregate the whole stream before it can re-emit
+    /// anything must stay on the buffered path — streaming it would hand the
+    /// client a body the transform cannot produce yet.
     #[tokio::test]
-    async fn bridged_streaming_request_still_uses_the_buffered_path() {
-        let claude_to_chat = should_stream_upstream_response(
-            Some(ProtocolBridgeKind::ClaudeToChat),
-            true,
-            StatusCode::OK,
-            &std::collections::HashSet::new(),
-            &streaming_gate_credential("api"),
-        );
-        assert!(!claude_to_chat, "a bridged response must stay buffered");
+    async fn a_bridge_without_an_incremental_form_stays_buffered() {
+        let empty = std::collections::HashSet::new();
+        let namespaces = std::collections::BTreeMap::new();
+        let api = streaming_gate_credential("api");
 
-        let passthrough = should_stream_upstream_response(
-            None,
-            true,
-            StatusCode::OK,
-            &std::collections::HashSet::new(),
-            &streaming_gate_credential("api"),
-        );
+        for kind in [
+            ProtocolBridgeKind::ClaudeToChat,
+            ProtocolBridgeKind::ClaudeToResponses,
+            ProtocolBridgeKind::ClaudeToGemini,
+            ProtocolBridgeKind::ChatToResponses,
+            ProtocolBridgeKind::ChatToAnthropic,
+            ProtocolBridgeKind::ChatToGemini,
+            ProtocolBridgeKind::ResponsesToAnthropic,
+            ProtocolBridgeKind::ResponsesToGemini,
+        ] {
+            assert!(
+                !should_stream_upstream_response(
+                    Some(kind),
+                    true,
+                    StatusCode::OK,
+                    &empty,
+                    &api,
+                    &namespaces
+                ),
+                "{kind:?} aggregates the stream and must stay buffered"
+            );
+        }
+
+        let passthrough =
+            should_stream_upstream_response(None, true, StatusCode::OK, &empty, &api, &namespaces);
         assert!(passthrough, "an unbridged streaming 2xx should stream");
+    }
+
+    /// The two record-by-record bridges stream, custom tools and all: the
+    /// transform is applied per frame, so neither the bridge nor a custom tool
+    /// forces the client to wait for the whole generation.
+    #[tokio::test]
+    async fn record_by_record_bridges_stream_even_with_custom_tools() {
+        let namespaces = std::collections::BTreeMap::new();
+        let api = streaming_gate_credential("api");
+        let custom_tools = std::collections::HashSet::from(["apply_patch".to_string()]);
+
+        for kind in [
+            ProtocolBridgeKind::ResponsesToResponses,
+            ProtocolBridgeKind::ResponsesToChat,
+        ] {
+            assert!(
+                should_stream_upstream_response(
+                    Some(kind),
+                    true,
+                    StatusCode::OK,
+                    &custom_tools,
+                    &api,
+                    &namespaces
+                ),
+                "{kind:?} rewrites record by record and must stream"
+            );
+        }
+
+        // The unbridged path still needs the whole body for that rewrite: it
+        // forwards bytes verbatim and has nowhere to hook a per-record pass.
+        assert!(
+            !should_stream_upstream_response(
+                None,
+                true,
+                StatusCode::OK,
+                &custom_tools,
+                &api,
+                &namespaces
+            ),
+            "the unbridged path still buffers to restore custom tools"
+        );
+    }
+
+    /// The streamed transform and the buffered one must emit the same bytes.
+    ///
+    /// Whether a turn goes through `StreamResponseTransform` or
+    /// `transform_response_with_tool_namespaces` is decided by `stream: true`
+    /// and by which bridge the upstream needed — never by anything the user can
+    /// see. So the two paths are one contract expressed twice, and the only
+    /// proof they still agree is comparing their output on the same body.
+    ///
+    /// Chunk boundaries land mid-record on purpose: one byte at a time is the
+    /// worst case a slow upstream can produce, and it is exactly where a naive
+    /// framer drops a `data:` line or duplicates a `\n\n`.
+    #[test]
+    fn the_streamed_transform_matches_the_buffered_one_byte_for_byte() {
+        // Reasoning, text, a usage tail and the `[DONE]` sentinel: the shapes a
+        // Chat upstream actually sends.
+        let chat_sse = concat!(
+            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":null},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Let me think.\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"apply_patch\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        // `event:` lines next to the payload, a namespaced tool call and an
+        // `apply_patch` call — so the namespace rewrite and the custom-tool
+        // restore both have something to do instead of passing vacuously.
+        let responses_sse = concat!(
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\"}}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"name\":\"mcp__browser__open\",\"call_id\":\"call_1\",\"arguments\":\"\"}}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"name\":\"apply_patch\",\"call_id\":\"call_2\",\"arguments\":\"\"}}\n\n",
+            "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{}\"}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let cases = [
+            (
+                ProtocolBridgeKind::ResponsesToChat,
+                "text/event-stream",
+                chat_sse,
+            ),
+            (
+                ProtocolBridgeKind::ResponsesToResponses,
+                "text/event-stream",
+                responses_sse,
+            ),
+        ];
+
+        for (kind, content_type, body) in cases {
+            for namespaces in [
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeMap::from([(
+                    "mcp__browser__open".to_string(),
+                    "mcp__browser__".to_string(),
+                )]),
+            ] {
+                for custom_tools in [
+                    std::collections::HashSet::new(),
+                    std::collections::HashSet::from(["apply_patch".to_string()]),
+                ] {
+                    // Exactly what the buffered branch of the proxy does: the
+                    // whole-body transform, then the custom-tool restore.
+                    let buffered = transform_response_with_tool_namespaces(
+                        kind,
+                        200,
+                        Some(content_type),
+                        body.as_bytes(),
+                        &namespaces,
+                    )
+                    .expect("buffered transform");
+                    let pre_restore = String::from_utf8_lossy(&buffered.body).into_owned();
+                    let expected =
+                        restore_custom_tools_in_responses_payload(&buffered.body, &custom_tools);
+                    let expected_text = String::from_utf8_lossy(&expected).into_owned();
+
+                    // Responses → Responses has nothing to rewrite without a
+                    // namespace or a custom tool, and its documented behaviour
+                    // is a byte-for-byte passthrough. Everywhere else the
+                    // comparison would be vacuous if nothing changed.
+                    let pure_passthrough = kind == ProtocolBridgeKind::ResponsesToResponses
+                        && namespaces.is_empty()
+                        && custom_tools.is_empty();
+                    if pure_passthrough {
+                        assert_eq!(
+                            expected_text, body,
+                            "{kind:?} must stay a byte-for-byte passthrough"
+                        );
+                    } else {
+                        assert_ne!(
+                            expected_text, body,
+                            "{kind:?} left the body untouched, so equality proves nothing"
+                        );
+                    }
+                    if !custom_tools.is_empty() && pre_restore.contains("\"apply_patch\"") {
+                        assert!(
+                            expected_text.contains("custom_tool_call"),
+                            "{kind:?} did not restore the custom tool: {expected_text}"
+                        );
+                    }
+                    if !namespaces.is_empty() && kind == ProtocolBridgeKind::ResponsesToResponses {
+                        assert!(
+                            expected_text.contains("\"namespace\":\"mcp__browser__\""),
+                            "the namespace rewrite never ran: {expected_text}"
+                        );
+                    }
+
+                    for chunk_size in [1usize, 7, body.len()] {
+                        let mut transform = StreamResponseTransform::new(
+                            kind,
+                            IncrementalResponseBridge::new(kind, &namespaces)
+                                .expect("both bridges have an incremental form"),
+                            StatusCode::OK,
+                            Some(content_type.to_string()),
+                            namespaces.clone(),
+                            custom_tools.clone(),
+                        );
+                        let mut streamed = Vec::new();
+                        for chunk in body.as_bytes().chunks(chunk_size) {
+                            streamed.extend_from_slice(
+                                transform.push(chunk).expect("incremental push").as_bytes(),
+                            );
+                        }
+                        streamed.extend_from_slice(
+                            transform.finish().expect("incremental finish").as_bytes(),
+                        );
+                        assert!(
+                            !streamed.is_empty(),
+                            "{kind:?} emitted nothing at chunk size {chunk_size}"
+                        );
+
+                        assert_eq!(
+                            String::from_utf8_lossy(&streamed),
+                            String::from_utf8_lossy(&expected),
+                            "{kind:?} diverged at chunk size {chunk_size} \
+                             (namespaces {}, custom tools {})",
+                            namespaces.len(),
+                            custom_tools.len()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Each remaining gate condition, so a future change cannot quietly widen
@@ -8823,10 +9290,18 @@ mod tests {
     #[tokio::test]
     async fn streaming_gate_rejects_every_case_needing_the_whole_body() {
         let empty = std::collections::HashSet::new();
+        let namespaces = std::collections::BTreeMap::new();
         let api = streaming_gate_credential("api");
 
         assert!(
-            !should_stream_upstream_response(None, false, StatusCode::OK, &empty, &api),
+            !should_stream_upstream_response(
+                None,
+                false,
+                StatusCode::OK,
+                &empty,
+                &api,
+                &namespaces
+            ),
             "a non-streaming reply has nothing to stream"
         );
         assert!(
@@ -8835,7 +9310,8 @@ mod tests {
                 true,
                 StatusCode::TOO_MANY_REQUESTS,
                 &empty,
-                &api
+                &api,
+                &namespaces
             ),
             "a non-2xx body decides retry classification and must be buffered"
         );
@@ -8845,9 +9321,10 @@ mod tests {
                 true,
                 StatusCode::OK,
                 &std::collections::HashSet::from(["my_tool".to_string()]),
-                &api
+                &api,
+                &namespaces
             ),
-            "custom tool restoration rewrites frames on the way out"
+            "the unbridged path buffers to restore custom tools"
         );
         assert!(
             !should_stream_upstream_response(
@@ -8855,10 +9332,65 @@ mod tests {
                 true,
                 StatusCode::OK,
                 &empty,
-                &streaming_gate_credential("official")
+                &streaming_gate_credential("official"),
+                &namespaces
             ),
             "official credentials parse the body for quota signals"
         );
+    }
+
+    /// `entry_path` is the client's path and says nothing about the upstream
+    /// dialect. Grouping a week of Codex traffic by it once produced the wrong
+    /// conclusion — "only Anthropic upstreams lose reasoning" — because every
+    /// Codex turn is recorded as `/v1/responses` whichever upstream it reached.
+    /// `upstream_path` is derived from `target_url`, so that question is
+    /// answerable from the request log alone.
+    #[test]
+    fn request_metadata_records_the_upstream_path_beside_the_client_one() {
+        let credential = streaming_gate_credential("api");
+        let metadata: Value = serde_json::from_str(&route_proxy_request_metadata(
+            "codex",
+            &credential,
+            "/v1/responses",
+            Some("https://api.example.com/v1/chat/completions"),
+            Some(200),
+            true,
+            None,
+            Instant::now(),
+            None,
+            Some("gpt-5"),
+            Some("gpt-5"),
+            None,
+        ))
+        .expect("metadata json");
+
+        assert_eq!(metadata["entry_path"], "/v1/responses");
+        assert_eq!(
+            metadata["path"], "/v1/responses",
+            "the legacy key keeps its old meaning for older readers"
+        );
+        assert_eq!(metadata["upstream_path"], "/v1/chat/completions");
+    }
+
+    #[test]
+    fn upstream_path_keeps_a_base_url_prefix_and_drops_the_query() {
+        assert_eq!(
+            upstream_path_from_target_url(Some(
+                "https://api.example.com/openai/v1/messages?beta=true"
+            ))
+            .as_deref(),
+            Some("/openai/v1/messages")
+        );
+        assert_eq!(
+            upstream_path_from_target_url(Some("https://api.example.com/v1/responses")).as_deref(),
+            Some("/v1/responses")
+        );
+        assert_eq!(
+            upstream_path_from_target_url(Some("https://api.example.com/")).as_deref(),
+            None,
+            "a bare host is not an endpoint"
+        );
+        assert_eq!(upstream_path_from_target_url(None), None);
     }
 
     fn streaming_gate_credential(kind: &str) -> SelectedCredential {

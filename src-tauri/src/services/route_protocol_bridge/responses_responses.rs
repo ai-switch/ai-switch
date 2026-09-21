@@ -255,46 +255,56 @@ fn responses_sse_to_responses(
     let text = String::from_utf8_lossy(body).replace("\r\n", "\n");
     let mut output = String::new();
     for block in text.split("\n\n") {
-        if block.trim().is_empty() {
-            continue;
-        }
-        let data = block
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("data:").map(str::trim))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if data.is_empty() {
-            output.push_str(block);
-            output.push_str("\n\n");
-            continue;
-        }
-        if data == "[DONE]" {
-            output.push_str(block);
-            output.push_str("\n\n");
-            continue;
-        }
-        // This path only rewrites tool names, so a record we cannot parse is
-        // forwarded untouched instead of failing the whole stream.
-        let Ok(value) = serde_json::from_str::<Value>(&data) else {
-            output.push_str(block);
-            output.push_str("\n\n");
+        let Some(converted) = responses_sse_block_to_responses(block, tool_namespaces)? else {
             continue;
         };
-        for line in block
-            .lines()
-            .filter(|line| !line.trim().starts_with("data:"))
-        {
-            output.push_str(line);
-            output.push('\n');
-        }
-        output.push_str("data: ");
-        output.push_str(
-            &serde_json::to_string(&restore_tool_namespaces(value, tool_namespaces))
-                .map_err(|error| format!("Could not serialize Responses SSE data: {error}"))?,
-        );
+        output.push_str(&converted);
         output.push_str("\n\n");
     }
     Ok(output.into_bytes())
+}
+
+/// Converts one already-framed SSE block for the Responses → Responses bridge.
+///
+/// `block` arrives without its `\n\n` terminator and the result is returned the
+/// same way. [`responses_sse_to_responses`] drives this block by block, so the
+/// buffered path and the streamed path emit identical bytes and cannot drift.
+///
+/// Returns `None` for a block with nothing to forward — a blank keep-alive.
+pub(super) fn responses_sse_block_to_responses(
+    block: &str,
+    tool_namespaces: &ResponsesToolNamespaces,
+) -> Result<Option<String>, String> {
+    if block.trim().is_empty() {
+        return Ok(None);
+    }
+    let data = block
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("data:").map(str::trim))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if data.is_empty() || data == "[DONE]" {
+        return Ok(Some(block.to_string()));
+    }
+    // This path only rewrites tool names, so a record we cannot parse is
+    // forwarded untouched instead of failing the whole stream.
+    let Ok(value) = serde_json::from_str::<Value>(&data) else {
+        return Ok(Some(block.to_string()));
+    };
+    let mut output = String::new();
+    for line in block
+        .lines()
+        .filter(|line| !line.trim().starts_with("data:"))
+    {
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.push_str("data: ");
+    output.push_str(
+        &serde_json::to_string(&restore_tool_namespaces(value, tool_namespaces))
+            .map_err(|error| format!("Could not serialize Responses SSE data: {error}"))?,
+    );
+    Ok(Some(output))
 }
 
 fn looks_like_sse(body: &[u8]) -> bool {

@@ -218,9 +218,8 @@ fn chat_sse_to_responses(
     tool_namespaces: &ResponsesToolNamespaces,
 ) -> Result<Vec<u8>, String> {
     let text = String::from_utf8_lossy(body).replace("\r\n", "\n");
-    let mut state = ChatStreamState::default();
+    let mut bridge = ChatStreamBridge::new(tool_namespaces.clone());
     let mut output = String::new();
-    let mut sequence_number = 0_u64;
     let mut saw_done = false;
 
     for block in text.split("\n\n") {
@@ -242,18 +241,80 @@ fn chat_sse_to_responses(
         let Ok(value) = serde_json::from_str::<Value>(&data) else {
             continue;
         };
+        output.push_str(&bridge.push_value(&value)?);
+        if bridge.failed() {
+            return Ok(output.into_bytes());
+        }
+    }
+
+    if !bridge.started() && !saw_done {
+        return Err("Chat SSE response did not contain data events".to_string());
+    }
+    output.push_str(&bridge.finish()?);
+    Ok(output.into_bytes())
+}
+
+/// Incremental form of the Chat → Responses stream conversion.
+///
+/// The buffered [`chat_sse_to_responses`] drives this one record at a time, so a
+/// live stream and a whole body cannot drift apart — there is only one
+/// implementation of the conversion, reached two ways. The proxy streams through
+/// this when the upstream is a Chat endpoint, which is what keeps a Codex turn
+/// from going silent until the upstream has finished.
+#[derive(Debug, Default)]
+pub(crate) struct ChatStreamBridge {
+    state: ChatStreamState,
+    sequence_number: u64,
+    tool_namespaces: ResponsesToolNamespaces,
+    failed: bool,
+}
+
+impl ChatStreamBridge {
+    pub(crate) fn new(tool_namespaces: ResponsesToolNamespaces) -> Self {
+        Self {
+            state: ChatStreamState::default(),
+            sequence_number: 0,
+            tool_namespaces,
+            failed: false,
+        }
+    }
+
+    /// Whether anything has been emitted yet. A stream that never starts and
+    /// never sees `[DONE]` is not a stream at all.
+    pub(crate) fn started(&self) -> bool {
+        self.state.started
+    }
+
+    /// Whether the upstream reported an error frame, after which no further
+    /// records are convertible.
+    pub(crate) fn failed(&self) -> bool {
+        self.failed
+    }
+
+    /// Converts one parsed Chat completion chunk into Responses SSE bytes.
+    ///
+    /// Returns the bytes to forward for this record — usually non-empty, but a
+    /// record carrying nothing the client needs (a bare usage tail, say) yields
+    /// none. [`Self::finish`] emits the closing events.
+    pub(crate) fn push_value(&mut self, value: &Value) -> Result<String, String> {
+        let mut output = String::new();
+        let state = &mut self.state;
+        let sequence_number = &mut self.sequence_number;
+        let tool_namespaces = &self.tool_namespaces;
+
         if value.get("error").is_some() {
-            ensure_stream_started(&mut state, &mut output, &mut sequence_number);
+            ensure_stream_started(state, &mut output, sequence_number);
             push_sse_event(
                 &mut output,
                 "response.failed",
-                failed_response_event(&state, &value, sequence_number),
+                failed_response_event(state, value, *sequence_number),
             )?;
-            return Ok(output.into_bytes());
+            self.failed = true;
+            return Ok(output);
         }
 
-        state.capture_envelope(&value);
-        ensure_stream_started(&mut state, &mut output, &mut sequence_number);
+        state.capture_envelope(value);
+        ensure_stream_started(state, &mut output, sequence_number);
         if let Some(usage) = value.get("usage") {
             state.usage = Some(usage.clone());
         }
@@ -262,7 +323,7 @@ fn chat_sse_to_responses(
             .and_then(Value::as_array)
             .and_then(|choices| choices.first())
         else {
-            continue;
+            return Ok(output);
         };
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             state.finish_reason = Some(reason.to_string());
@@ -272,42 +333,41 @@ fn chat_sse_to_responses(
         }
         let delta = choice.get("delta").unwrap_or(&Value::Null);
         if let Some(reasoning) = delta_reasoning_text(delta) {
-            emit_reasoning_delta(&mut state, &mut output, &mut sequence_number, reasoning)?;
+            emit_reasoning_delta(state, &mut output, sequence_number, reasoning)?;
         }
         if let Some(content) = delta.get("content").and_then(Value::as_str) {
             // Segments are taken as an owned batch so the splitter's borrow ends
             // before the emitters take `&mut state`.
             let segments = state.inline_thinking.push(content);
-            emit_segments(&mut state, &mut output, &mut sequence_number, segments)?;
+            emit_segments(state, &mut output, sequence_number, segments)?;
         }
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for tool_call in tool_calls {
                 emit_tool_call_delta(
-                    &mut state,
+                    state,
                     &mut output,
-                    &mut sequence_number,
+                    sequence_number,
                     tool_call,
                     tool_namespaces,
                 )?;
             }
         }
+        Ok(output)
     }
 
-    if !state.started && !saw_done {
-        return Err("Chat SSE response did not contain data events".to_string());
+    /// Emits the closing events for the turn.
+    pub(crate) fn finish(&mut self) -> Result<String, String> {
+        let mut output = String::new();
+        let state = &mut self.state;
+        let sequence_number = &mut self.sequence_number;
+        ensure_stream_started(state, &mut output, sequence_number);
+        // Whatever the splitter was still holding back — a block the upstream
+        // never closed, or a tail that turned out not to be a tag.
+        let segments = state.inline_thinking.finish();
+        emit_segments(state, &mut output, sequence_number, segments)?;
+        finish_stream(state, &mut output, sequence_number, &self.tool_namespaces)?;
+        Ok(output)
     }
-    ensure_stream_started(&mut state, &mut output, &mut sequence_number);
-    // Whatever the splitter was still holding back — a block the upstream never
-    // closed, or a tail that turned out not to be a tag.
-    let segments = state.inline_thinking.finish();
-    emit_segments(&mut state, &mut output, &mut sequence_number, segments)?;
-    finish_stream(
-        &mut state,
-        &mut output,
-        &mut sequence_number,
-        tool_namespaces,
-    )?;
-    Ok(output.into_bytes())
 }
 
 #[derive(Debug, Default)]
