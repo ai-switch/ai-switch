@@ -1,6 +1,7 @@
 pub mod agent_launch_service;
 pub(crate) mod anthropic_thinking;
 pub mod batch_service;
+pub mod brotli_codec;
 pub mod cc_switch_import_service;
 pub mod claude_trust_service;
 pub mod client_identity;
@@ -40,6 +41,7 @@ pub(crate) mod route_pool_model_mode;
 pub mod route_pool_service;
 pub mod route_preview_service;
 pub mod route_protocol_bridge;
+pub mod route_proxy_diagnostics_service;
 pub mod route_proxy_https_service;
 pub mod route_proxy_https_trust;
 pub mod route_proxy_live_log;

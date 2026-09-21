@@ -12,17 +12,22 @@ use crate::services::route_pool_service::RoutePoolService;
 use crate::services::route_proxy_https_service::RouteProxyHttpsService;
 use crate::services::route_proxy_live_log::RouteProxyLiveLogEntry;
 use crate::services::route_proxy_service::RouteProxyService;
+use std::sync::Arc;
 use tauri::State;
 
 /// Register a live-log viewer and return the current in-memory history for the
 /// given platform (oldest first). The caller must pair this with
 /// `unsubscribe_route_proxy_live_log` so live emission stops when no one is
 /// watching.
+///
+/// Handles rather than owned entries: the ring stores them behind an `Arc`, and
+/// this result goes straight out as JSON, so unwrapping them would only add a
+/// deep copy of the whole history per dialog open.
 #[tauri::command]
 pub async fn subscribe_route_proxy_live_log(
     state: State<'_, AppState>,
     platform: String,
-) -> Result<Vec<RouteProxyLiveLogEntry>, ApiError> {
+) -> Result<Vec<Arc<RouteProxyLiveLogEntry>>, ApiError> {
     Ok(state.route_proxy.live_log().subscribe(&platform))
 }
 

@@ -409,6 +409,16 @@ pub async fn run_from_env() -> Result<(), String> {
         .route_proxy
         .live_log()
         .set_emitter(EventEmitter::Web(Arc::clone(&state.event_broadcaster)));
+    // Same durable mirror the desktop app keeps, so a server-side incident is
+    // still on disk after a restart. Exporting it is desktop-only (it needs a
+    // save dialog), but the log itself is not.
+    if let Some(writer) = state
+        .route_proxy
+        .live_log()
+        .persist_to(state.paths.logs_dir.clone())
+    {
+        tokio::spawn(writer.run());
+    }
 
     // Auto-recovery scheduler for the standalone server binary.
     {

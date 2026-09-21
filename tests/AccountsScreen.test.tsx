@@ -46,6 +46,7 @@ import {
   setRoutePoolModelMode,
   startRouteProxy,
   stopRouteProxy,
+  saveRouteProxyDiagnosticsExport,
   subscribeRouteProxyLiveLog,
   unsubscribeRouteProxyLiveLog,
   updateRouteCredential,
@@ -129,6 +130,7 @@ vi.mock("../src/lib/api/client", () => ({
   setRoutePoolModelMode: vi.fn(),
   startRouteProxy: vi.fn(),
   stopRouteProxy: vi.fn(),
+  saveRouteProxyDiagnosticsExport: vi.fn(),
   subscribeRouteProxyLiveLog: vi.fn(),
   unsubscribeRouteProxyLiveLog: vi.fn(),
   updateRouteCredential: vi.fn(),
@@ -601,6 +603,7 @@ describe("AccountsScreen", () => {
     vi.mocked(subscribeRouteProxyLiveLog).mockResolvedValue([]);
     vi.mocked(unsubscribeRouteProxyLiveLog).mockReset();
     vi.mocked(unsubscribeRouteProxyLiveLog).mockResolvedValue(undefined);
+    vi.mocked(saveRouteProxyDiagnosticsExport).mockReset();
     vi.mocked(updateRouteCredential).mockReset();
     vi.mocked(writeRouteProxyConfigs).mockReset();
     vi.mocked(routeConfigWriteIsStale).mockReset();
@@ -1356,6 +1359,173 @@ describe("AccountsScreen", () => {
       });
     });
     expect(within(dialog).queryByText("should-not-show")).not.toBeInTheDocument();
+  });
+
+  it("exports the live log for support and says what was written", async () => {
+    vi.mocked(subscribeRouteProxyLiveLog).mockResolvedValue([]);
+    vi.mocked(saveRouteProxyDiagnosticsExport).mockResolvedValue({
+      cancelled: false,
+      file_name: "ai-switch-diagnostics-20260920-191500.jsonl.br",
+      entries: 1000,
+      byte_size: 1_572_864,
+    });
+
+    renderScreen("codex", "in_pool");
+    await userEvent.click(screen.getByLabelText("打开算力池测试菜单"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "实时日志" }));
+    const dialog = await screen.findByRole("dialog", { name: "实时日志弹窗" });
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "导出排错数据" }));
+
+    // 数据由后端自己组装并压缩，前端不该把日志再传一遍。
+    expect(saveRouteProxyDiagnosticsExport).toHaveBeenCalledWith();
+    expect(
+      await within(dialog).findByText(/已导出 1000 条日志（1\.5 MB）/),
+    ).toBeInTheDocument();
+  });
+
+  it("says a cancelled diagnostics export was cancelled instead of failing silently", async () => {
+    vi.mocked(subscribeRouteProxyLiveLog).mockResolvedValue([]);
+    vi.mocked(saveRouteProxyDiagnosticsExport).mockResolvedValue({
+      cancelled: true,
+      file_name: null,
+      entries: 0,
+      byte_size: 0,
+    });
+
+    renderScreen("codex", "in_pool");
+    await userEvent.click(screen.getByLabelText("打开算力池测试菜单"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "实时日志" }));
+    const dialog = await screen.findByRole("dialog", { name: "实时日志弹窗" });
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "导出排错数据" }));
+
+    expect(await within(dialog).findByText("已取消导出。")).toBeInTheDocument();
+  });
+
+  it("names which stage was truncated instead of saying only that something was", async () => {
+    const baseEntry = {
+      id: "entry-truncated",
+      trace_id: null,
+      platform: "codex",
+      credential_id: "cred-a",
+      credential_name: "Codex A",
+      attempt: 0,
+      path: "/v1/responses",
+      target_url: "https://upstream.example/v1/chat/completions",
+      requested_model: "gpt-5",
+      upstream_model: "deepseek-chat",
+      status: 200,
+      success: true,
+      error_message: null,
+      duration_ms: 42,
+      bridge: "CodexResponsesToChat",
+      client_request: '{"input":"hello"}',
+      upstream_request: '{"messages":[]}',
+      upstream_response: '{"choices":[]}',
+      final_response: '{"object":"response"}',
+      truncated: true,
+      created_at: new Date().toISOString(),
+    };
+    // 只有上游返回被截断：这一档才是「上游发没发思考」不可判定的原因。
+    vi.mocked(subscribeRouteProxyLiveLog).mockResolvedValue([
+      { ...baseEntry, truncated_stages: ["upstream_response"] },
+    ]);
+
+    renderScreen("codex", "in_pool");
+    await userEvent.click(screen.getByLabelText("打开算力池测试菜单"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "实时日志" }));
+    const dialog = await screen.findByRole("dialog", { name: "实时日志弹窗" });
+    await userEvent.click(await within(dialog).findByText("gpt-5"));
+
+    expect(
+      await within(dialog).findByText("（上游原始返回 已截断，每段最多 64KB；被截段落保留头尾）"),
+    ).toBeInTheDocument();
+
+    // 旧记录没有分阶段信息，只能退回笼统提示，不能编造阶段名。
+    await waitFor(() => expect(transportTestState.liveLogHandler).not.toBeNull());
+    act(() => {
+      transportTestState.liveLogHandler?.({
+        ...baseEntry,
+        id: "entry-legacy",
+        requested_model: "gpt-5-legacy",
+      });
+    });
+    // 一次只展开一条，所以要先把旧记录点开（这也会收起上一条）。
+    await userEvent.click(await within(dialog).findByText("gpt-5-legacy"));
+    expect(
+      await within(dialog).findByText("（部分内容已截断，每段最多 64KB）"),
+    ).toBeInTheDocument();
+  });
+
+  it("reports the upstream reasoning count instead of leaving it to the preview", async () => {
+    const baseEntry = {
+      id: "entry-reasoning",
+      trace_id: null,
+      platform: "codex",
+      credential_id: "cred-a",
+      credential_name: "Codex A",
+      attempt: 0,
+      path: "/v1/responses",
+      target_url: "https://upstream.example/v1/messages",
+      requested_model: "gpt-5",
+      upstream_model: "claude-opus-4-8",
+      status: 200,
+      success: true,
+      error_message: null,
+      duration_ms: 42,
+      bridge: "ResponsesToAnthropic",
+      client_request: '{"input":"hello"}',
+      upstream_request: '{"thinking":{"type":"enabled"}}',
+      upstream_response: "event: message_start",
+      final_response: "event: message_start",
+      truncated: false,
+      created_at: new Date().toISOString(),
+    };
+
+    // 0 是结论，不是空白：上游被完整看完，全程没有思考。
+    vi.mocked(subscribeRouteProxyLiveLog).mockResolvedValue([
+      { ...baseEntry, id: "entry-zero", upstream_reasoning_deltas: 0 },
+    ]);
+
+    renderScreen("codex", "in_pool");
+    await userEvent.click(screen.getByLabelText("打开算力池测试菜单"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "实时日志" }));
+    const dialog = await screen.findByRole("dialog", { name: "实时日志弹窗" });
+    await userEvent.click(await within(dialog).findByText("gpt-5"));
+
+    expect(
+      await within(dialog).findByText("上游返回里没有任何思考内容（已完整观察整条流）"),
+    ).toBeInTheDocument();
+
+    await waitFor(() => expect(transportTestState.liveLogHandler).not.toBeNull());
+
+    // 有计数就报出数量。
+    act(() => {
+      transportTestState.liveLogHandler?.({
+        ...baseEntry,
+        id: "entry-seven",
+        requested_model: "gpt-5-seven",
+        upstream_reasoning_deltas: 7,
+      });
+    });
+    await userEvent.click(await within(dialog).findByText("gpt-5-seven"));
+    expect(await within(dialog).findByText("上游返回了 7 个思考增量")).toBeInTheDocument();
+
+    // 没人数过（缓冲应答 / 旧记录）：什么都不说。
+    // 把「没看」渲染成「没有」，正是这个字段要终结的那种误读。
+    act(() => {
+      transportTestState.liveLogHandler?.({
+        ...baseEntry,
+        id: "entry-unknown",
+        requested_model: "gpt-5-unknown",
+      });
+    });
+    await userEvent.click(await within(dialog).findByText("gpt-5-unknown"));
+    expect(within(dialog).queryByText(/上游返回了 \d+ 个思考增量/)).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByText("上游返回里没有任何思考内容（已完整观察整条流）"),
+    ).not.toBeInTheDocument();
   });
 
   it("explains that the route proxy must run before viewing pool models", async () => {

@@ -41,6 +41,7 @@ use commands::route_proxy_commands::{
     get_route_proxy_key, get_route_proxy_status, route_config_write_is_stale, start_route_proxy,
     stop_route_proxy, write_route_proxy_configs,
 };
+use commands::route_proxy_diagnostics_commands::save_route_proxy_diagnostics_export;
 use commands::route_proxy_https_commands::{
     delete_route_proxy_https_certificates, disable_route_proxy_https, enable_route_proxy_https,
     get_route_proxy_https_status, open_route_proxy_https_certificate_dir,
@@ -449,6 +450,17 @@ pub fn run() {
                 .route_proxy
                 .live_log()
                 .set_emitter(EventEmitter::Tauri(app.handle().clone()));
+            // Mirror the live log to disk so the turn that went wrong is still
+            // there after the user restarts the app to fix it. Spawned on
+            // Tauri's runtime: this hook is not inside a Tokio context, which is
+            // why the service hands the writer back instead of spawning it.
+            if let Some(writer) = state
+                .route_proxy
+                .live_log()
+                .persist_to(state.paths.logs_dir.clone())
+            {
+                tauri::async_runtime::spawn(writer.run());
+            }
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             {
                 state
@@ -579,6 +591,7 @@ pub fn run() {
             fetch_route_models,
             subscribe_route_proxy_live_log,
             unsubscribe_route_proxy_live_log,
+            save_route_proxy_diagnostics_export,
             start_route_proxy,
             stop_route_proxy,
             get_route_proxy_status,

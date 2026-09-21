@@ -134,6 +134,7 @@ import {
   setRoutePoolModelMode,
   startRouteProxy,
   stopRouteProxy,
+  saveRouteProxyDiagnosticsExport,
   subscribeRouteProxyLiveLog,
   unsubscribeRouteProxyLiveLog,
   updateRouteCredential,
@@ -511,6 +512,97 @@ function formatUsageTime(value: string) {
 
 function liveLogStagesIdentical(entry: RouteProxyLiveLogEntry): boolean {
   return (entry.upstream_response ?? null) === (entry.final_response ?? null);
+}
+
+/**
+ * 压缩后的导出文件多大。
+ *
+ * 这个数字是给用户看的：他要把文件发给别人，需要知道能不能当附件。
+ */
+function formatByteSize(size: number): string {
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * 前端保留的实时日志条数。
+ *
+ * 必须和 Rust 侧 `LIVE_LOG_CAPACITY` 对齐——后端更小的话前端拿不到那么多，
+ * 只改这一边不生效（曾经后端 100、前端 200，实际上限就是 100）。
+ */
+const LIVE_LOG_MAX_ENTRIES = 1000;
+
+/** 阶段字段名 → 弹窗里显示的中文标题，和 `LiveLogStage` 的 title 保持一致。 */
+const LIVE_LOG_STAGE_LABELS: Record<string, string> = {
+  client_request: "原始请求",
+  upstream_request: "发往上游",
+  upstream_response: "上游原始返回",
+  final_response: "最终返回",
+};
+
+/**
+ * 哪几段被 64KB 上限截断了。
+ *
+ * 笼统说「部分内容已截断」会让人不知道该怀疑哪一段：请求侧几乎每轮都截断
+ * （对话本身就几十 KB），而上游返回截断才意味着「上游到底发没发」不可判定。
+ * 旧数据没有 `truncated_stages`，只能退回笼统提示。
+ */
+function liveLogTruncationLabel(entry: RouteProxyLiveLogEntry): string {
+  const stages = entry.truncated_stages;
+  if (!stages || stages.length === 0) {
+    return "（部分内容已截断，每段最多 64KB）";
+  }
+  const names = stages.map((stage) => LIVE_LOG_STAGE_LABELS[stage] ?? stage);
+  return `（${names.join("、")} 已截断，每段最多 64KB；被截段落保留头尾）`;
+}
+
+/**
+ * 「上游到底发没发思考」的结论，直接来自计数。
+ *
+ * `undefined` / `null` = 没人数过（缓冲应答，或旧记录），返回 null 不显示——
+ * 沉默好过编一个结论。`0` 是结论本身：上游被完整看完，全程没有思考。
+ *
+ * 不能改用 `upstream_response` 里搜 "thinking" 来判断：那段字符串有 64KB 上限、
+ * 会被回显剔除、还会被头尾截断，思考完全可能真实发生却不在里面。
+ */
+function liveLogReasoningLabel(entry: RouteProxyLiveLogEntry): string | null {
+  const deltas = entry.upstream_reasoning_deltas;
+  if (deltas === undefined || deltas === null) {
+    return null;
+  }
+  if (deltas === 0) {
+    return "上游返回里没有任何思考内容（已完整观察整条流）";
+  }
+  return `上游返回了 ${deltas} 个思考增量`;
+}
+
+/**
+ * 「上游发没发思考」的结论行。
+ *
+ * 没人数过就不显示——沉默好过编一个结论。计数为 0 时用琥珀色标出来：那正是
+ * 需要被看见的一档，它说明上游被完整观察过、全程没有思考。
+ */
+function LiveLogReasoningNote({ entry }: { entry: RouteProxyLiveLogEntry }) {
+  const label = liveLogReasoningLabel(entry);
+  if (label === null) {
+    return null;
+  }
+  return (
+    <p
+      className={
+        entry.upstream_reasoning_deltas === 0
+          ? "text-[10px] font-medium text-amber-600"
+          : "text-[10px] text-stone-400"
+      }
+    >
+      {label}
+    </p>
+  );
 }
 
 function LiveLogStage({ title, body }: { title: string; body: string | null | undefined }) {
@@ -3112,6 +3204,11 @@ export function AccountsScreen({
   const [liveLogOpen, setLiveLogOpen] = useState(false);
   const [liveLogEntries, setLiveLogEntries] = useState<RouteProxyLiveLogEntry[]>([]);
   const [expandedLiveLogId, setExpandedLiveLogId] = useState<string | null>(null);
+  const [liveLogExportPending, setLiveLogExportPending] = useState(false);
+  const [liveLogExportMessage, setLiveLogExportMessage] = useState<{
+    kind: "ok" | "error";
+    text: string;
+  } | null>(null);
   const [modelTestAccount, setModelTestAccount] = useState<RouteCredential | null>(null);
   const [exportRequest, setExportRequest] = useState<{
     selection_context: RouteCredentialSelectionContext;
@@ -3618,7 +3715,7 @@ export function AccountsScreen({
     void subscribeRouteProxyLiveLog(activePlatform)
       .then((history) => {
         if (!disposed) {
-          setLiveLogEntries(history.slice(-200));
+          setLiveLogEntries(history.slice(-LIVE_LOG_MAX_ENTRIES));
         }
       })
       .catch(() => undefined);
@@ -3633,7 +3730,9 @@ export function AccountsScreen({
             return current;
           }
           const next = [...current, event];
-          return next.length > 200 ? next.slice(next.length - 200) : next;
+          return next.length > LIVE_LOG_MAX_ENTRIES
+            ? next.slice(next.length - LIVE_LOG_MAX_ENTRIES)
+            : next;
         });
       })
       .then((unsubscribe) => {
@@ -3651,6 +3750,38 @@ export function AccountsScreen({
       void unsubscribeRouteProxyLiveLog().catch(() => undefined);
     };
   }, [liveLogOpen, activePlatform]);
+
+  /**
+   * 导出排错数据：实时日志 + 环境与设置摘要 + 账号概况，后端压缩后落盘。
+   *
+   * 后端自己组装数据，所以这里不传任何内容——1000 条日志压缩前约 146MB，
+   * 不该为了导出先过一次 IPC。取消不算失败，但也要说一句：点了按钮毫无反应
+   * 和「导出成功」看起来是一样的。
+   */
+  async function handleExportDiagnostics() {
+    setLiveLogExportPending(true);
+    setLiveLogExportMessage(null);
+    try {
+      const result = await saveRouteProxyDiagnosticsExport();
+      if (result.cancelled) {
+        setLiveLogExportMessage({ kind: "ok", text: "已取消导出。" });
+      } else {
+        setLiveLogExportMessage({
+          kind: "ok",
+          text: `已导出 ${result.entries} 条日志（${formatByteSize(result.byte_size)}）${
+            result.file_name ? `：${result.file_name}` : ""
+          }`,
+        });
+      }
+    } catch (error) {
+      setLiveLogExportMessage({
+        kind: "error",
+        text: formatApiError(error, "导出排错数据失败"),
+      });
+    } finally {
+      setLiveLogExportPending(false);
+    }
+  }
 
   useEffect(() => {
     setSelectedAccountIds(new Set());
@@ -8278,10 +8409,20 @@ export function AccountsScreen({
               <div>
                 <h2 className="text-sm font-semibold text-stone-900">实时日志</h2>
                 <p className="mt-0.5 text-[11px] text-stone-500">
-                  实时显示经本机路由代理转发的请求，含协议转换的四个阶段（原始请求 / 发往上游 / 上游原始返回 / 最终返回），便于排查出错。仅当前平台，最多保留最近 200 条。
+                  实时显示经本机路由代理转发的请求，含协议转换的四个阶段（原始请求 / 发往上游 / 上游原始返回 / 最终返回），便于排查出错。仅当前平台，最多保留最近 {LIVE_LOG_MAX_ENTRIES} 条，并同时落盘，重启后仍在。
                 </p>
               </div>
               <div className="flex items-center gap-2">
+                {desktop ? (
+                  <button
+                    className={`${primaryButtonClass} whitespace-nowrap`}
+                    disabled={liveLogExportPending}
+                    onClick={() => void handleExportDiagnostics()}
+                    type="button"
+                  >
+                    {liveLogExportPending ? "导出中…" : "导出排错数据"}
+                  </button>
+                ) : null}
                 <button className={`${secondaryButtonClass} whitespace-nowrap`} onClick={() => setLiveLogEntries([])} type="button">
                   清空
                 </button>
@@ -8290,6 +8431,19 @@ export function AccountsScreen({
                 </button>
               </div>
             </div>
+            {liveLogExportMessage ? (
+              <p
+                className={`mt-2 text-[11px] ${
+                  liveLogExportMessage.kind === "error" ? "text-red-600" : "text-stone-500"
+                }`}
+                role="status"
+              >
+                {liveLogExportMessage.text}
+              </p>
+            ) : null}
+            <p className="mt-1 text-[10px] text-stone-400">
+              导出包含实时日志全文、应用与系统版本、脱敏后的设置摘要和账号概况，压缩后可直接发送。
+            </p>
             <div className="mt-3 flex-1 overflow-auto rounded-lg border border-stone-200">
               {liveLogEntries.length === 0 ? (
                 <p className="p-6 text-center text-[12px] text-stone-400">
@@ -8361,8 +8515,11 @@ export function AccountsScreen({
                               liveLogStagesIdentical(entry) ? "（与上游原始返回一致）" : entry.final_response
                             }
                           />
+                          <LiveLogReasoningNote entry={entry} />
                           {entry.truncated ? (
-                            <p className="text-[10px] text-stone-400">（部分内容已截断，每段最多 64KB）</p>
+                            <p className="text-[10px] text-stone-400">
+                              {liveLogTruncationLabel(entry)}
+                            </p>
                           ) : null}
                         </div>
                       ) : null}

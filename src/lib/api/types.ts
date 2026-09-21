@@ -420,6 +420,16 @@ export type SaveRouteCredentialExportResult = {
   file_name?: string | null;
 };
 
+/** 排错数据导出（实时日志 + 环境与设置摘要 + 账号概况，brotli 压缩）。 */
+export type SaveRouteProxyDiagnosticsResult = {
+  cancelled: boolean;
+  file_name?: string | null;
+  /** 打包进去的实时日志条数。 */
+  entries: number;
+  /** 压缩后的大小（字节），用来告诉用户发出去的文件多大。 */
+  byte_size: number;
+};
+
 export type PreviewRouteCredentialImportInput = {
   text: string;
   ambiguous_platform_choices: TransferPlatformChoice[];
@@ -838,8 +848,22 @@ export type RouteProxyLiveLogEntry = {
   upstream_request?: string | null;
   upstream_response?: string | null;
   final_response?: string | null;
+  /** 上游流里携带思考文本的帧数，仅在代理从头到尾看完这条流时才有值。
+   *
+   *  `undefined` / `null` 表示**没人数过**（缓冲应答，或这条记录早于该字段），
+   *  不能当成 0。`0` 才是结论：上游被完整观察了，全程没有思考——这是关于上游
+   *  的事实，不是日志的缺口。
+   *
+   *  之所以单独计数而不是从 `upstream_response` 里读：那段字符串有 64KB 上限、
+   *  会被回显剔除、还会被头尾截断，思考增量完全可能真实发生却不在里面。 */
+  upstream_reasoning_deltas?: number | null;
   notes?: string[] | null;
   truncated: boolean;
+  /** 命中单阶段 64KB 上限的阶段名，取值 client_request / upstream_request /
+   *  upstream_response / final_response。`truncated` 是四者的或，无法区分是哪
+   *  个阶段被截；判断「某阶段没有 X」时必须看这里。不在列表里只说明没有为省预算
+   *  丢内容，不等于逐字节原样（回显字段可能已被摘要化）。旧数据可能缺失。 */
+  truncated_stages?: string[] | null;
   created_at: string;
 };
 

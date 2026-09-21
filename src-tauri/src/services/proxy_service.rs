@@ -75,6 +75,21 @@ pub fn clear_proxy_env() {
 mod tests {
     use super::*;
 
+    /// Serializes the tests below, because they mutate the *process* environment
+    /// and libtest runs them in parallel threads.
+    ///
+    /// Without it they race for real: one test clears the proxy variables while
+    /// the other is asserting they are still set, which failed 3 runs in 6 on an
+    /// idle machine. The failure has nothing to do with the code under test, so
+    /// it only ever reads as a broken build.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `unwrap_or_else` on purpose: a test that panics while holding the lock
+    /// poisons it, and a poisoned lock must not take the remaining tests with it.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
     fn settings(enabled: bool, url: Option<&str>) -> AppSettings {
         AppSettings {
             proxy_enabled: enabled,
@@ -93,9 +108,16 @@ mod tests {
 
     #[test]
     fn apply_sets_and_clears_proxy_environment() {
+        let _guard = env_guard();
         apply(&settings(true, Some("http://127.0.0.1:7890")));
-        assert_eq!(std::env::var("HTTPS_PROXY").as_deref(), Ok("http://127.0.0.1:7890"));
-        assert_eq!(std::env::var("https_proxy").as_deref(), Ok("http://127.0.0.1:7890"));
+        assert_eq!(
+            std::env::var("HTTPS_PROXY").as_deref(),
+            Ok("http://127.0.0.1:7890")
+        );
+        assert_eq!(
+            std::env::var("https_proxy").as_deref(),
+            Ok("http://127.0.0.1:7890")
+        );
 
         apply(&settings(false, Some("http://127.0.0.1:7890")));
         assert!(std::env::var("HTTPS_PROXY").is_err());
@@ -104,11 +126,18 @@ mod tests {
 
     #[test]
     fn apply_startup_leaves_environment_alone_when_disabled() {
+        let _guard = env_guard();
         std::env::set_var("HTTP_PROXY", "http://external:1");
         apply_startup(&settings(false, None));
-        assert_eq!(std::env::var("HTTP_PROXY").as_deref(), Ok("http://external:1"));
+        assert_eq!(
+            std::env::var("HTTP_PROXY").as_deref(),
+            Ok("http://external:1")
+        );
         apply_startup(&settings(true, Some("http://127.0.0.1:7890")));
-        assert_eq!(std::env::var("HTTP_PROXY").as_deref(), Ok("http://127.0.0.1:7890"));
+        assert_eq!(
+            std::env::var("HTTP_PROXY").as_deref(),
+            Ok("http://127.0.0.1:7890")
+        );
         clear_proxy_env();
         assert!(std::env::var("HTTP_PROXY").is_err());
     }

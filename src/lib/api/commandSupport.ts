@@ -5,6 +5,7 @@ export const desktopOnlyCommands = [
   "open_route_proxy_https_certificate_dir",
   "open_session_terminal",
   "save_route_credential_export",
+  "save_route_proxy_diagnostics_export",
 ] as const;
 
 export function isDesktopOnlyCommand(command: string) {

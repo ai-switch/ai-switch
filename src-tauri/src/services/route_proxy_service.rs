@@ -67,6 +67,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{Row, SqlitePool};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -2089,10 +2090,32 @@ fn route_proxy_trace_id(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The path of the URL the request was actually sent to.
+///
+/// `/v1/chat/completions`, `/v1/messages`, `/v1/responses` — this is what says
+/// which protocol the bridge spoke *upstream*, and it is the one thing the
+/// request log could not answer: `entry_path` and `path` are both the *client's*
+/// path, so every Codex turn was recorded as `/v1/responses` no matter which
+/// upstream it really reached. Grouping by those two fields therefore says
+/// nothing about the upstream dialect.
+///
+/// A base URL with its own prefix is kept (`/openai/v1/chat/completions`), since
+/// that is the endpoint as it really was.
+fn upstream_path_from_target_url(target_url: Option<&str>) -> Option<String> {
+    let url = target_url?;
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let path = after_scheme.split_once('/').map(|(_, path)| path)?;
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    let path = path.trim_end_matches('/');
+    (!path.is_empty()).then(|| format!("/{path}"))
+}
+
+/// `entry_path` is the path the *client* called, not the upstream endpoint.
+/// The upstream endpoint is `upstream_path`, derived from `target_url`.
 fn route_proxy_request_metadata(
     platform: &str,
     credential: &SelectedCredential,
-    path: &str,
+    entry_path: &str,
     target_url: Option<&str>,
     status: Option<u16>,
     success: bool,
@@ -2107,8 +2130,11 @@ fn route_proxy_request_metadata(
         "platform": platform,
         "route_credential_id": credential.id,
         "route_credential_name": credential.display_name,
-        "entry_path": path,
-        "path": path,
+        "entry_path": entry_path,
+        // Kept for older readers that only ever knew this key. It has always
+        // held the client path; `upstream_path` is the new, correct field.
+        "path": entry_path,
+        "upstream_path": upstream_path_from_target_url(target_url),
         "target_url": target_url,
         "status": status,
         "success": success,
@@ -2154,8 +2180,26 @@ fn route_proxy_response_body_metadata(
     (!text.trim().is_empty()).then_some(text)
 }
 
-/// Record one live-log entry for a proxy attempt, carrying whichever of the four
-/// stages are available at the call site (missing stages pass `None`).
+/// Record one proxied request into the in-memory live log, carrying whichever of
+/// the four stages are available at the call site (missing stages pass `None`).
+///
+/// **Everything this function does to the four stages is log-only.** The
+/// parameters are immutable borrows, the function returns `()`, and the redacted
+/// buffers it builds never leave it — so the request that went upstream and the
+/// response that reached the client are the original bytes, untouched. Keep it
+/// that way: taking `&mut` here, or returning a redacted buffer, would silently
+/// start rewriting live traffic.
+///
+/// The redaction exists because agent clients re-send tens of kilobytes of
+/// identical boilerplate on every turn (system prompt, tool catalogue) and
+/// Responses gateways echo the whole request back inside `response.created`.
+/// Left in, that boilerplate consumed the entire per-stage byte budget and hid
+/// every event after it — reasoning deltas included.
+///
+/// Stripping it here only works if the caller retained enough raw bytes to
+/// begin with: the streaming path hands over a preview the observer has already
+/// capped, so that cap has to leave room for both the echo and the events
+/// behind it — see [`LIVE_LOG_RAW_PREVIEW_LIMIT`].
 #[allow(clippy::too_many_arguments)]
 fn emit_live_log(
     state: &ProxyAppState,
@@ -2177,17 +2221,20 @@ fn emit_live_log(
     upstream_request: Option<&[u8]>,
     upstream_response: Option<&[u8]>,
     final_response: Option<&[u8]>,
+    upstream_reasoning_deltas: Option<usize>,
 ) {
     if state.access_scope.is_some() {
         return;
     }
     let client_request = redact_verbose_request_fields(client_request);
     let upstream_request = redact_verbose_request_fields(upstream_request);
+    let upstream_response = redact_verbose_response_fields(upstream_response);
     let (client_request, t1) = stage_preview(client_request.as_deref());
     let (upstream_request, t2) = stage_preview(upstream_request.as_deref());
-    let (upstream_response, t3) = stage_preview(upstream_response);
+    let (upstream_response, t3) = stage_preview(upstream_response.as_deref());
     let notes = diagnostic_notes(success, bridge, client_request.as_deref(), final_response);
-    let (final_response, t4) = stage_preview(final_response);
+    let final_response = redact_verbose_response_fields(final_response);
+    let (final_response, t4) = stage_preview(final_response.as_deref());
     state.live_log.record(RouteProxyLiveLogEntry {
         id: uuid::Uuid::new_v4().to_string(),
         trace_id: trace_id.map(str::to_string),
@@ -2215,8 +2262,10 @@ fn emit_live_log(
         upstream_request,
         upstream_response,
         final_response,
+        upstream_reasoning_deltas,
         notes,
         truncated: t1 || t2 || t3 || t4,
+        truncated_stages: truncated_stage_names(t1, t2, t3, t4),
         created_at: Utc::now().to_rfc3339(),
     });
 }
@@ -2377,25 +2426,24 @@ fn diagnostic_body_has_tool_call(body: &Value) -> bool {
 /// `<field omitted: N chars>` marker in the live log preview.
 const VERBOSE_REQUEST_FIELD_LIMIT: usize = 200;
 
-/// The live log keeps a preview of every request stage, but agent clients ship a
-/// huge system prompt on every call — Responses `instructions`, the Chat system
-/// message it converts into, or Anthropic's `system`. That blob dwarfs the parts
-/// worth reading (messages, tools) and eats the per-stage byte budget, so strip
-/// it to a marker before storing. Non-JSON bodies (SSE, etc.) pass through
-/// untouched.
-fn redact_verbose_request_fields(body: Option<&[u8]>) -> Option<Vec<u8>> {
-    let body = body?;
-    let Ok(mut value) = serde_json::from_slice::<Value>(body) else {
-        return Some(body.to_vec());
-    };
-    let Some(object) = value.as_object_mut() else {
-        return Some(body.to_vec());
-    };
+/// SSE `data:` payloads at least this large are worth parsing to look for the
+/// boilerplate fields below. Reasoning deltas and text chunks are far smaller,
+/// so this keeps the redaction to the one or two events that can actually hold a
+/// whole system prompt, instead of parsing every event of every stream.
+const VERBOSE_RESPONSE_EVENT_MIN_PARSE: usize = 1024;
+
+/// Strip the fields that every turn re-sends verbatim and that dwarf the parts
+/// worth reading — a system prompt is tens of kilobytes of the same text on each
+/// call. Returns whether anything changed.
+fn redact_verbose_fields_in_object(object: &mut serde_json::Map<String, Value>) -> bool {
     let mut changed = false;
-    // Responses `instructions` and Anthropic `system` are top-level strings.
-    for key in ["instructions", "system"] {
+    // The system prompt under each protocol's own name: Responses `instructions`
+    // and Anthropic `system` are strings, Gemini's `systemInstruction` is an
+    // object of parts.
+    for key in ["instructions", "system", "systemInstruction"] {
         if let Some(field) = object.get_mut(key) {
             changed |= redact_long_string(field, key);
+            changed |= redact_large_collection(field, key);
         }
     }
     // Chat Completions carries the system prompt as a system/developer message.
@@ -2412,12 +2460,138 @@ fn redact_verbose_request_fields(body: Option<&[u8]>) -> Option<Vec<u8>> {
             }
         }
     }
-    if !changed {
+    changed
+}
+
+/// Fields that are *pure echo* in a response: the gateway re-sends the request
+/// it was handed, so `tools` here is a verbatim copy of what the request stage
+/// already holds. Dropping it costs no information and buys back the bytes that
+/// were pushing the reasoning events past the cut.
+///
+/// Deliberately not applied to request stages, where the tool catalogue is the
+/// payload rather than a copy.
+fn redact_echoed_fields_in_object(object: &mut serde_json::Map<String, Value>) -> bool {
+    match object.get_mut("tools") {
+        Some(tools) => redact_large_collection(tools, "tools"),
+        None => false,
+    }
+}
+
+/// The live log keeps a preview of every request stage, but agent clients ship a
+/// huge system prompt on every call — Responses `instructions`, the Chat system
+/// message it converts into, or Anthropic's `system`. That blob dwarfs the parts
+/// worth reading (messages, tools) and eats the per-stage byte budget, so strip
+/// it to a marker before storing. Non-JSON bodies (SSE, etc.) pass through
+/// untouched.
+fn redact_verbose_request_fields(body: Option<&[u8]>) -> Option<Vec<u8>> {
+    let body = body?;
+    let Ok(mut value) = serde_json::from_slice::<Value>(body) else {
+        return Some(body.to_vec());
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Some(body.to_vec());
+    };
+    if !redact_verbose_fields_in_object(object) {
         return Some(body.to_vec());
     }
     serde_json::to_vec(&value)
         .ok()
         .or_else(|| Some(body.to_vec()))
+}
+
+/// Redact the same boilerplate out of a *response* stage.
+///
+/// A Responses gateway echoes the whole request back inside its opening
+/// `response.created` event — `instructions` (the system prompt) and `tools`
+/// included. Measured against a real gateway, that single event consumed the
+/// entire 64 KB per-stage budget, so the byte cut landed inside it and every
+/// later event — the reasoning deltas included — was lost. The upstream then
+/// looked like it never sent any reasoning at all.
+///
+/// Only bodies that would be truncated anyway are touched, and only their
+/// `data:` payloads: shorter bodies stay byte-faithful, which is what makes the
+/// "upstream and final stages are identical" comparison meaningful.
+fn redact_verbose_response_fields(body: Option<&[u8]>) -> Option<Cow<'_, [u8]>> {
+    let body = body?;
+    if body.len() <= LIVE_LOG_STAGE_LIMIT || !looks_like_sse(body) {
+        return Some(Cow::Borrowed(body));
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(body.len());
+    let mut changed = false;
+    let mut start = 0usize;
+    while start < body.len() {
+        let (end, next) = match body[start..].iter().position(|byte| *byte == b'\n') {
+            Some(offset) => (start + offset, start + offset + 1),
+            None => (body.len(), body.len()),
+        };
+        let line = &body[start..end];
+        start = next;
+
+        let payload = line
+            .strip_suffix(b"\r")
+            .unwrap_or(line)
+            .strip_prefix(b"data:")
+            .map(|rest| rest.strip_prefix(b" ").unwrap_or(rest));
+        match payload {
+            Some(payload) if payload.len() >= VERBOSE_RESPONSE_EVENT_MIN_PARSE => {
+                match redact_response_event_payload(payload) {
+                    Some(redacted) => {
+                        out.extend_from_slice(b"data: ");
+                        out.extend_from_slice(&redacted);
+                        changed = true;
+                    }
+                    None => out.extend_from_slice(line),
+                }
+            }
+            _ => out.extend_from_slice(line),
+        }
+        out.extend_from_slice(&body[end..next]);
+    }
+    if !changed {
+        return Some(Cow::Borrowed(body));
+    }
+    Some(Cow::Owned(out))
+}
+
+/// Redact one SSE event's JSON payload. Returns `None` when the payload is not
+/// JSON or holds nothing to strip, so the caller keeps the original bytes.
+fn redact_response_event_payload(payload: &[u8]) -> Option<Vec<u8>> {
+    let mut value: Value = serde_json::from_slice(payload).ok()?;
+    let mut changed = false;
+    // The Responses API nests the echoed request under `response`; some gateways
+    // also flatten it onto the event itself.
+    if let Some(response) = value.get_mut("response").and_then(Value::as_object_mut) {
+        changed |= redact_verbose_fields_in_object(response);
+        changed |= redact_echoed_fields_in_object(response);
+    }
+    if let Some(object) = value.as_object_mut() {
+        changed |= redact_verbose_fields_in_object(object);
+        changed |= redact_echoed_fields_in_object(object);
+    }
+    if !changed {
+        return None;
+    }
+    serde_json::to_vec(&value).ok()
+}
+
+/// Whether the body looks like a `text/event-stream` payload: its first line
+/// begins with an SSE field name. Guards against JSON bodies, which contain
+/// blank lines inside string literals but are not streams.
+fn looks_like_sse(body: &[u8]) -> bool {
+    let first_line = body.split(|byte| *byte == b'\n').next().unwrap_or(body);
+    let first_line = first_line.strip_suffix(b"\r").unwrap_or(first_line);
+    for prefix in [
+        &b"data:"[..],
+        &b"event:"[..],
+        &b"id:"[..],
+        &b"retry:"[..],
+        &b":"[..],
+    ] {
+        if first_line.starts_with(prefix) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Replace `value` with a `<label omitted: N chars>` marker when it is a string
@@ -2431,6 +2605,24 @@ fn redact_long_string(value: &mut Value, label: &str) -> bool {
     }
     let chars = text.chars().count();
     *value = Value::String(format!("<{label} omitted: {chars} chars>"));
+    true
+}
+
+/// Replace a collection that dwarfs the parts worth reading with a short marker.
+/// Used for `tools` (an array of definitions) and Gemini's `systemInstruction`
+/// (an object of prompt parts) — both byte-identical on every turn. Returns
+/// whether it changed.
+fn redact_large_collection(value: &mut Value, label: &str) -> bool {
+    let (count, unit) = match value {
+        Value::Array(items) if !items.is_empty() => (items.len(), "items"),
+        Value::Object(fields) if !fields.is_empty() => (fields.len(), "fields"),
+        _ => return false,
+    };
+    let size = serde_json::to_vec(value).map_or(0, |bytes| bytes.len());
+    if size <= VERBOSE_REQUEST_FIELD_LIMIT {
+        return false;
+    }
+    *value = Value::String(format!("<{label} omitted: {count} {unit}, {size} bytes>"));
     true
 }
 
@@ -2825,6 +3017,10 @@ impl StreamCompletion {
             Some(&upstream_request),
             Some(&preview),
             Some(&preview),
+            // The one stage whose reasoning count is actually known: this path
+            // watched every frame of the upstream stream, so a zero here is a
+            // statement about the upstream rather than a gap in the log.
+            Some(outcome.reasoning_deltas),
         );
 
         if truncated {
@@ -7043,7 +7239,7 @@ mod tests {
     }
 
     #[test]
-    fn redacts_long_instructions_but_keeps_tools_and_messages() {
+    fn redacts_long_instructions_but_keeps_small_tools_and_messages() {
         let long = "x".repeat(VERBOSE_REQUEST_FIELD_LIMIT + 50);
         let body = serde_json::to_vec(&json!({
             "model": "mimo-v2.5-pro",
@@ -7088,6 +7284,309 @@ mod tests {
         let body = b"data: {not json";
         let out = redact_verbose_request_fields(Some(body)).expect("passthrough");
         assert_eq!(out, body);
+    }
+
+    #[test]
+    fn a_large_tool_catalogue_is_only_stripped_from_the_echo() {
+        let tools: Vec<Value> = (0..20)
+            .map(|index| {
+                json!({
+                    "type": "function",
+                    "name": format!("tool_{index}"),
+                    "description": "d".repeat(80)
+                })
+            })
+            .collect();
+
+        // Request stage: the catalogue is the payload, so it is kept.
+        let request = serde_json::to_vec(&json!({"model": "m", "tools": tools, "input": "hi"}))
+            .expect("json");
+        let redacted = redact_verbose_request_fields(Some(&request)).expect("kept");
+        let value: Value = serde_json::from_slice(&redacted).expect("json");
+        assert_eq!(value["tools"][0]["name"], "tool_0");
+
+        // Response stage: the same catalogue is a verbatim echo, so it goes.
+        let event = serde_json::to_vec(&json!({
+            "type": "response.created",
+            "response": {"id": "resp_1", "tools": tools}
+        }))
+        .expect("json");
+        let redacted = redact_response_event_payload(&event).expect("redacted");
+        let value: Value = serde_json::from_slice(&redacted).expect("json");
+        assert!(value["response"]["tools"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("<tools omitted:")));
+        assert_eq!(value["response"]["id"], "resp_1");
+    }
+
+    #[test]
+    fn a_small_tool_catalogue_survives_the_echo_too() {
+        let event = serde_json::to_vec(&json!({
+            "response": {"tools": [{"name": "lookup"}]}
+        }))
+        .expect("json");
+        assert!(redact_response_event_payload(&event).is_none());
+    }
+
+    /// Gemini carries the system prompt as an object of parts, not a string, so
+    /// the `redact_long_string` path cannot see it. Four bridges emit this key.
+    #[test]
+    fn redacts_a_gemini_system_instruction_even_though_it_is_an_object() {
+        let parts = || -> Vec<Value> {
+            (0..4)
+                .map(|index| json!({"text": format!("part {index} ").repeat(80)}))
+                .collect()
+        };
+        let body = serde_json::to_vec(&json!({
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "systemInstruction": {"parts": parts()}
+        }))
+        .expect("json");
+
+        let redacted = redact_verbose_request_fields(Some(&body)).expect("redacted");
+        let value: Value = serde_json::from_slice(&redacted).expect("json");
+        assert!(value["systemInstruction"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("<systemInstruction omitted:")));
+        // 对话本身是载荷，要留着。
+        assert_eq!(value["contents"][0]["parts"][0]["text"], "hi");
+
+        // 回显里同样要剔掉。
+        let event = serde_json::to_vec(&json!({
+            "type": "response.created",
+            "response": {"id": "resp_1", "systemInstruction": {"parts": parts()}}
+        }))
+        .expect("json");
+        let value: Value =
+            serde_json::from_slice(&redact_response_event_payload(&event).expect("redacted"))
+                .expect("json");
+        assert!(value["response"]["systemInstruction"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("<systemInstruction omitted:")));
+
+        // 短的 systemInstruction 不值得替换成标记。
+        let small =
+            serde_json::to_vec(&json!({"systemInstruction": {"parts": [{"text": "be terse"}]}}))
+                .expect("json");
+        let redacted = redact_verbose_request_fields(Some(&small)).expect("kept");
+        let value: Value = serde_json::from_slice(&redacted).expect("json");
+        assert_eq!(value["systemInstruction"]["parts"][0]["text"], "be terse");
+    }
+
+    /// The bug this guards: a gateway echoes the whole request inside its
+    /// opening `response.created` event, that one event exceeds the 64 KB stage
+    /// budget, and the plain byte cut then hides every event after it — so the
+    /// upstream looks like it never sent any reasoning.
+    #[test]
+    fn a_response_echo_is_redacted_so_the_events_after_it_survive() {
+        let instructions = "s".repeat(70 * 1024);
+        let tools: Vec<Value> = (0..40)
+            .map(|index| {
+                json!({
+                    "type": "function",
+                    "name": format!("tool_{index}"),
+                    "description": "d".repeat(200)
+                })
+            })
+            .collect();
+        let created = json!({
+            "type": "response.created",
+            "response": {"id": "resp_1", "instructions": instructions, "tools": tools, "output": []}
+        });
+        let reasoning = json!({
+            "type": "response.reasoning_summary_text.delta",
+            "delta": "thinking about it"
+        });
+        let body = format!(
+            "event: response.created\ndata: {created}\n\n\
+             event: response.reasoning_summary_text.delta\ndata: {reasoning}\n\n"
+        );
+        let body = body.as_bytes();
+        assert!(
+            body.len() > LIVE_LOG_STAGE_LIMIT,
+            "样本必须先超过单阶段上限才有意义"
+        );
+
+        // What the old code did: cut at 64 KB, which lands inside the echo.
+        let naive = String::from_utf8_lossy(&body[..LIVE_LOG_STAGE_LIMIT]).to_string();
+        assert!(
+            !naive.contains("response.reasoning_summary_text.delta"),
+            "样本要能复现原 bug：直接截断看不到思考事件"
+        );
+
+        let redacted = redact_verbose_response_fields(Some(body)).expect("preview");
+        let text = String::from_utf8_lossy(&redacted);
+        assert!(text.contains("<instructions omitted:"));
+        assert!(text.contains("<tools omitted:"));
+        assert!(
+            text.contains("response.reasoning_summary_text.delta")
+                && text.contains("thinking about it"),
+            "剔除回显后，思考事件必须留在预览里"
+        );
+        assert!(redacted.len() < body.len());
+        assert!(redacted.len() <= LIVE_LOG_STAGE_LIMIT);
+    }
+
+    /// The two mechanisms working together, which is the realistic worst case:
+    /// the echo is redacted away, yet a long answer still pushes the body past
+    /// the stage limit. The reasoning delta arrives early enough that the head
+    /// keeps it.
+    #[test]
+    fn a_long_answer_keeps_its_reasoning_after_the_echo_is_redacted() {
+        let instructions = "s".repeat(60 * 1024);
+        let created = json!({
+            "type": "response.created",
+            "response": {"id": "resp_1", "instructions": instructions, "output": []}
+        });
+        let reasoning = json!({
+            "type": "response.reasoning_summary_text.delta",
+            "delta": "thinking about it"
+        });
+        let answer = json!({
+            "type": "response.output_text.delta",
+            "delta": "a".repeat(100 * 1024)
+        });
+        let body = format!(
+            "event: response.created\ndata: {created}\n\n\
+             event: response.reasoning_summary_text.delta\ndata: {reasoning}\n\n\
+             event: response.output_text.delta\ndata: {answer}\n\n"
+        );
+        let body = body.as_bytes();
+
+        let redacted = redact_verbose_response_fields(Some(body)).expect("preview");
+        assert!(
+            redacted.len() > LIVE_LOG_STAGE_LIMIT,
+            "剔除回显后仍要超上限，才是在测两者协同"
+        );
+
+        let (preview, truncated) = stage_preview(Some(redacted.as_ref()));
+        let preview = preview.expect("preview");
+        assert!(truncated);
+        assert!(preview.contains(LIVE_LOG_ELISION_MARKER));
+        assert!(preview.contains("<instructions omitted:"));
+        assert!(
+            preview.contains("response.reasoning_summary_text.delta")
+                && preview.contains("thinking about it"),
+            "剔除回显 + 头尾截断之后，思考事件仍必须可见"
+        );
+    }
+
+    /// The regression the two tests above structurally could not catch: in
+    /// production the streaming path never hands `redact_verbose_response_fields`
+    /// the raw body. It hands it `StreamObserver::preview()`, which stopped at
+    /// `LIVE_LOG_STAGE_LIMIT` — so a capped body measured exactly 64 KB, failed
+    /// the "would be truncated anyway" guard, and the redaction was skipped
+    /// outright. The echo it exists to strip stayed in, and the reasoning events
+    /// behind it had already been discarded by the observer, so no amount of
+    /// stripping could have brought them back.
+    ///
+    /// The sizes are the ones measured against a real gateway: `instructions`
+    /// at ~55 KB and `tools` at ~8 KB, both inside the opening event.
+    #[test]
+    fn the_streaming_path_retains_enough_bytes_for_the_echo_to_be_stripped() {
+        let instructions = "s".repeat(55 * 1024);
+        let tools: Vec<Value> = (0..40)
+            .map(|index| {
+                json!({
+                    "type": "function",
+                    "name": format!("tool_{index}"),
+                    "description": "d".repeat(200)
+                })
+            })
+            .collect();
+        let created = json!({
+            "type": "response.created",
+            "response": {"id": "resp_1", "instructions": instructions, "tools": tools, "output": []}
+        });
+        let reasoning = json!({
+            "type": "response.reasoning_summary_text.delta",
+            "delta": "thinking about it"
+        });
+        let body = format!(
+            "event: response.created\ndata: {created}\n\n\
+             event: response.reasoning_summary_text.delta\ndata: {reasoning}\n\n"
+        );
+
+        // Drive the real observer in chunks, the way the proxy does.
+        let observe_all = |limit: usize| {
+            let mut observer = StreamObserver::new(limit, true);
+            for chunk in body.as_bytes().chunks(8 * 1024) {
+                observer.observe(chunk);
+            }
+            observer.preview().to_vec()
+        };
+
+        // The old cap: the reasoning event is gone before redaction ever runs.
+        let capped = observe_all(LIVE_LOG_STAGE_LIMIT);
+        assert_eq!(capped.len(), LIVE_LOG_STAGE_LIMIT, "旧上限下正好顶到 64 KB");
+        assert!(
+            !String::from_utf8_lossy(&capped).contains("reasoning_summary_text"),
+            "复现原 bug：observer 在 64 KB 处就把思考事件丢了，剔除回显也救不回来"
+        );
+
+        // The current cap: the echo is still there to strip, and the events
+        // behind it survived being retained.
+        let raw = observe_all(LIVE_LOG_RAW_PREVIEW_LIMIT);
+        assert!(
+            raw.len() > LIVE_LOG_STAGE_LIMIT,
+            "守卫要能认出「反正也要截断」"
+        );
+
+        let redacted = redact_verbose_response_fields(Some(&raw)).expect("preview");
+        let text = String::from_utf8_lossy(&redacted);
+        assert!(text.contains("<instructions omitted:"), "回显必须被剔掉");
+        assert!(text.contains("<tools omitted:"));
+        assert!(
+            text.contains("response.reasoning_summary_text.delta")
+                && text.contains("thinking about it"),
+            "剔除回显后，思考事件必须在预览里"
+        );
+
+        let (preview, _) = stage_preview(Some(redacted.as_ref()));
+        let preview = preview.expect("preview");
+        assert!(
+            preview.contains("response.reasoning_summary_text.delta"),
+            "走完整条链路之后，思考事件仍必须可见"
+        );
+    }
+
+    #[test]
+    fn a_response_body_below_the_stage_limit_is_left_byte_identical() {
+        let instructions = "s".repeat(500);
+        let body = format!(
+            "event: response.created\ndata: {{\"response\":{{\"instructions\":\"{instructions}\"}}}}\n\n"
+        );
+        let bytes = body.as_bytes();
+        assert!(bytes.len() < LIVE_LOG_STAGE_LIMIT);
+
+        let out = redact_verbose_response_fields(Some(bytes)).expect("preview");
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "不会截断的报文不应被改写 —— 两阶段逐字节比对依赖这一点"
+        );
+        assert_eq!(out.as_ref(), bytes);
+    }
+
+    #[test]
+    fn a_json_body_with_blank_lines_is_not_mistaken_for_a_stream() {
+        // JSON 字符串里满是 \n\n，但它不是 SSE，不能按事件改写。
+        let padding = "p\n\nq".repeat(30 * 1024);
+        let body = serde_json::to_vec(&json!({"model": "m", "input": padding})).expect("json");
+        assert!(body.len() > LIVE_LOG_STAGE_LIMIT);
+
+        let out = redact_verbose_response_fields(Some(&body)).expect("preview");
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out.as_ref(), body.as_slice());
+    }
+
+    #[test]
+    fn only_sse_and_json_shaped_bodies_are_recognized() {
+        assert!(looks_like_sse(b"event: response.created\ndata: {}"));
+        assert!(looks_like_sse(b"data: {}\n\n"));
+        assert!(looks_like_sse(b": keep-alive\n\n"));
+        assert!(looks_like_sse(b"id: 1\ndata: {}"));
+        assert!(!looks_like_sse(b"{\"model\":\"m\"}"));
+        assert!(!looks_like_sse(b"[1,2,3]"));
     }
 
     #[test]

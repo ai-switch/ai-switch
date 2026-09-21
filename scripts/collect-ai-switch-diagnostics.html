@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-switch 诊断采集</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --line: #dfe3e8;
+    --text: #1f2328;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --ok: #15803d;
+    --warn: #b45309;
+    --bad: #b91c1c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin-bottom: 20px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 16px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 12px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  input[type=text], input[type=password], input[type=number], textarea {
+    width: 100%;
+    padding: 7px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font: inherit;
+    background: #fff;
+    color: var(--text);
+  }
+  textarea { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > div { flex: 1 1 200px; }
+  button {
+    padding: 8px 16px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { color: #fff; opacity: .9; }
+  .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+  .status { font-size: 13px; color: var(--muted); }
+  .status.ok { color: var(--ok); }
+  .status.bad { color: var(--bad); }
+  .status.warn { color: var(--warn); }
+  .stats { display: flex; gap: 20px; flex-wrap: wrap; margin: 4px 0 14px; }
+  .stat b { display: block; font-size: 22px; line-height: 1.2; }
+  .stat span { font-size: 12px; color: var(--muted); }
+  .stat.bad b { color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; }
+  td.mono { font-family: ui-monospace, Consolas, monospace; }
+  .tag { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11.5px; }
+  .tag.DROPPED { background: #fee2e2; color: var(--bad); }
+  .tag.DROPPEDq { background: #ffedd5; color: var(--warn); }
+  .tag.kept { background: #dcfce7; color: var(--ok); }
+  .tag.never { background: #f1f3f5; color: var(--muted); }
+  .tag.neverq { background: #fef3c7; color: var(--warn); }
+  .tag.injected, .tag.injectedq { background: #e0e7ff; color: #3730a3; }
+  .tag.nobody, .tag.missing { background: #f1f3f5; color: var(--muted); }
+  .scroll { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+  .hint { font-size: 12.5px; color: var(--muted); }
+  .hint code { background: #eef1f4; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  ol { margin: 6px 0 0; padding-left: 22px; }
+  li { margin-bottom: 3px; }
+  .live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 6px; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+  .warnbox { background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 10px 12px; font-size: 12.5px; color: #78350f; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ai-switch 诊断采集</h1>
+  <div class="sub">用于排查「Codex 不显示思考 / 首字卡顿」。它通过本机 Web 服务读取实时日志里<b>上游原始报文</b>与<b>客户端最终报文</b>，两者一比就能确定是上游没发、还是我们把它丢了。</div>
+
+  <div class="card">
+    <h2>1. 连接本地 Web 服务</h2>
+    <div class="row">
+      <div>
+        <label for="host">地址</label>
+        <input type="text" id="host" value="127.0.0.1">
+      </div>
+      <div>
+        <label for="port">服务端口</label>
+        <input type="number" id="port" value="19527">
+      </div>
+      <div>
+        <label for="token">访问令牌</label>
+        <input type="password" id="token" placeholder="从「设置 → Web 服务」复制">
+      </div>
+    </div>
+    <div class="actions">
+      <button id="btnTest">测试连接</button>
+      <span id="testStatus" class="status">未测试</span>
+    </div>
+    <details style="margin-top:12px">
+      <summary>端口和令牌在哪？</summary>
+      <ol>
+        <li>打开 ai-switch → <b>设置</b> → <b>Web 服务</b>，确认已<b>启动</b>，页面上就有「服务端口」和「访问令牌」。</li>
+        <li>也可以直接打开数据目录下的 <code>web-service.json</code>（Windows：<code>%USERPROFILE%\.ai-switch\web-service.json</code>；macOS：<code>~/.ai-switch/web-service.json</code>），把里面的 <code>port</code> 和 <code>token</code> 填上来。</li>
+      </ol>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>2. 抓取（请在窗口内复现问题）</h2>
+    <div class="hint" style="margin-bottom:10px">
+      实时日志只保留最近 100 条，所以要在抓取期间到 Codex 里重新发一次「不显示思考」的那类提问。
+      抓取会每 2 秒拉一次，按请求 id 去重累积。
+    </div>
+    <div class="actions">
+      <button id="btnStart" class="primary" disabled>开始抓取</button>
+      <button id="btnStop" disabled>停止抓取</button>
+      <span id="capStatus" class="status">未开始</span>
+    </div>
+    <div class="stats" id="stats" style="margin-top:16px; display:none">
+      <div class="stat"><b id="sTotal">0</b><span>已捕获</span></div>
+      <div class="stat bad"><b id="sDropped">0</b><span>上游发了/客户端没收到</span></div>
+      <div class="stat"><b id="sKept">0</b><span>两边都有</span></div>
+      <div class="stat"><b id="sNever">0</b><span>两边都没有</span></div>
+      <div class="stat"><b id="sNeverq">0</b><span>报文被截断，无法确认</span></div>
+      <div class="stat"><b id="sNoBody">0</b><span>报文缺失</span></div>
+    </div>
+    <div class="scroll" id="tableWrap" style="display:none">
+      <table>
+        <thead>
+          <tr><th>时间</th><th>平台</th><th>桥</th><th>上游主机</th><th>模型</th><th>耗时</th><th>判定</th></tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>3. 导出</h2>
+    <div class="row">
+      <div>
+        <label for="stageLimit">每个阶段报文保留上限（KB，默认 16；思考事件在流的开头就会到达）</label>
+        <input type="number" id="stageLimit" value="16" min="1">
+      </div>
+    </div>
+    <div class="actions">
+      <label style="display:flex; align-items:center; gap:6px; margin:0; color:var(--text)">
+        <input type="checkbox" id="onlyInteresting" checked style="width:auto">
+        只导出可疑条目的完整报文（体积更小）
+      </label>
+    </div>
+    <div class="actions">
+      <button id="btnExport" class="primary" disabled>导出诊断包（.json）</button>
+      <span id="exportStatus" class="status"></span>
+    </div>
+    <div class="warnbox" style="margin-top:14px">
+      导出的文件里，<code>client_request</code> / <code>upstream_request</code> 会包含你这几轮的对话内容。
+      介意的话可以先自己看一眼再决定发不发。
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // 判定「这段报文里有没有思考」。三种协议各自的载体不同：
+  //   Responses  -> response.reasoning_summary_* 事件 / type=reasoning 条目
+  //   Anthropic  -> thinking_delta / redacted_thinking 块
+  //   Chat       -> reasoning_content 字段
+  var REASONING_MARKERS = [
+    'response.reasoning_summary',
+    '"type":"reasoning"',
+    '"type": "reasoning"',
+    'thinking_delta',
+    '"type":"thinking"',
+    'redacted_thinking',
+    'reasoning_content'
+  ];
+
+  // 服务端每个阶段最多留 64KB（route_proxy_live_log.rs 的 LIVE_LOG_STAGE_LIMIT），
+  // 而且是按**字节**截的，不是按字符。有些上游的 response.created 会把整个输入
+  // 回显一遍，单这一个事件就超 64KB，于是「上游侧有没有思考」就看不到了 —— 命中
+  // 截断时结论要打问号。实测 100 条里 57 条会踩到，所以这个判定必须准确。
+  var LIVE_LOG_STAGE_LIMIT = 64 * 1024;
+
+  var PLATFORMS = ['codex', 'claude', 'gemini', 'grok', 'opencode', 'openclaw', 'hermes'];
+
+  var VERDICT_LABEL = {
+    DROPPED: '上游发了、客户端没收到',
+    'DROPPED?': '上游有、客户端被截断，无法确认',
+    kept: '两边都有',
+    never: '两边都没有',
+    'never?': '上游被截断，无法确认',
+    injected: '上游没发、客户端却有',
+    'injected?': '客户端有、上游被截断',
+    'upstream-missing': '上游报文缺失',
+    'final-missing': '客户端报文缺失',
+    'no-body': '两侧报文都缺失'
+  };
+
+  function hasReasoning(text) {
+    if (!text) { return null; }
+    for (var i = 0; i < REASONING_MARKERS.length; i++) {
+      if (text.indexOf(REASONING_MARKERS[i]) !== -1) { return true; }
+    }
+    return false;
+  }
+
+  // UTF-8 字节长度。服务端是按字节截断的，所以按字符数比较会漏判：
+  // 中文/emoji 混排时 6 万字符可能已经超过 64KB 字节。
+  function utf8Length(text) {
+    if (!text) { return 0; }
+    if (typeof TextEncoder !== 'undefined') { return new TextEncoder().encode(text).length; }
+    var bytes = 0;
+    for (var i = 0; i < text.length; i++) {
+      var code = text.charCodeAt(i);
+      if (code < 0x80) { bytes += 1; }
+      else if (code < 0x800) { bytes += 2; }
+      else if (code >= 0xd800 && code <= 0xdbff) { bytes += 4; i++; }
+      else { bytes += 3; }
+    }
+    return bytes;
+  }
+
+  // 某个阶段是否被截断。新数据直接读服务端给的 truncated_stages（权威）；
+  // 旧数据没有这个字段，就按「截断后的字节数必然 >= 64KB」反推 —— 服务端切的是
+  // 恰好 64KB 字节，解码回来仍是 65536~65538 字节，所以这个反推是精确的。
+  // 注意不能用 entry.truncated：它是四个阶段的或，60KB 的提示词会让两个**请求**
+  // 阶段几乎每轮都截断，用它会把所有条目都误判成「上游被截断」。
+  function stageTruncated(entry, stage) {
+    var stages = entry.truncated_stages;
+    if (Array.isArray(stages)) { return stages.indexOf(stage) !== -1; }
+    return utf8Length(entry[stage]) >= LIVE_LOG_STAGE_LIMIT;
+  }
+
+  function baseVerdict(upstream, final) {
+    if (upstream === null && final === null) { return 'no-body'; }
+    if (upstream === null) { return 'upstream-missing'; }
+    if (final === null) { return 'final-missing'; }
+    if (upstream && !final) { return 'DROPPED'; }
+    if (!upstream && final) { return 'injected'; }
+    if (upstream && final) { return 'kept'; }
+    return 'never';
+  }
+
+  // 被截断的那一侧「没有思考」这个结论站不住脚：思考事件可能就在被截掉的那一段
+  // 里。所以给结论加问号，以区别于确定的结论。
+  function classify(entry) {
+    var upstream = hasReasoning(entry.upstream_response);
+    var final = hasReasoning(entry.final_response);
+    var verdict = baseVerdict(upstream, final);
+    var upstreamTruncated = stageTruncated(entry, 'upstream_response');
+    var finalTruncated = stageTruncated(entry, 'final_response');
+    if (upstreamTruncated && verdict === 'never') { verdict = 'never?'; }
+    if (upstreamTruncated && verdict === 'injected') { verdict = 'injected?'; }
+    if (finalTruncated && verdict === 'DROPPED') { verdict = 'DROPPED?'; }
+    return {
+      upstream: upstream,
+      final: final,
+      verdict: verdict,
+      upstreamTruncated: upstreamTruncated,
+      finalTruncated: finalTruncated
+    };
+  }
+
+  function hostOf(url) {
+    if (!url) { return '(none)'; }
+    var match = /^https?:\/\/([^/]+)/i.exec(url);
+    return match ? match[1] : url;
+  }
+
+  function limitStage(text, limit) {
+    if (!text || text.length <= limit) { return text; }
+    return text.slice(0, limit) + '\n...[ai-switch-diag: 已截断，原文 ' + text.length + ' 字符]';
+  }
+
+  function tagClass(verdict) {
+    if (verdict === 'DROPPED') { return 'DROPPED'; }
+    if (verdict === 'DROPPED?') { return 'DROPPEDq'; }
+    if (verdict === 'kept') { return 'kept'; }
+    if (verdict === 'never?') { return 'neverq'; }
+    if (verdict === 'injected?') { return 'injectedq'; }
+    if (verdict === 'injected') { return 'injected'; }
+    if (verdict === 'never') { return 'never'; }
+    return 'nobody';
+  }
+
+  // ---------------------------------------------------------------- 连接
+
+  var els = {};
+  ['host', 'port', 'token', 'btnTest', 'testStatus', 'btnStart', 'btnStop', 'capStatus',
+   'stats', 'sTotal', 'sDropped', 'sKept', 'sNever', 'sNeverq', 'sNoBody',
+   'tableWrap', 'rows', 'stageLimit', 'onlyInteresting', 'btnExport', 'exportStatus'
+  ].forEach(function (id) { els[id] = document.getElementById(id); });
+
+  try {
+    var saved = JSON.parse(localStorage.getItem('ai-switch-diag') || '{}');
+    if (saved.host) { els.host.value = saved.host; }
+    if (saved.port) { els.port.value = saved.port; }
+    if (saved.token) { els.token.value = saved.token; }
+  } catch (error) { /* 忽略坏掉的本地存储 */ }
+
+  function remember() {
+    try {
+      localStorage.setItem('ai-switch-diag', JSON.stringify({
+        host: els.host.value.trim(), port: els.port.value.trim(), token: els.token.value.trim()
+      }));
+    } catch (error) { /* 无痕模式下写不了，不影响使用 */ }
+  }
+
+  function baseUrl() {
+    return 'http://' + els.host.value.trim() + ':' + els.port.value.trim();
+  }
+
+  function callCommand(command, args) {
+    var headers = { 'Content-Type': 'application/json' };
+    var token = els.token.value.trim();
+    if (token) { headers.Authorization = 'Bearer ' + token; }
+    return fetch(baseUrl() + '/api/' + command, {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify(args || {})
+    }).then(function (response) {
+      if (response.status === 401) {
+        throw new Error('令牌不对（401）。请核对「设置 → Web 服务」里的访问令牌。');
+      }
+      if (!response.ok) {
+        throw new Error('HTTP ' + response.status);
+      }
+      return response.json();
+    });
+  }
+
+  function setStatus(el, text, kind) {
+    el.textContent = text;
+    el.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  els.btnTest.addEventListener('click', function () {
+    remember();
+    setStatus(els.testStatus, '连接中…');
+    callCommand('health', {})
+      .then(function (result) {
+        if (result && result.ok) {
+          setStatus(els.testStatus, '连接成功', 'ok');
+          els.btnStart.disabled = false;
+        } else {
+          setStatus(els.testStatus, '返回了意外内容', 'warn');
+        }
+      })
+      .catch(function (error) {
+        setStatus(els.testStatus, '失败：' + error.message, 'bad');
+      });
+  });
+
+  // ---------------------------------------------------------------- 抓取
+
+  var entries = [];
+  var seen = {};
+  var timer = null;
+
+  function pollOnce() {
+    return PLATFORMS.reduce(function (chain, platform) {
+      return chain.then(function () {
+        return callCommand('subscribe_route_proxy_live_log', { platform: platform })
+          .then(function (list) {
+            (list || []).forEach(function (entry) {
+              if (entry && entry.id && !seen[entry.id]) {
+                seen[entry.id] = true;
+                entries.push(entry);
+              }
+            });
+          })
+          .catch(function () { /* 单个平台失败不影响其它平台 */ });
+      });
+    }, Promise.resolve());
+  }
+
+  function summary() {
+    var counts = {};
+    var analyzed = entries.map(function (entry) {
+      var info = classify(entry);
+      counts[info.verdict] = (counts[info.verdict] || 0) + 1;
+      return { entry: entry, info: info };
+    });
+    return { counts: counts, analyzed: analyzed };
+  }
+
+  function render() {
+    var result = summary();
+    var counts = result.counts;
+    els.stats.style.display = 'flex';
+    els.tableWrap.style.display = '';
+    els.sTotal.textContent = String(entries.length);
+    els.sDropped.textContent = String(counts.DROPPED || 0);
+    els.sKept.textContent = String(counts.kept || 0);
+    els.sNever.textContent = String(counts.never || 0);
+    els.sNeverq.textContent = String((counts['never?'] || 0) + (counts['injected?'] || 0) +
+      (counts['DROPPED?'] || 0));
+    els.sNoBody.textContent = String((counts['no-body'] || 0) +
+      (counts['upstream-missing'] || 0) + (counts['final-missing'] || 0));
+
+    var recent = result.analyzed.slice(-60).reverse();
+    els.rows.innerHTML = recent.map(function (item) {
+      var entry = item.entry;
+      return '<tr>' +
+        '<td class="mono">' + String(entry.created_at || '').replace('T', ' ').slice(0, 19) + '</td>' +
+        '<td>' + (entry.platform || '') + '</td>' +
+        '<td class="mono">' + (entry.bridge || '(透传)') + '</td>' +
+        '<td class="mono">' + hostOf(entry.target_url) + '</td>' +
+        '<td class="mono">' + (entry.requested_model || '') + '</td>' +
+        '<td class="mono">' + (entry.duration_ms == null ? '' : entry.duration_ms + 'ms') + '</td>' +
+        '<td><span class="tag ' + tagClass(item.info.verdict) + '">' + item.info.verdict + '</span></td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  function tick() {
+    pollOnce().then(function () {
+      render();
+      setStatus(els.capStatus, '抓取中… 已捕获 ' + entries.length + ' 条', 'warn');
+      els.capStatus.innerHTML = '<span class="live-dot"></span>抓取中… 已捕获 ' + entries.length + ' 条';
+    });
+  }
+
+  els.btnStart.addEventListener('click', function () {
+    remember();
+    els.btnStart.disabled = true;
+    els.btnStop.disabled = false;
+    els.btnExport.disabled = false;
+    tick();
+    timer = setInterval(tick, 2000);
+  });
+
+  els.btnStop.addEventListener('click', function () {
+    if (timer) { clearInterval(timer); timer = null; }
+    els.btnStart.disabled = false;
+    els.btnStop.disabled = true;
+    setStatus(els.capStatus, '已停止，共捕获 ' + entries.length + ' 条', 'ok');
+  });
+
+  // ---------------------------------------------------------------- 导出
+
+  function buildBundle() {
+    var result = summary();
+    var stageLimitKb = parseInt(els.stageLimit.value, 10);
+    if (!(stageLimitKb > 0)) { stageLimitKb = 16; }
+    var stageLimit = stageLimitKb * 1024;
+    var onlyInteresting = els.onlyInteresting.checked;
+
+    var exported = result.analyzed.map(function (item) {
+      var entry = item.entry;
+      var record = {
+        id: entry.id,
+        created_at: entry.created_at,
+        platform: entry.platform,
+        bridge: entry.bridge,
+        target_url: entry.target_url,
+        credential_name: entry.credential_name,
+        requested_model: entry.requested_model,
+        upstream_model: entry.upstream_model,
+        status: entry.status,
+        success: entry.success,
+        duration_ms: entry.duration_ms,
+        attempt: entry.attempt,
+        truncated: entry.truncated,
+        truncated_stages: entry.truncated_stages,
+        error_message: entry.error_message,
+        notes: entry.notes,
+        upstream_reasoning: item.info.upstream,
+        final_reasoning: item.info.final,
+        upstream_truncated: item.info.upstreamTruncated,
+        final_truncated: item.info.finalTruncated,
+        verdict: item.info.verdict
+      };
+      // 「可疑」= 结论还不确定的那几类。除了「上游发了而客户端没有」「客户端有而上游
+      // 看不到」，也要带上因截断而无法定性的 never? —— 那正是最需要完整报文去确认的。
+      var interesting = item.info.verdict === 'DROPPED' ||
+        item.info.verdict === 'DROPPED?' ||
+        item.info.verdict === 'injected' ||
+        item.info.verdict === 'injected?' ||
+        item.info.verdict === 'never?';
+      if (!onlyInteresting || interesting) {
+        record.client_request = limitStage(entry.client_request, stageLimit);
+        record.upstream_request = limitStage(entry.upstream_request, stageLimit);
+        record.upstream_response = limitStage(entry.upstream_response, stageLimit);
+        record.final_response = limitStage(entry.final_response, stageLimit);
+        record.upstream_headers = entry.upstream_headers;
+      }
+      return record;
+    });
+
+    var lines = [];
+    lines.push('ai-switch 诊断摘要（浏览器采集）');
+    lines.push('生成时间: ' + new Date().toISOString());
+    lines.push('采集条数: ' + entries.length);
+    lines.push('');
+    lines.push('--- 判定分布 ---');
+    Object.keys(result.counts).forEach(function (key) {
+      lines.push(key + '  ' + result.counts[key] + '  (' + (VERDICT_LABEL[key] || '') + ')');
+    });
+    lines.push('');
+    lines.push('--- 按桥类型 ---');
+    var byBridge = {};
+    result.analyzed.forEach(function (item) {
+      var key = item.entry.bridge || '(透传)';
+      if (!byBridge[key]) { byBridge[key] = { total: 0, DROPPED: 0, kept: 0, never: 0 }; }
+      byBridge[key].total++;
+      if (byBridge[key][item.info.verdict] !== undefined) { byBridge[key][item.info.verdict]++; }
+    });
+    Object.keys(byBridge).forEach(function (key) {
+      var value = byBridge[key];
+      lines.push(key + '  共 ' + value.total + '  DROPPED=' + value.DROPPED +
+        '  kept=' + value.kept + '  never=' + value.never);
+    });
+    lines.push('');
+    lines.push('--- 按上游主机 ---');
+    var byHost = {};
+    result.analyzed.forEach(function (item) {
+      var key = hostOf(item.entry.target_url);
+      if (!byHost[key]) { byHost[key] = { total: 0, DROPPED: 0, kept: 0, never: 0 }; }
+      byHost[key].total++;
+      if (byHost[key][item.info.verdict] !== undefined) { byHost[key][item.info.verdict]++; }
+    });
+    Object.keys(byHost).forEach(function (key) {
+      var value = byHost[key];
+      lines.push(key + '  共 ' + value.total + '  DROPPED=' + value.DROPPED +
+        '  kept=' + value.kept + '  never=' + value.never);
+    });
+    lines.push('');
+    lines.push('--- 截断情况（单阶段上限 64KB 字节）---');
+    var truncatedUpstream = 0;
+    var truncatedFinal = 0;
+    result.analyzed.forEach(function (item) {
+      if (item.info.upstreamTruncated) { truncatedUpstream++; }
+      if (item.info.finalTruncated) { truncatedFinal++; }
+    });
+    lines.push('上游报文被截断: ' + truncatedUpstream + ' / ' + entries.length);
+    lines.push('客户端报文被截断: ' + truncatedFinal + ' / ' + entries.length);
+    lines.push('说明: 报文里出现 <instructions omitted: N chars> / <tools omitted: N items, N');
+    lines.push('      bytes> 这类标记，是服务端为腾出 64KB 预算做的替换（回显字段），不是上游原文。');
+    lines.push('      另外 ...ai-switch-live-log: omitted N bytes... 表示此处丢掉了中间一段：');
+    lines.push('      超限报文保留「头部 + 尾部」，头部是对话、尾部是 reasoning / stream 这类');
+    lines.push('      解释性标量，所以两端都值得看。');
+    if (truncatedUpstream) {
+      lines.push('注意: 上游被截断时，「上游没发思考」无法确认 —— 思考事件可能在被截掉的');
+      lines.push('      那一段里。Responses 上游尤其容易这样，因为它的首个 response.created');
+      lines.push('      事件会把整个输入回显一遍，单这一个事件就可能超过 64KB。');
+    }
+
+    return {
+      meta: {
+        collected_at: new Date().toISOString(),
+        source: 'ai-switch-diagnostics.html',
+        web_service: baseUrl(),
+        entry_count: entries.length,
+        stage_limit_kb: stageLimitKb,
+        bodies_included: !onlyInteresting ? 'all' : 'interesting-only',
+        user_agent: navigator.userAgent
+      },
+      summary: lines.join('\n'),
+      entries: exported
+    };
+  }
+
+  els.btnExport.addEventListener('click', function () {
+    if (!entries.length) {
+      setStatus(els.exportStatus, '还没有抓到数据', 'warn');
+      return;
+    }
+    try {
+      var bundle = buildBundle();
+      var blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+      var stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+      var link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'ai-switch-diag-' + stamp + '.json';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(function () { URL.revokeObjectURL(link.href); }, 4000);
+      var megabytes = (blob.size / 1024 / 1024).toFixed(2);
+      setStatus(els.exportStatus, '已导出，' + megabytes + ' MB', 'ok');
+    } catch (error) {
+      setStatus(els.exportStatus, '导出失败：' + error.message, 'bad');
+    }
+  });
+})();
+</script>
+</body>
+</html>

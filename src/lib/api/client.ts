@@ -55,6 +55,7 @@ import type {
   RouteProxyHttpsStatus,
   RouteProxyStatus,
   SaveRouteCredentialExportResult,
+  SaveRouteProxyDiagnosticsResult,
   TailscaleLogin,
   TailscaleStatus,
   SessionMessage,
@@ -291,6 +292,16 @@ export function subscribeRouteProxyLiveLog(platform: string): Promise<RouteProxy
 
 export function unsubscribeRouteProxyLiveLog(): Promise<void> {
   return invoke("unsubscribe_route_proxy_live_log");
+}
+
+/**
+ * 把实时日志连同环境、设置摘要和账号概况导出成一个文件，交给用户反馈。
+ *
+ * 桌面端专用：它要走原生保存对话框。文件由后端组装并压缩，所以这里不传任何
+ * 数据——146MB 的原始日志不该为了落盘先过一次 IPC。
+ */
+export function saveRouteProxyDiagnosticsExport(): Promise<SaveRouteProxyDiagnosticsResult> {
+  return invoke("save_route_proxy_diagnostics_export");
 }
 
 export function getSettings(): Promise<AppSettingsView> {
