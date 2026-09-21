@@ -470,7 +470,18 @@ impl LiveLogSegment {
         let mut framed = Vec::with_capacity(line.len() + 1);
         framed.extend_from_slice(line.as_bytes());
         framed.push(b'\n');
-        self.file().await?.write_all(&framed).await?;
+        {
+            let file = self.file().await?;
+            file.write_all(&framed).await?;
+            // `write_all` on `tokio::fs::File` returns as soon as the bytes are
+            // copied into the file's own buffer: the actual `write` is a blocking
+            // task, and only the *next* write would have waited for it. Without
+            // this flush the last line of a run is still in flight when the writer
+            // task ends, so the newest entry — the one the whole mirror exists to
+            // keep — is the one that goes missing. Flushing here costs no extra
+            // syscall: it just awaits the write that was already handed off.
+            file.flush().await?;
+        }
         self.bytes += framed.len() as u64;
         if self.bytes >= self.max_bytes {
             self.rotate().await?;
@@ -1036,6 +1047,49 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, vec!["a", "b"], "重开是追加，不是覆盖");
+    }
+
+    /// `write_all` 在 `tokio::fs::File` 上只把字节拷进文件自己的内部缓冲就返回了，
+    /// 真正的 `write` 是一个 blocking 任务，要等**下一次**写（或一次 flush）才会被等完。
+    /// 所以 `append` 一返回就声称「写好了」是假的：那笔写还在池子里排队时，紧接着的
+    /// 一次读取只能看到上一条。CI 上丢的正是最后一条 —— 因为只有它后面没人再写。
+    ///
+    /// 只留一个 blocking 线程并占住它，就能把这笔写挤进队列，把上面这个竞态变成确定
+    /// 的：`append` 若不自己等，就必然读不到。
+    #[test]
+    fn append_does_not_return_before_the_bytes_are_on_disk() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async move {
+            // 先开好段，否则开文件自己也要用那个 blocking 线程。
+            let mut segment = LiveLogSegment::open(&root).await.expect("open");
+
+            let started = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&started);
+            let hog = tokio::task::spawn_blocking(move || {
+                flag.store(true, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(300));
+            });
+            // 等它真的占住线程，后面的写才会排队。
+            while !started.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+
+            segment.append(&jsonl(&["a"])).await.expect("append");
+            let text = std::fs::read_to_string(root.join(LIVE_LOG_FILE_NAME)).expect("read");
+            hog.await.expect("hog");
+
+            assert_eq!(text.lines().count(), 1, "append 返回时这条就该已经在盘上");
+        });
     }
 
     #[test]
