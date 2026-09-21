@@ -8,6 +8,12 @@
 *.tsx text eol=lf
 *.toml text eol=lf
 *.sql text eol=lf
+# YAML is read byte-for-byte by tests — tests/ReleaseWorkflow.test.ts matches a
+# literal "\n" — and a Windows runner checks out with core.autocrlf=true, which
+# rewrites an unattributed file to CRLF and fails those assertions. An attribute
+# is the only thing that overrides autocrlf, so it has to be declared here.
+*.yml text eol=lf
+*.yaml text eol=lf
 
 # Keep diffs readable and stop merge attempts on generated lockfiles.
 pnpm-lock.yaml -diff linguist-generated

@@ -206,11 +206,20 @@ jobs:
             "SERVER_ARM64_BIN=src-tauri/target/aarch64-unknown-linux-gnu/release/ai-switch-server" >> $env:GITHUB_ENV
           }
 
-      - name: Run frontend checks
-        run: |
-          pnpm typecheck
-          pnpm test:run
-          pnpm release:manifest:test
+      # One command per step on purpose. A Windows runner runs these under pwsh,
+      # whose exit code is the *last* command's, so `pnpm test:run` failing used
+      # to be swallowed by the successful `pnpm release:manifest:test` after it
+      # and the job went green. Splitting keeps the platform's default shell,
+      # which is bash with `-e` elsewhere, and leaves each command as the last
+      # one in its step — the only shape both shells report correctly.
+      - name: Typecheck frontend
+        run: pnpm typecheck
+
+      - name: Run frontend tests
+        run: pnpm test:run
+
+      - name: Test release manifest
+        run: pnpm release:manifest:test
 
       - name: Build frontend assets
         run: pnpm build
@@ -233,10 +242,11 @@ jobs:
       - name: Check standalone server
         run: pnpm server:check
 
-      - name: Run Rust checks
-        run: |
-          pnpm rust:check
-          pnpm rust:test
+      - name: Check Rust code
+        run: pnpm rust:check
+
+      - name: Run Rust tests
+        run: pnpm rust:test
 
       - name: Build Tauri bundle
         shell: pwsh
