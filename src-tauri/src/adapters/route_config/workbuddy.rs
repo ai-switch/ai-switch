@@ -61,7 +61,7 @@ impl WorkBuddyAdapter {
             client_display_name: "WorkBuddy",
             config_dir: ".workbuddy",
             platform: PlatformId::Codex,
-            display_name_prefix: "AI Switch Codex",
+            display_name_prefix: "AI Switch",
         }
     }
 
@@ -86,7 +86,7 @@ impl WorkBuddyAdapter {
             client_display_name: "WorkBuddy AI",
             config_dir: ".workbuddy-ai",
             platform: PlatformId::Codex,
-            display_name_prefix: "AI Switch Codex",
+            display_name_prefix: "AI Switch",
         }
     }
 
@@ -108,7 +108,7 @@ impl WorkBuddyAdapter {
             client_display_name: "CodeBuddy CLI",
             config_dir: ".codebuddy",
             platform: PlatformId::Codex,
-            display_name_prefix: "AI Switch Codex",
+            display_name_prefix: "AI Switch",
         }
     }
 
