@@ -134,6 +134,11 @@ export const CODEX_ONE_M_UPSTREAM_PREFIXES = [
   "glm-5.3",
   "qwen-3.8",
   "kimi-k3",
+  // Claude series served through a `message` (OpenAI-compatible) upstream also
+  // offer 1M context; mirror `is_claude_route_model` so Codex is told the full
+  // window. Keep in sync with the Rust `CODEX_ONE_M_UPSTREAM_PREFIXES`.
+  "claude-",
+  "anthropic/claude-",
 ] as const;
 
 /** Shipped context windows for the baseline models the pool advertises when an

@@ -38,10 +38,11 @@ use crate::services::route_credential_activity::{
 use crate::services::route_failure_scope::is_account_scoped_failure;
 use crate::services::route_model_capability::{
     advertised_model_catalog_entries, catalog_members, codex_effective_context_window,
-    codex_reasoning_metadata, known_upstream_models, model_matches, model_state_key_with_mode,
-    parse_model_capability, parse_model_capability_value, requested_model_from_body,
-    resolve_mapping_target, supports_requested_capability_with_mode, supports_requested_model,
-    CatalogMemberInput, ModelCapability, ModelMatchMode,
+    codex_reasoning_metadata, effective_context_window_for_upstream, known_upstream_models,
+    model_matches, model_state_key_with_mode, parse_model_capability, parse_model_capability_value,
+    requested_model_from_body, resolve_mapping_target, supports_requested_capability_with_mode,
+    supports_requested_model, CatalogMemberInput, ModelCapability, ModelMatchMode,
+    CODEX_ONE_M_CONTEXT_WINDOW,
 };
 use crate::services::route_pool_model_mode::{
     accepted_prefixes, is_official_model_prefix, split_prefixed_model, PoolModelMode,
@@ -4684,12 +4685,23 @@ fn build_api_upstream_request(
             // Impersonate Claude Code so client-fingerprinting gateways
             // (e.g. agentrouter.org) don't reject us as an unknown client.
             apply_claude_code_identity(headers);
-            // Read the 1M intent from the *client's* model value: the `[1M]`
-            // suffix is stripped by the mapping lookup before the upstream body
-            // is built, so by this point only the original request still carries
-            // it. Without the beta marker the gateway answers "please enable 1m
-            // context and retry" no matter what the model name said.
-            if client_requested_one_m_context(body) {
+            // A Codex request wants the 1M window when either:
+            // - the client signalled it with a `[1M]` model suffix (Claude Code
+            //   convention) — that suffix is stripped by the mapping lookup, so it
+            //   survives only in the original inbound body; or
+            // - the resolved upstream model is configured/advertised with a 1M
+            //   context. The catalog promises Codex the full window, so it packs
+            //   up to 1M; without the beta marker Anthropic still caps at 200K and
+            //   the turn dies on a 400. Codex needs no `[1m]` model-name variant —
+            //   the configured/advertised window alone is the signal.
+            let wants_one_m = client_requested_one_m_context(body)
+                || (platform == PlatformId::Codex
+                    && requested_model_from_body(&rewritten_body)
+                        .is_some_and(|m| {
+                            effective_context_window_for_upstream(&mappings, &m)
+                                >= CODEX_ONE_M_CONTEXT_WINDOW
+                        }));
+            if wants_one_m {
                 apply_one_m_context_beta(headers);
             }
             if is_messages_path(&upstream_path) {
@@ -14050,6 +14062,32 @@ data: [DONE]\n\n";
         assert!(
             !beta.contains(client_identity::ANTHROPIC_ONE_M_CONTEXT_BETA),
             "a request that did not ask for 1M must not claim it: {beta}"
+        );
+    }
+
+    #[test]
+    fn codex_claude_upstream_with_one_m_context_sends_the_beta_marker() {
+        // Codex routed to a Claude `message` (Anthropic) upstream: the catalog
+        // advertises the 1M window through the `claude-` prefix default, so the
+        // request must carry the `context-1m-2025-08-07` beta marker even without
+        // a `[1M]` model-name variant.
+        let (_, headers, _) = build_upstream_request(
+            &anthropic_api_credential(),
+            "codex",
+            "/v1/messages",
+            None,
+            HeaderMap::new(),
+            br#"{"model":"claude-opus-5","max_tokens":16}"#,
+        )
+        .expect("codex request");
+
+        let beta = headers
+            .get("anthropic-beta")
+            .and_then(|value| value.to_str().ok())
+            .expect("anthropic-beta header");
+        assert!(
+            beta.contains(client_identity::ANTHROPIC_ONE_M_CONTEXT_BETA),
+            "beta header must carry the 1M marker for a 1M Claude upstream: {beta}"
         );
     }
 

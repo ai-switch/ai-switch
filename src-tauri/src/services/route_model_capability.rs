@@ -157,8 +157,18 @@ const CLAUDE_ONE_M_CONTEXT_WINDOW: u32 = 1_000_000;
 /// Upstream model families that really serve 1M context, matched on the start of
 /// the mapped-to name so every dated or sized variant is covered
 /// (`deepseek-v4-flash-0731`, `glm-5.3-air`, …).
-const CODEX_ONE_M_UPSTREAM_PREFIXES: &[&str] =
-    &["deepseek-v4", "glm-5.2", "glm-5.3", "qwen-3.8", "kimi-k3"];
+const CODEX_ONE_M_UPSTREAM_PREFIXES: &[&str] = &[
+    "deepseek-v4",
+    "glm-5.2",
+    "glm-5.3",
+    "qwen-3.8",
+    "kimi-k3",
+    // Claude series served through a `message` (OpenAI-compatible) upstream
+    // also offer 1M context via the `context-1m-2025-08-07` beta; mirror the
+    // `is_claude_route_model` recognizer so Codex is told the full window.
+    "claude-",
+    "anthropic/claude-",
+];
 const CODEX_BASELINE_CONTEXT_WINDOWS: &[(&str, u32)] = &[
     ("gpt-6-astra", 1_050_000),
     ("gpt-5.6-sol", 272_000),
@@ -196,6 +206,28 @@ pub(crate) fn codex_effective_context_window(declared: Option<u32>, upstream_mod
     declared
         .filter(|window| *window > 0)
         .unwrap_or_else(|| codex_default_context_window(upstream_model))
+}
+
+/// Effective context window for a *resolved upstream* model, as the catalog would
+/// advertise it to the client: an explicit per-mapping `context_window` wins,
+/// otherwise the family default (1M for the known `[1m]` families, e.g. Claude).
+///
+/// The proxy uses this to decide whether to send Anthropic's `context-1m-...`
+/// beta marker. A client such as Codex is told the full window through the
+/// catalog, so it packs up to 1M; without the marker the upstream still caps at
+/// 200K and the turn dies on a 400. Codex does not need a `[1m]` model-name
+/// variant — the configured/advertised window alone is the signal.
+pub(crate) fn effective_context_window_for_upstream(
+    mappings: &[ModelMapping],
+    resolved_upstream_model: &str,
+) -> u32 {
+    let stripped = strip_one_m_suffix_for_route_lookup(resolved_upstream_model);
+    let declared = mappings
+        .iter()
+        .find(|m| !is_fallback_mapping(m) && m.to.trim().eq_ignore_ascii_case(stripped))
+        .and_then(|m| m.context_window)
+        .filter(|w| *w > 0);
+    codex_effective_context_window(declared, stripped)
 }
 
 pub(crate) fn codex_reasoning_profile(model: &str) -> CodexReasoningProfile {
