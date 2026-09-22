@@ -103,7 +103,16 @@ describe("codexModelCapability", () => {
     // reused it would come back from a round trip looking like one.
     const values: number[] = CODEX_CONTEXT_WINDOW_OPTIONS.map((option) => option.value);
     expect(values).not.toContain(1_048_576);
-    expect(values).toEqual([128_000, 200_000, 256_000, 400_000, 1_000_000]);
+    expect(values).toEqual([
+      64_000,
+      128_000,
+      192_000,
+      200_000,
+      256_000,
+      400_000,
+      512_000,
+      1_000_000,
+    ]);
   });
 
   it("offers every effort the baseline profiles can produce", () => {

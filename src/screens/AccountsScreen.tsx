@@ -93,6 +93,7 @@ import {
   normalizeCodexContextWindow,
   normalizeCodexReasoningLevels,
   usesCodexBaselineReasoning,
+  CODEX_CONTEXT_WINDOW_MAX,
   CODEX_CONTEXT_WINDOW_OPTIONS,
   CODEX_REASONING_LEVEL_OPTIONS,
 } from "../lib/codexModelCapability";
@@ -1951,6 +1952,10 @@ function ImageMappingCapabilityFields({
   );
 }
 
+/** Sentinel for the "自定义" entry in the context select. It names a mode rather
+ * than a storable size, so it can never collide with a real window value. */
+const CONTEXT_WINDOW_CUSTOM = "custom";
+
 function CodexMappingCapabilityFields({
   index,
   mapping,
@@ -1974,6 +1979,16 @@ function CodexMappingCapabilityFields({
     !CODEX_CONTEXT_WINDOW_OPTIONS.some((option) => option.value === contextWindow)
       ? contextWindow
       : null;
+  // Choosing "custom" only reveals the number field; the row keeps declaring its
+  // current size until something is typed. The flag has to survive re-renders,
+  // otherwise a size that is not on the list would snap back to a preset the
+  // moment it is entered.
+  const [customWindow, setCustomWindow] = useState(false);
+  const contextSelectValue = customWindow
+    ? CONTEXT_WINDOW_CUSTOM
+    : contextWindow === null
+      ? ""
+      : String(contextWindow);
 
   const toggleLevel = (level: string, checked: boolean) => {
     const next = levelChoices.filter((choice) =>
@@ -1993,12 +2008,18 @@ function CodexMappingCapabilityFields({
         <select
           aria-label={`上下文长度 ${index + 1}`}
           className="rounded-lg border border-stone-200 bg-white px-2 py-1 text-[12px] font-medium text-stone-800 outline-none motion-control focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-          onChange={(event) =>
-            onPatch({
-              context_window: event.target.value ? Number(event.target.value) : null,
-            })
-          }
-          value={contextWindow === null ? "" : String(contextWindow)}
+          onChange={(event) => {
+            const next = event.target.value;
+            if (next === CONTEXT_WINDOW_CUSTOM) {
+              // Reveal the field seeded with what the row declares now, so a
+              // preset can be nudged to a nearby size.
+              setCustomWindow(true);
+              return;
+            }
+            setCustomWindow(false);
+            onPatch({ context_window: next ? Number(next) : null });
+          }}
+          value={contextSelectValue}
         >
           <option value="">
             默认 {codexContextWindowLabel(codexDefaultContextWindow(mapping.to))}
@@ -2008,6 +2029,7 @@ function CodexMappingCapabilityFields({
               {option.label}
             </option>
           ))}
+          <option value={CONTEXT_WINDOW_CUSTOM}>自定义…</option>
           {unlistedContextWindow !== null ? (
             <option value={unlistedContextWindow}>
               {codexContextWindowLabel(unlistedContextWindow)}
@@ -2015,6 +2037,33 @@ function CodexMappingCapabilityFields({
           ) : null}
         </select>
       </label>
+      {customWindow ? (
+        <input
+          aria-label={`自定义上下文长度 ${index + 1}`}
+          className="w-28 rounded-lg border border-stone-200 bg-white px-2 py-1 text-[12px] font-medium text-stone-800 outline-none motion-control focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+          max={CODEX_CONTEXT_WINDOW_MAX}
+          min={1}
+          onChange={(event) => {
+            const raw = event.target.value;
+            if (!raw) {
+              onPatch({ context_window: null });
+              return;
+            }
+            const parsed = Number(raw);
+            if (!Number.isFinite(parsed) || parsed <= 0) {
+              return;
+            }
+            // `context_window` is a `u32` upstream, so a larger value would fail
+            // to deserialize and reject the whole account save.
+            onPatch({
+              context_window: Math.min(Math.trunc(parsed), CODEX_CONTEXT_WINDOW_MAX),
+            });
+          }}
+          placeholder="Token 数"
+          type="number"
+          value={contextWindow === null ? "" : String(contextWindow)}
+        />
+      ) : null}
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
         <span className="text-[11px] font-semibold text-stone-500">推理程度</span>
         {levelChoices.map((level) => {

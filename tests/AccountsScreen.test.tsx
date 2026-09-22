@@ -3918,6 +3918,35 @@ describe("AccountsScreen", () => {
     );
   });
 
+  it("accepts a context window typed by hand instead of a preset", async () => {
+    renderScreen();
+
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.type(screen.getByLabelText("API 账号名称"), "Codex Custom Window API");
+    await userEvent.type(screen.getByLabelText("API Key"), "sk-codex");
+    await userEvent.clear(screen.getByLabelText("Base URL"));
+    await userEvent.type(screen.getByLabelText("Base URL"), "https://api.upstream.test/v1");
+    await userEvent.click(screen.getByRole("button", { name: "新增映射" }));
+    await userEvent.type(screen.getByLabelText("请求模型 1"), "gpt-5.5");
+    await userEvent.type(screen.getByLabelText("上游模型 1"), "provider-gpt");
+
+    // "自定义" only reveals the number field; the row declares nothing until a
+    // size is typed, so the field has to stay put across those keystrokes.
+    expect(screen.queryByLabelText("自定义上下文长度 1")).not.toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText("上下文长度 1"), "custom");
+    await userEvent.type(screen.getByLabelText("自定义上下文长度 1"), "65536");
+    await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
+
+    await waitFor(() =>
+      expect(createApiRouteCredential).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model_mappings_json:
+            '[{"from":"gpt-5.5","to":"provider-gpt","context_window":65536}]',
+        }),
+      ),
+    );
+  });
+
   it("omits Codex catalog fields while a mapping still follows its baseline", async () => {
     renderScreen();
 

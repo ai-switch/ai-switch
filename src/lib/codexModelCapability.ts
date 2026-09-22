@@ -105,10 +105,13 @@ export function usesCodexBaselineReasoning(
  * look like a Claude 1M declaration to the CPA transfer format.
  */
 export const CODEX_CONTEXT_WINDOW_OPTIONS = [
+  { value: 64_000, label: "64K" },
   { value: 128_000, label: "128K" },
+  { value: 192_000, label: "192K" },
   { value: 200_000, label: "200K" },
   { value: 256_000, label: "256K" },
   { value: 400_000, label: "400K" },
+  { value: 512_000, label: "512K" },
   { value: 1_000_000, label: "1M" },
 ] as const;
 
@@ -122,6 +125,11 @@ export const CODEX_DEFAULT_CONTEXT_WINDOW = 128_000;
 
 /** Decimal 1M, for the same reason the option list uses it. */
 export const CODEX_ONE_M_CONTEXT_WINDOW = 1_000_000;
+
+/** Largest window a mapping may declare. `context_window` is a `u32` on the Rust
+ * side, so a larger number would fail to deserialize and reject the whole save;
+ * the custom entry field caps here instead of letting a typo through. */
+export const CODEX_CONTEXT_WINDOW_MAX = 4_294_967_295;
 
 /**
  * Upstream model families that really serve 1M context, matched on the start of
