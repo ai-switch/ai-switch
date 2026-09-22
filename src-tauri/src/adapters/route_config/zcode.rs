@@ -2,6 +2,7 @@ use super::{
     base_url_root, base_url_with_v1, client_home, existing_text, generated_invalid,
     invalid_existing_config, ClientModel, RouteConfigInput, TargetAdapter, TargetInspection,
 };
+use crate::services::route_protocol_bridge::RECOGNISED_REASONING_EFFORTS;
 use crate::{error::AppError, models::platform::PlatformId};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
@@ -94,6 +95,24 @@ impl ZCodeAdapter {
         })
     }
 
+    /// The strongest effort a row actually offers, ranked by the ladder the
+    /// protocol bridges recognise rather than by stored position: a hand-edited
+    /// custom list is not required to be in ascending order, and every model
+    /// only offers its own subset — many stop at `xhigh` and never reach
+    /// `ultra`, so the strongest is a per-model answer, not a fixed name.
+    fn strongest_effort(levels: &[String]) -> String {
+        levels
+            .iter()
+            .max_by_key(|level| {
+                RECOGNISED_REASONING_EFFORTS
+                    .iter()
+                    .position(|known| known == level)
+                    .unwrap_or(usize::MIN)
+            })
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn model_entries(&self, models: &[ClientModel]) -> Map<String, Value> {
         models
             .iter()
@@ -129,13 +148,10 @@ impl ZCodeAdapter {
                         "reasoning".to_string(),
                         json!({
                             "enabled": true,
-                            // The catalog carries no per-model default down to
-                            // here, so the strongest effort wins.
-                            "defaultVariant": model
-                                .reasoning_levels
-                                .last()
-                                .cloned()
-                                .unwrap_or_default(),
+                            // ZCode's own entries name one effort as the
+                            // preselected one; take the strongest this row
+                            // actually offers, which differs per model.
+                            "defaultVariant": Self::strongest_effort(&model.reasoning_levels),
                             "variants": model.reasoning_levels,
                         }),
                     );
@@ -403,6 +419,25 @@ mod tests {
                 "defaultVariant": "ultra",
                 "variants": ["low", "medium", "ultra"],
             })
+        );
+    }
+
+    #[test]
+    fn default_variant_is_the_strongest_effort_this_row_offers() {
+        // Ranked, not positional: a list stored out of order still yields the
+        // strongest entry, and a model that stops at `xhigh` gets `xhigh`
+        // instead of an `ultra` it never declared.
+        let mut row = input(&["gpt-5.5"]);
+        row.client_models[0].reasoning_levels =
+            vec!["xhigh".to_string(), "low".to_string(), "medium".to_string()];
+        let bytes = codex_adapter()
+            .render(Path::new("config.json"), None, &row)
+            .expect("render");
+        let json: Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        assert_eq!(
+            json["provider"]["ai-switch-codex"]["models"]["gpt-5.5"]["reasoning"]
+                ["defaultVariant"],
+            "xhigh"
         );
     }
 
