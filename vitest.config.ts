@@ -5,6 +5,11 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: "jsdom",
+    // The macOS Intel runner is an x86_64 image and runs the jsdom suites
+    // roughly 2-3x slower than Linux, Windows and the Apple Silicon image.
+    // The slowest AccountsScreen cases take ~2.2s locally, which left too
+    // little headroom under the 5s default and timed out only on that runner.
+    testTimeout: 15000,
     exclude: [
       ...configDefaults.exclude,
       "packages/**",
