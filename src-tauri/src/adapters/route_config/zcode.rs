@@ -98,23 +98,55 @@ impl ZCodeAdapter {
         models
             .iter()
             .map(|model| {
-                (
-                    model.id.clone(),
+                let mut entry = Map::new();
+                entry.insert(
+                    "limit".to_string(),
                     json!({
-                        "limit": {
-                            "context": model.context_window,
-                            "output": model.max_output_tokens,
-                        },
-                        "modalities": {
-                            "input": if model.supports_image_input {
-                                json!(["text", "image"])
-                            } else {
-                                json!(["text"])
-                            },
-                            "output": ["text"],
-                        },
+                        "context": model.context_window,
+                        "output": model.max_output_tokens,
                     }),
-                )
+                );
+                entry.insert(
+                    "modalities".to_string(),
+                    json!({
+                        "input": if model.supports_image_input {
+                            json!(["text", "image"])
+                        } else {
+                            json!(["text"])
+                        },
+                        "output": ["text"],
+                    }),
+                );
+                // ZCode's own provider entries advertise selectable efforts this
+                // way, and it names the strongest one `max` where the catalog
+                // says `ultra` — translate rather than hand it a name it does
+                // not know. A model with no efforts gets no block at all, so the
+                // client does not offer a control that would do nothing.
+                if !model.reasoning_levels.is_empty() {
+                    let variants: Vec<String> = model
+                        .reasoning_levels
+                        .iter()
+                        .map(|level| {
+                            if level == "ultra" {
+                                "max".to_string()
+                            } else {
+                                level.clone()
+                            }
+                        })
+                        .collect();
+                    entry.insert(
+                        "reasoning".to_string(),
+                        json!({
+                            "enabled": true,
+                            // The catalog carries no per-model default down to
+                            // here, so the strongest effort wins — the shape
+                            // ZCode's own entries use.
+                            "defaultVariant": variants.last().cloned().unwrap_or_default(),
+                            "variants": variants,
+                        }),
+                    );
+                }
+                (model.id.clone(), Value::Object(entry))
             })
             .collect()
     }
@@ -355,6 +387,38 @@ mod tests {
             text_json["provider"]["ai-switch-codex"]["models"]["deepseek-v4-flash"]["modalities"]
                 ["input"],
             json!(["text"])
+        );
+    }
+
+    #[test]
+    fn reasoning_efforts_are_written_in_the_shape_zcode_uses() {
+        let mut with_efforts = input(&["gpt-5.6-sol"]);
+        with_efforts.client_models[0].reasoning_levels =
+            vec!["low".to_string(), "medium".to_string(), "ultra".to_string()];
+        let bytes = codex_adapter()
+            .render(Path::new("config.json"), None, &with_efforts)
+            .expect("render");
+        let json: Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        // ZCode names the strongest effort `max`, not `ultra`.
+        assert_eq!(
+            json["provider"]["ai-switch-codex"]["models"]["gpt-5.6-sol"]["reasoning"],
+            json!({
+                "enabled": true,
+                "defaultVariant": "max",
+                "variants": ["low", "medium", "max"],
+            })
+        );
+    }
+
+    #[test]
+    fn a_model_without_efforts_gets_no_reasoning_block() {
+        // The helper builds models with no efforts; advertising the block would
+        // offer a control that does nothing.
+        let json = render(codex_adapter().as_ref(), None, &["gpt-5.6-sol"]);
+        assert!(
+            json["provider"]["ai-switch-codex"]["models"]["gpt-5.6-sol"]
+                .get("reasoning")
+                .is_none()
         );
     }
 
