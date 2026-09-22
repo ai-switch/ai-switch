@@ -118,31 +118,25 @@ impl ZCodeAdapter {
                     }),
                 );
                 // ZCode's own provider entries advertise selectable efforts this
-                // way, and it names the strongest one `max` where the catalog
-                // says `ultra` — translate rather than hand it a name it does
-                // not know. A model with no efforts gets no block at all, so the
-                // client does not offer a control that would do nothing.
+                // way. `variants` is a free-form list — the client lets reasoning
+                // levels be customised, and its builtin providers only happen to
+                // use `low`/`high`/`max` — so the catalog's own names go through
+                // untouched. Renaming `ultra` to `max` would silently misreport
+                // what the account declares. A model with no efforts gets no
+                // block at all, so the client does not offer an empty control.
                 if !model.reasoning_levels.is_empty() {
-                    let variants: Vec<String> = model
-                        .reasoning_levels
-                        .iter()
-                        .map(|level| {
-                            if level == "ultra" {
-                                "max".to_string()
-                            } else {
-                                level.clone()
-                            }
-                        })
-                        .collect();
                     entry.insert(
                         "reasoning".to_string(),
                         json!({
                             "enabled": true,
                             // The catalog carries no per-model default down to
-                            // here, so the strongest effort wins — the shape
-                            // ZCode's own entries use.
-                            "defaultVariant": variants.last().cloned().unwrap_or_default(),
-                            "variants": variants,
+                            // here, so the strongest effort wins.
+                            "defaultVariant": model
+                                .reasoning_levels
+                                .last()
+                                .cloned()
+                                .unwrap_or_default(),
+                            "variants": model.reasoning_levels,
                         }),
                     );
                 }
@@ -399,13 +393,15 @@ mod tests {
             .render(Path::new("config.json"), None, &with_efforts)
             .expect("render");
         let json: Value = serde_json::from_slice(&bytes).expect("valid JSON");
-        // ZCode names the strongest effort `max`, not `ultra`.
+        // The catalog's own names go through untouched: `variants` is a
+        // free-form list, so `ultra` is not renamed to the builtin providers'
+        // `max` — doing so would misreport what the account declares.
         assert_eq!(
             json["provider"]["ai-switch-codex"]["models"]["gpt-5.6-sol"]["reasoning"],
             json!({
                 "enabled": true,
-                "defaultVariant": "max",
-                "variants": ["low", "medium", "max"],
+                "defaultVariant": "ultra",
+                "variants": ["low", "medium", "ultra"],
             })
         );
     }
