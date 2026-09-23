@@ -11,5 +11,8 @@ src-tauri/target-codex/
 .tauri/
 src-tauri/target-codex-test/
 .codex-run/
+.workbuddy-ai/*.log
+.workbuddy-ai/recovery/
+.workbuddy-ai/tmp/
 docs-site/docs/.vitepress/cache/
 docs-site/docs/.vitepress/.temp/
