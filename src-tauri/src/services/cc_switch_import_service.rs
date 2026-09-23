@@ -81,12 +81,6 @@ const CLAUDE_ROLE_MODEL_KEYS: &[(&str, &str, Option<&str>, &str)] = &[
     ),
 ];
 
-/// Haiku is the one menu role with no 1M context tier, matching the role table
-/// the mapping editor uses.
-fn alias_supports_one_m(alias: &str) -> bool {
-    alias != "claude-haiku-alias"
-}
-
 const GENERIC_API_KEY_ENV_KEYS: &[&str] = &[
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
@@ -639,9 +633,11 @@ fn extract_claude_model_mappings(env: &Map<String, Value>) -> Vec<ModelMapping> 
             from: (*alias).to_string(),
             to: upstream,
             label: Some(label),
-            // Only roles with a 1M tier may declare it, matching the editor's
-            // own rule — Haiku has no 1M variant to declare.
-            supports_1m: (one_m && alias_supports_one_m(alias)).then_some(true),
+            // Every menu role — Haiku included — may declare 1M. The proxy
+            // strips the `[1m]` suffix before resolving the mapping and only
+            // merges the beta marker into the upstream request, so preserving a
+            // client-supplied `[1M]` here matches the editor's own rule.
+            supports_1m: one_m.then_some(true),
             ..Default::default()
         });
     }
@@ -796,14 +792,16 @@ mod tests {
         assert_eq!(sonnet.label.as_deref(), Some("Opus as Sonnet"));
         assert_eq!(sonnet.supports_1m, Some(true));
 
-        // Haiku has no 1M tier, so the suffix is stripped without declaring 1M.
+        // Haiku now also declares 1M when the client sent the `[1M]` suffix:
+        // the proxy strips it before mapping lookup and only merges the beta
+        // marker, so preserving the flag matches the editor's rule.
         let haiku = extracted
             .model_mappings
             .iter()
             .find(|mapping| mapping.from == "claude-haiku-alias")
             .expect("haiku mapping");
         assert_eq!(haiku.to, "claude-haiku-4-5");
-        assert_eq!(haiku.supports_1m, None);
+        assert_eq!(haiku.supports_1m, Some(true));
 
         let fallback = extracted
             .model_mappings

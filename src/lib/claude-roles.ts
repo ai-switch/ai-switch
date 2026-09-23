@@ -24,10 +24,11 @@ export type ClaudeRole = {
   /**
    * Whether this role may advertise a `[1m]` variant.
    *
-   * Only Haiku is excluded: it is the small fast model with no 1M context tier.
-   * Subagent and the fallback do get the flag — the proxy strips the `[1m]`
-   * suffix before resolving a mapping, so `claude-subagent[1m]` matches the same
-   * entry as `claude-subagent`.
+   * Every menu role — Haiku included — now gets the flag. The declaration only
+   * merges the 1M-context beta marker into the upstream request; the proxy
+   * strips the `[1m]` suffix before resolving a mapping, so declaring it on a
+   * model without the tier is harmless (the upstream simply ignores or rejects
+   * the beta marker). Subagent and the fallback keep it for the same reason.
    */
   supportsOneM: boolean;
   /** Placeholder shown instead of an editable display name. */
@@ -66,7 +67,7 @@ export const CLAUDE_MENU_ROLES: readonly ClaudeRole[] = [
     alias: "claude-haiku-alias",
     label: "Haiku",
     editableLabel: true,
-    supportsOneM: false,
+    supportsOneM: true,
     hint: null,
     keywords: ["haiku", "flash", "mini", "lite"],
   },

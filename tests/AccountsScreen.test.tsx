@@ -3776,11 +3776,11 @@ describe("AccountsScreen", () => {
     expect(screen.getByLabelText("请求模型 5")).toHaveValue("claude-subagent");
     expect(screen.getByLabelText("请求模型 6")).toHaveValue("claude-model");
 
-    // Only Haiku lacks the flag — it has no 1M context tier. Subagent and the
-    // fallback keep it: the proxy strips the [1m] suffix before resolving a
-    // mapping, so claude-subagent[1m] matches the same entry.
+    // Every menu role now carries the 1M flag — Haiku included. The proxy
+    // strips the [1m] suffix before resolving a mapping, so the declaration
+    // only controls whether the beta marker is merged into the upstream call.
     expect(screen.getByLabelText("声明支持 1M 1")).toBeInTheDocument();
-    expect(screen.queryByLabelText("声明支持 1M 4")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("声明支持 1M 4")).toBeInTheDocument();
     expect(screen.getByLabelText("声明支持 1M 5")).toBeInTheDocument();
     expect(screen.getByLabelText("声明支持 1M 6")).toBeInTheDocument();
   });
