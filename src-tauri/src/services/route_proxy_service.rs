@@ -13,7 +13,6 @@ use crate::models::route_credential_model::{
 };
 use crate::models::route_pool::RouteUsageBreakdown;
 use crate::services::anthropic_thinking::strip_replayed_thinking_from_bytes;
-use crate::services::brotli_codec;
 use crate::services::client_identity;
 use crate::services::codex_reasoning_cache::CodexReasoningCache;
 use crate::services::http_client::{
@@ -2166,7 +2165,7 @@ fn route_proxy_request_metadata(
         }
         if let Some(response_body) = route_proxy_response_body_metadata(response_body, success) {
             object.insert(
-                ROUTE_PROXY_RESPONSE_BODY_ENCODED_KEY.to_string(),
+                ROUTE_PROXY_RESPONSE_BODY_KEY.to_string(),
                 json!(response_body),
             );
         }
@@ -2174,14 +2173,7 @@ fn route_proxy_request_metadata(
     metadata.to_string()
 }
 
-/// Cap one response preview and hand it back base64-of-brotli.
-///
-/// The preview is capped *before* compressing and the compressed bytes are what
-/// get stored, so the row grows with how much the payload compresses rather than
-/// with how much was kept. Measured against real proxied traffic (SSE, so mostly
-/// repeated frames), a 16 KiB preview lands around 4 KiB: a failure row keeps
-/// eight times the diagnostic evidence for a quarter of the bytes an
-/// uncompressed row would have spent on it.
+/// Cap one response preview and hand it back as plain text.
 fn route_proxy_response_body_metadata(
     response_body: Option<&[u8]>,
     success: bool,
@@ -2200,11 +2192,7 @@ fn route_proxy_response_body_metadata(
     if text.trim().is_empty() {
         return None;
     }
-    let compressed = brotli_codec::compress(text.as_bytes()).ok()?;
-    Some(base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        compressed,
-    ))
+    Some(text.into_owned())
 }
 
 /// Record one proxied request into the in-memory live log, carrying whichever of
@@ -9101,19 +9089,16 @@ mod tests {
             serde_json::from_str(&failed_request.metadata_json).expect("failed metadata");
         assert_eq!(
             failed_metadata
-                .pointer("/response_body_br")
-                .and_then(Value::as_str)
-                .map(brotli_codec::decode_stored_text),
-            Some(failed_response_body.to_string())
+                .pointer("/response_body")
+                .and_then(Value::as_str),
+            Some(failed_response_body)
         );
         assert_eq!(
             healthy_metadata
-                .pointer("/response_body_br")
-                .and_then(Value::as_str)
-                .map(brotli_codec::decode_stored_text),
+                .pointer("/response_body")
+                .and_then(Value::as_str),
             Some(
                 r#"{"usage":{"prompt_tokens":120,"completion_tokens":30,"prompt_cache_hit_tokens":80,"price_cny":7.1}}"#
-                    .to_string()
             )
         );
         assert_eq!(healthy_request.input_tokens, Some(120));
@@ -12131,31 +12116,23 @@ mod tests {
     }
 
     #[test]
-    fn response_body_metadata_previews_without_keeping_the_stored_size() {
-        // `a` repeated compresses far better than real traffic, so this asserts the
-        // direction rather than a ratio: what matters is that the stored string no
-        // longer grows with the preview length.
+    fn response_body_metadata_caps_previews() {
         let body = vec![b'a'; ROUTE_PROXY_RESPONSE_BODY_LIMIT + 1024];
 
         let success_preview =
             route_proxy_response_body_metadata(Some(&body), true).expect("success body");
         assert_eq!(
-            brotli_codec::decode_stored_text(&success_preview).len(),
+            success_preview.len(),
             ROUTE_PROXY_SUCCESS_BODY_LIMIT,
-            "成功响应仍然只留 2 KiB 预览"
-        );
-        assert!(
-            success_preview.len() < ROUTE_PROXY_SUCCESS_BODY_LIMIT,
-            "压缩后应当比原预览更短，实际 {}",
-            success_preview.len()
+            "成功响应只留 2 KiB 预览"
         );
 
         let failure_preview =
             route_proxy_response_body_metadata(Some(&body), false).expect("failure body");
         assert_eq!(
-            brotli_codec::decode_stored_text(&failure_preview).len(),
+            failure_preview.len(),
             ROUTE_PROXY_RESPONSE_BODY_LIMIT,
-            "失败响应仍然保留 16 KiB 预览"
+            "失败响应保留 16 KiB 预览"
         );
 
         assert!(route_proxy_response_body_metadata(Some(b""), true).is_none());
