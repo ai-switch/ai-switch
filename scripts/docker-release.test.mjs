@@ -83,6 +83,18 @@ test("docker workflow can be dispatched for a hand-picked tag", async () => {
   assert.match(workflow, /EVENT_TAG: \$\{\{ github\.event\.release\.tag_name \}\}/);
 });
 
+test("the default image repository belongs to the token's account", async () => {
+  // The Docker Hub token is a personal access token, and a namespace its account
+  // cannot write to answers every push with `insufficient_scope: authorization
+  // failed` — after the login has already reported success, which is what made
+  // the original failure look like a credentials problem.
+  const workflow = await read(DOCKER_WORKFLOW);
+  assert.match(workflow, /DOCKERHUB_REPOSITORY: \$\{\{ vars\.DOCKERHUB_REPOSITORY \|\| 'ijry\/ai-switch' \}\}/);
+
+  const compose = await read("deploy/docker-compose.yml");
+  assert.match(compose, /image: \$\{AI_SWITCH_DOCKER_IMAGE:-ijry\/ai-switch:latest\}/);
+});
+
 test("the docker publication cannot fail the release", async () => {
   const workflow = await read(RELEASE_WORKFLOW);
 

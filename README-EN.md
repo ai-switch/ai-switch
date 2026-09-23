@@ -193,7 +193,7 @@ The installer creates the `ai-switch` system user, installs under `/opt/ai-switc
 
 ### Docker one-click server and SaaS startup
 
-The Docker image reuses the standalone server already packaged in the GitHub Release, so no Rust compilation happens locally and desktop WebKitGTK is not required. With the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets configured, CI publishes `linux/amd64` and `linux/arm64` images to `ai-switch/ai-switch`. By default, Redis is the log queue, PostgreSQL is the log store, and SaaS is enabled automatically:
+The Docker image reuses the standalone server already packaged in the GitHub Release, so no Rust compilation happens locally and desktop WebKitGTK is not required. With the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets configured, CI publishes `linux/amd64` and `linux/arm64` images to `ijry/ai-switch`. By default, Redis is the log queue, PostgreSQL is the log store, and SaaS is enabled automatically:
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -206,7 +206,7 @@ Without Docker Hub credentials, CI still validates the multi-architecture build 
 Common overrides:
 
 - `AI_SWITCH_PORT`: host port mapping, default `19527`.
-- `AI_SWITCH_DOCKER_IMAGE`: image reference, default `ai-switch/ai-switch:latest`; pin a release with `ai-switch/ai-switch:0.9.0` or `ai-switch/ai-switch:0.9`.
+- `AI_SWITCH_DOCKER_IMAGE`: image reference, default `ijry/ai-switch:latest`; pin a release with `ijry/ai-switch:0.10.3` or `ijry/ai-switch:0.10`.
 - `AI_SWITCH_TOKEN`: when unset, the entrypoint generates and prints a container-local token; set it explicitly for restarts.
 - `AI_SWITCH_SAAS_ENABLE`: default `1`; set `0` to run only the standalone server.
 - `AI_SWITCH_SAAS_ACTIVATION_CODE`, `AI_SWITCH_SAAS_INSTANCE_ID`, `AI_SWITCH_SAAS_SITE_NAME`, `AI_SWITCH_SAAS_PUBLIC_BASE_URL`.

@@ -21,7 +21,7 @@ Inside the container, the default log queue and store use `redis://redis:6379` a
 
 ## Images
 
-Images are published to `ai-switch/ai-switch` on Docker Hub for `linux/amd64` and `linux/arm64`:
+Images are published to `ijry/ai-switch` on Docker Hub for `linux/amd64` and `linux/arm64`:
 
 | Tag | Meaning |
 | --- | --- |
@@ -36,7 +36,7 @@ Pin the full version or `major.minor` in production rather than tracking `latest
 Almost everything in `deploy/docker-compose.yml` can be overridden by environment variable:
 
 - `AI_SWITCH_PORT`: host port mapping, default `19527`.
-- `AI_SWITCH_DOCKER_IMAGE`: image reference, default `ai-switch/ai-switch:latest`; pin a release with `ai-switch/ai-switch:0.10.3` or `ai-switch/ai-switch:0.10`.
+- `AI_SWITCH_DOCKER_IMAGE`: image reference, default `ijry/ai-switch:latest`; pin a release with `ijry/ai-switch:0.10.3` or `ijry/ai-switch:0.10`.
 - `AI_SWITCH_TOKEN`: when unset, the entrypoint generates and prints a container-local token; set it explicitly for restarts.
 - `AI_SWITCH_SAAS_ENABLE`: default `1`; set `0` to run only the standalone server, with no log queue or store either.
 - `AI_SWITCH_SAAS_ACTIVATION_CODE`, `AI_SWITCH_SAAS_INSTANCE_ID`, `AI_SWITCH_SAAS_SITE_NAME`, `AI_SWITCH_SAAS_PUBLIC_BASE_URL`.

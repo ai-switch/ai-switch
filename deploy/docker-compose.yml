@@ -24,7 +24,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
 
   ai-switch:
-    image: ${AI_SWITCH_DOCKER_IMAGE:-ai-switch/ai-switch:latest}
+    image: ${AI_SWITCH_DOCKER_IMAGE:-ijry/ai-switch:latest}
     depends_on:
       redis:
         condition: service_healthy

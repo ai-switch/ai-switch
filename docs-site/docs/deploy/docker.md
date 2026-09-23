@@ -21,7 +21,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ## 镜像
 
-镜像发布在 Docker Hub 的 `ai-switch/ai-switch`，支持 `linux/amd64` 与 `linux/arm64`：
+镜像发布在 Docker Hub 的 `ijry/ai-switch`，支持 `linux/amd64` 与 `linux/arm64`：
 
 | Tag | 说明 |
 | --- | --- |
@@ -36,7 +36,7 @@ docker compose -f deploy/docker-compose.yml up -d
 `deploy/docker-compose.yml` 里的绝大部分配置都可以用环境变量覆盖：
 
 - `AI_SWITCH_PORT`：宿主映射端口，默认 `19527`。
-- `AI_SWITCH_DOCKER_IMAGE`：镜像地址，默认 `ai-switch/ai-switch:latest`；固定版本可用 `ai-switch/ai-switch:0.10.3` 或 `ai-switch/ai-switch:0.10`。
+- `AI_SWITCH_DOCKER_IMAGE`：镜像地址，默认 `ijry/ai-switch:latest`；固定版本可用 `ijry/ai-switch:0.10.3` 或 `ijry/ai-switch:0.10`。
 - `AI_SWITCH_TOKEN`：不设置时 entrypoint 会生成并打印一个容器本地令牌；跨重启请显式设置。
 - `AI_SWITCH_SAAS_ENABLE`：默认 `1`，设为 `0` 只启动独立 server，日志队列与存储也不再需要。
 - `AI_SWITCH_SAAS_ACTIVATION_CODE`、`AI_SWITCH_SAAS_INSTANCE_ID`、`AI_SWITCH_SAAS_SITE_NAME`、`AI_SWITCH_SAAS_PUBLIC_BASE_URL`。

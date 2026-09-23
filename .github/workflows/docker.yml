@@ -38,7 +38,11 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY || 'ai-switch/ai-switch' }}
+      # The token belongs to a personal Docker Hub account, so the images live
+      # under that account's namespace rather than a shared one: a namespace the
+      # token's account cannot write to answers every push with
+      # `insufficient_scope: authorization failed`.
+      DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY || 'ijry/ai-switch' }}
 
     steps:
       - name: Checkout

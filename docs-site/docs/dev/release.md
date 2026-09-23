@@ -230,7 +230,7 @@ git tag -d v0.6.8
 - **每个目标**：`ai-switch-tsnet_<tag>_<平台>.zip`（Tailscale sidecar）
 - **macOS**：`ai-switch-updater-<版本>-darwin-aarch64.app.tar.gz` 与 `ai-switch-updater-<版本>-darwin-x86_64.app.tar.gz`（只有自动更新会下载）
 - **`latest.json`**：Tauri 更新器清单，桌面端自动更新的数据源
-- **Docker Hub**：`ai-switch/ai-switch:<版本>`、`ai-switch/ai-switch:<major>.<minor>`，正式版另有 `latest`（预发布不打 `latest`）
+- **Docker Hub**：`ijry/ai-switch:<版本>`、`ijry/ai-switch:<major>.<minor>`，正式版另有 `latest`（预发布不打 `latest`）
 
 `.sig` 不作为独立资产发布，签名内联在 `latest.json` 里。Release 正文顶部另有一张下载表，直接指向上面前三类文件。
 
@@ -263,7 +263,7 @@ git tag -d v0.6.8
 | --- | --- | --- |
 | `DOCKERHUB_USERNAME` | secret | Docker Hub 用户名，或组织内有推送权限的机器人账号 |
 | `DOCKERHUB_TOKEN` | secret | Docker Hub Access Token，权限必须是 **Read & Write**（只读 token 会登录成功但推送被拒） |
-| `DOCKERHUB_REPOSITORY` | variable，可选 | 镜像仓库，默认 `ai-switch/ai-switch` |
+| `DOCKERHUB_REPOSITORY` | variable，可选 | 镜像仓库，默认 `ijry/ai-switch` |
 
 先在 Docker Hub 创建对应仓库，并确认该账号对仓库有写权限——namespace 的写权限和 token 的 scope 是两回事，两者都满足才能推送。缺少 secrets 时镜像仍然会构建，只是跳过登录和推送并给出提示，作业不会失败；推送本身被拒绝时作业会失败，此时 GitHub Release 已经发布，修好凭据后手动重跑本工作流即可，不需要重新构建安装包。
 

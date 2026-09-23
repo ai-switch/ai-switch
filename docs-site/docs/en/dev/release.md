@@ -220,7 +220,7 @@ A successful run attaches the following to the GitHub Release, in the order the 
 - **Per target:** `ai-switch-tsnet_<tag>_<platform>.zip` (Tailscale sidecar)
 - **macOS:** `ai-switch-updater-<version>-darwin-aarch64.app.tar.gz` and `ai-switch-updater-<version>-darwin-x86_64.app.tar.gz` (only the auto-updater downloads them)
 - **`latest.json`:** the Tauri updater manifest that drives desktop auto-updates
-- **Docker Hub:** `ai-switch/ai-switch:<version>`, `ai-switch/ai-switch:<major>.<minor>`, and `latest` for stable releases (prereleases never take `latest`)
+- **Docker Hub:** `ijry/ai-switch:<version>`, `ijry/ai-switch:<major>.<minor>`, and `latest` for stable releases (prereleases never take `latest`)
 
 The `.sig` files are not published as separate assets; their signatures live inside `latest.json`. The release body also opens with a download table pointing straight at the first three groups above.
 
@@ -253,7 +253,7 @@ A failed dispatch only emits `::warning::`; it never turns the release itself re
 | --- | --- | --- |
 | `DOCKERHUB_USERNAME` | secret | Docker Hub username, or a bot account with push access to the organization |
 | `DOCKERHUB_TOKEN` | secret | Docker Hub access token; the permission must be **Read & Write** (a read-only token logs in successfully and then has its push rejected) |
-| `DOCKERHUB_REPOSITORY` | variable, optional | Image repository, defaults to `ai-switch/ai-switch` |
+| `DOCKERHUB_REPOSITORY` | variable, optional | Image repository, defaults to `ijry/ai-switch` |
 
 Create the repository on Docker Hub first and confirm the account can write to it — write access to the namespace and the token's own scope are two separate things, and a push needs both. Without the secrets the image is still built, with login and push skipped and a notice emitted, so the job does not fail; a rejected push does fail the job, but the GitHub Release is already published at that point, so fix the credentials and re-run this workflow by hand without rebuilding the installers.
 

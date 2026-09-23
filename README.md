@@ -193,7 +193,7 @@ Linux x86_64 可以一键安装：
 
 ### Docker 一键启动 server 与 SaaS
 
-Docker 镜像直接复用 GitHub Release 里已打包的 standalone server，不在本机编译 Rust，也不需要桌面 WebKitGTK。仓库配置 `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN` Secrets 后，正式版本发布时 CI 会同步推送 `ai-switch/ai-switch` 的 `linux/amd64` 与 `linux/arm64` 镜像。默认会启动 Redis 作为日志队列、PostgreSQL 作为日志存储，并自动开启 SaaS：
+Docker 镜像直接复用 GitHub Release 里已打包的 standalone server，不在本机编译 Rust，也不需要桌面 WebKitGTK。仓库配置 `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN` Secrets 后，正式版本发布时 CI 会同步推送 `ijry/ai-switch` 的 `linux/amd64` 与 `linux/arm64` 镜像。默认会启动 Redis 作为日志队列、PostgreSQL 作为日志存储，并自动开启 SaaS：
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -206,7 +206,7 @@ docker compose -f deploy/docker-compose.yml up -d
 常用覆盖参数：
 
 - `AI_SWITCH_PORT`：宿主映射端口，默认 `19527`。
-- `AI_SWITCH_DOCKER_IMAGE`：镜像地址，默认 `ai-switch/ai-switch:latest`；固定版本可用 `ai-switch/ai-switch:0.9.0` 或 `ai-switch/ai-switch:0.9`。
+- `AI_SWITCH_DOCKER_IMAGE`：镜像地址，默认 `ijry/ai-switch:latest`；固定版本可用 `ijry/ai-switch:0.10.3` 或 `ijry/ai-switch:0.10`。
 - `AI_SWITCH_TOKEN`：不设置时 entrypoint 会生成并打印一个容器本地令牌；跨重启请显式设置。
 - `AI_SWITCH_SAAS_ENABLE`：默认 `1`，设为 `0` 只启动独立 server。
 - `AI_SWITCH_SAAS_ACTIVATION_CODE`、`AI_SWITCH_SAAS_INSTANCE_ID`、`AI_SWITCH_SAAS_SITE_NAME`、`AI_SWITCH_SAAS_PUBLIC_BASE_URL`。
