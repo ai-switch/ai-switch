@@ -1,12 +1,12 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { BarChart3, ChevronLeft, ChevronRight, List, Settings2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ModelPricingDialog } from "./ModelPricingDialog";
 import { MotionNumber } from "../motion/MotionPrimitives";
 import { UsageTrendChart } from "./UsageTrendChart";
 import { getUsageOverview } from "../../lib/api/client";
 import { formatCompactCount, formatCostMicros, formatExactCount } from "../../lib/usageFormat";
-import { parseUsageMetadata, prettyJsonOrText } from "../../lib/usageMetadata";
+import { decodeStoredBody, parseUsageMetadata, prettyJsonOrText } from "../../lib/usageMetadata";
 import type {
   UsageOverviewGroupRow,
   UsageOverviewRow,
@@ -260,6 +260,25 @@ function DetailBlock({ label, body }: { label: string; body: string }) {
  */
 function RequestDetail({ row }: { row: UsageOverviewRow }) {
   const metadata = row.metadata_json ? parseUsageMetadata(row.metadata_json) : null;
+  // The preview arrives encoded; decoding is async, so the panel renders without
+  // it for the first frame rather than blocking the whole row on a decompress.
+  const [responseBody, setResponseBody] = useState<string | null>(null);
+  const encodedBody = metadata?.responseBody ?? null;
+  useEffect(() => {
+    if (!encodedBody) {
+      setResponseBody(null);
+      return;
+    }
+    let active = true;
+    void decodeStoredBody(encodedBody).then((decoded) => {
+      if (active) {
+        setResponseBody(decoded);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [encodedBody]);
   const mapping =
     metadata?.requestedModel &&
     metadata.upstreamModel &&
@@ -310,8 +329,8 @@ function RequestDetail({ row }: { row: UsageOverviewRow }) {
       {metadata?.errorMessage ? (
         <DetailBlock body={metadata.errorMessage} label="错误信息" />
       ) : null}
-      {metadata?.responseBody ? (
-        <DetailBlock body={prettyJsonOrText(metadata.responseBody)} label="上游原始响应" />
+      {responseBody ? (
+        <DetailBlock body={prettyJsonOrText(responseBody)} label="上游原始响应" />
       ) : null}
       {metadata ? (
         <DetailBlock

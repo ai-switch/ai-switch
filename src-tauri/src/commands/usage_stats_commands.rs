@@ -1,10 +1,12 @@
 use crate::app_state::AppState;
+use crate::core::usage_history::{compact_usage_history_core, get_usage_history_storage_core};
 use crate::core::usage_overview::get_usage_overview_core;
 use crate::core::usage_stats::{
     get_model_price_configs_core, get_session_usage_stats_core, reload_model_price_overrides_core,
     save_model_price_configs_core,
 };
 use crate::error::ApiError;
+use crate::core::usage_history::UsageHistoryStorage;
 use crate::services::model_pricing::ModelPriceConfig;
 use crate::services::session_usage_service::SessionUsageStats;
 use crate::services::usage_overview_service::UsageOverview;
@@ -63,6 +65,30 @@ pub async fn save_model_price_configs(
     configs: HashMap<String, ModelPriceConfig>,
 ) -> Result<usize, ApiError> {
     save_model_price_configs_core(configs)
+        .await
+        .map_err(ApiError::from)
+}
+
+/// How much of the database file is unused space that a `VACUUM` could return.
+#[tauri::command]
+pub async fn get_usage_history_storage(
+    state: State<'_, AppState>,
+) -> Result<UsageHistoryStorage, ApiError> {
+    get_usage_history_storage_core(&state.pool)
+        .await
+        .map_err(ApiError::from)
+}
+
+/// Rebuild the database file compactly and report the new state.
+///
+/// Reached only from the settings screen's explicit button: `VACUUM` rewrites
+/// the whole file under an exclusive lock, which on a database of a few hundred
+/// megabytes is a pause the user should choose rather than receive silently.
+#[tauri::command]
+pub async fn compact_usage_history(
+    state: State<'_, AppState>,
+) -> Result<UsageHistoryStorage, ApiError> {
+    compact_usage_history_core(&state.pool)
         .await
         .map_err(ApiError::from)
 }

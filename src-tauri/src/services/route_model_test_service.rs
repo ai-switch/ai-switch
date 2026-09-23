@@ -10,6 +10,7 @@ use crate::models::route_pool::{
     RoutePoolModelTestOutcome, RoutePoolModelTestRequest, RouteUsageBreakdown,
 };
 use crate::models::route_relay_balance::RELAY_BALANCE_ACCESS_TOKEN_KEY;
+use crate::services::brotli_codec;
 use crate::services::client_identity;
 use crate::services::http_client::{
     build_outbound_http_client, build_outbound_http_client_with_root_certificate,
@@ -1959,11 +1960,36 @@ fn metadata_json(
         "success": success,
         "duration_ms": duration_ms,
         "request_body_json": parts.request_body_json,
+        // Stored compressed, same as the route proxy's preview: this blob is the
+        // bulk of a model-test row and `usage_events` is never pruned, so leaving
+        // it as plain text is a permanent cost. The outcome handed back to the
+        // caller stays plain text — only the stored copy is encoded.
+        "response_body_br": encode_response_body(response_body),
+        // Kept so a reader that predates `response_body_br` still shows something,
+        // and so the row stays readable by hand. Empty on the encoded side means
+        // the two are always the same text.
         "response_body": response_body,
         "response_text": response_text,
         "error_message": error_message,
     })
     .to_string()
+}
+
+/// base64-of-brotli for a model test's response preview.
+///
+/// Falls back to the plain text if compression somehow fails: losing the preview
+/// entirely would be worse than storing it uncompressed.
+fn encode_response_body(response_body: &str) -> String {
+    if response_body.trim().is_empty() {
+        return String::new();
+    }
+    match brotli_codec::compress(response_body.as_bytes()) {
+        Ok(compressed) => base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            compressed,
+        ),
+        Err(_) => response_body.to_string(),
+    }
 }
 
 fn fallback_request_parts(
@@ -3075,6 +3101,15 @@ mod tests {
         assert_eq!(
             metadata.pointer("/target_url").and_then(Value::as_str),
             Some(expected_target_url.as_str())
+        );
+        assert!(
+            brotli_codec::decode_stored_text(
+                metadata
+                    .pointer("/response_body_br")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+            )
+            .contains("ai-switch-ok")
         );
         assert!(metadata
             .pointer("/response_body")

@@ -658,6 +658,16 @@ const en = {
   "settings.autostart.description": "Launch in the tray after you sign in.",
   "settings.autostart.readError": "Could not read the startup setting.",
   "settings.autostart.updateError": "Could not update the startup setting.",
+  "settings.storage.title": "Usage history storage",
+  "settings.storage.subtitle":
+    "Request previews are stored compressed and older history is compacted automatically. Space freed that way is reused, not returned to the system, until the database is rebuilt.",
+  "settings.storage.freeable": "{size} can be returned to the system.",
+  "settings.storage.action": "Compact the database",
+  "settings.storage.hint":
+    "Rewrites the whole file while other database work waits, so the app may pause for a few seconds. Needs about {size} of free space to hold the copy it builds.",
+  "settings.storage.nothingToDo": "Nothing worth compacting right now.",
+  "settings.storage.done": "Compaction finished.",
+  "settings.storage.error": "Could not read or compact the database.",
   "settings.dataDir": "Data directory: {path}",
   "settings.ccswitch.label": "Enable cc-switch deep-link compatibility",
   "settings.ccswitch.warning": "This changes the default handler for ccswitch:// links.",
@@ -1501,6 +1511,16 @@ const zh = {
   "settings.tailscale.copied": "已复制",
   "settings.tailscale.webRequired": "请先启动 Web 服务以发布远程访问地址。",
   "settings.tailscale.componentMissing": "当前安装缺少内置安全网络组件。",
+  "settings.storage.title": "用量历史的存储",
+  "settings.storage.subtitle":
+    "请求响应预览已压缩存储，历史数据也会自动压缩。但这样释放的空间只是被复用，不会归还给文件系统 —— 除非重建数据库。",
+  "settings.storage.freeable": "有 {size} 可以归还给系统。",
+  "settings.storage.action": "整理数据库",
+  "settings.storage.hint":
+    "会重写整个文件，期间其他数据库操作都要等待，应用可能卡住几秒。需要约 {size} 的空闲磁盘来存放它生成的副本。",
+  "settings.storage.nothingToDo": "当前没有值得整理的空间。",
+  "settings.storage.done": "整理完成。",
+  "settings.storage.error": "无法读取或整理数据库。",
   "settings.dataDir": "数据目录：{path}",
   "settings.ccswitch.label": "启用 cc-switch 导入协议兼容",
   "settings.ccswitch.warning": "启用后会接管 ccswitch:// 链接的默认处理程序。",

@@ -10,6 +10,7 @@ use crate::core::terminals::{
     create_terminal_session_core, kill_terminal_session_core, list_terminal_sessions_core,
     resize_terminal_core, resume_session_terminal_core, write_terminal_input_core,
 };
+use crate::core::usage_history::{compact_usage_history_core, get_usage_history_storage_core};
 use crate::core::usage_overview::get_usage_overview_core;
 use crate::core::usage_stats::{
     get_model_price_configs_core, get_session_usage_stats_core, reload_model_price_overrides_core,
@@ -99,6 +100,9 @@ pub fn is_sensitive_command(command: &str) -> bool {
             | "start_tailscale_login"
             | "start_tailscale_with_auth_key"
             | "disconnect_tailscale"
+            // Rewrites the entire database file under an exclusive lock: a paired
+            // phone should not be able to stall the desktop app for seconds.
+            | "compact_usage_history"
     )
 }
 
@@ -591,6 +595,16 @@ pub async fn dispatch_command(
                     .map_err(to_error)?,
             )
         }
+        "get_usage_history_storage" => to_value(
+            get_usage_history_storage_core(&state.pool)
+                .await
+                .map_err(to_error)?,
+        ),
+        "compact_usage_history" => to_value(
+            compact_usage_history_core(&state.pool)
+                .await
+                .map_err(to_error)?,
+        ),
         "get_session_messages" => {
             let provider_id = required_string_arg(&args, "providerId")?;
             let source_path = required_string_arg(&args, "sourcePath")?;

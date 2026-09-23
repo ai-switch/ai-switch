@@ -9,7 +9,11 @@
 use crate::database::repositories::route_pool_repository::RoutePoolRepository;
 use crate::error::AppError;
 use crate::models::route_pool::ProxyRequestRow;
+use crate::services::brotli_codec;
 use crate::services::model_pricing::{self, TokenUsage};
+use crate::services::route_proxy_service::{
+    ROUTE_PROXY_RESPONSE_BODY_ENCODED_KEY, ROUTE_PROXY_RESPONSE_BODY_KEY,
+};
 use crate::services::session_usage_service::{self, SessionUsageEntry, TimeWindow};
 use crate::services::upstream_response_id::extract_upstream_response_id;
 use chrono::{DateTime, Datelike, Duration, FixedOffset, Local, Offset, TimeZone, Timelike, Utc};
@@ -263,10 +267,32 @@ fn resolve_proxy_response_id(row: &ProxyRequestRow) -> Option<String> {
     {
         return Some(id.to_string());
     }
-    // Pre-migration rows: the id may still be inside the stored preview.
-    let metadata = serde_json::from_str::<serde_json::Value>(&row.metadata_json).ok()?;
-    let body = metadata.get("response_body")?.as_str()?;
+    // Pre-migration rows: the id may still be inside the stored preview. Rows
+    // written since it became a separate column have nothing to find here, and
+    // rows written since the preview was compressed need the decode first.
+    let body = proxy_response_body(row)?;
     extract_upstream_response_id(body.as_bytes())
+}
+
+/// The stored response preview, decoded.
+///
+/// New rows carry [`ROUTE_PROXY_RESPONSE_BODY_ENCODED_KEY`] (base64 of brotli);
+/// rows written before that change carry [`ROUTE_PROXY_RESPONSE_BODY_KEY`] as
+/// plain text. Both are still readable, because `usage_events` is never pruned
+/// and a year of history would otherwise go dark the day the writer changed.
+fn proxy_response_body(row: &ProxyRequestRow) -> Option<String> {
+    let metadata: serde_json::Value = serde_json::from_str(&row.metadata_json).ok()?;
+    if let Some(encoded) = metadata
+        .get(ROUTE_PROXY_RESPONSE_BODY_ENCODED_KEY)
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+    {
+        return Some(brotli_codec::decode_stored_text(encoded));
+    }
+    metadata
+        .get(ROUTE_PROXY_RESPONSE_BODY_KEY)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 struct ProxyFacts {
@@ -1569,6 +1595,58 @@ mod tests {
 
         let rows = merge_entries(
             vec![session_entry(Some("msg_legacy"), "claude-opus-5", 120)],
+            vec![row],
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, UsageRowSource::Matched);
+    }
+
+    /// The compressed preview has to be just as readable as the plain one: this
+    /// is the whole point of changing the stored form without a migration.
+    #[test]
+    fn a_proxy_row_reads_the_id_out_of_the_compressed_preview_too() {
+        use base64::Engine;
+        let body = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_packed\"}}\n\n";
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(brotli_codec::compress(body.as_bytes()).expect("compress"));
+
+        let mut row = proxy_row(None);
+        row.metadata_json = serde_json::json!({
+            "path": "/v1/messages",
+            "status": 200,
+            "success": true,
+            "response_body_br": encoded,
+        })
+        .to_string();
+
+        let rows = merge_entries(
+            vec![session_entry(Some("msg_packed"), "claude-opus-5", 120)],
+            vec![row],
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, UsageRowSource::Matched);
+    }
+
+    /// 迁移前写入的行没有 `response_body_br`，只有明文 `response_body`——
+    /// `usage_events` 不清理，这些行必须继续可读。
+    #[test]
+    fn a_compressed_row_wins_over_a_stale_plain_one() {
+        use base64::Engine;
+        let body = "event: message_start\ndata: {\"message\":{\"id\":\"msg_new\"}}\n\n";
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(brotli_codec::compress(body.as_bytes()).expect("compress"));
+
+        let mut row = proxy_row(None);
+        row.metadata_json = serde_json::json!({
+            "response_body": "event: message_start\ndata: {\"message\":{\"id\":\"msg_stale\"}}\n\n",
+            "response_body_br": encoded,
+        })
+        .to_string();
+
+        let rows = merge_entries(
+            vec![session_entry(Some("msg_new"), "claude-opus-5", 120)],
             vec![row],
         );
 

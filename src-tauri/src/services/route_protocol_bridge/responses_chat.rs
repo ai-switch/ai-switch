@@ -152,6 +152,10 @@ fn chat_json_to_responses(
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+    let created_at = value
+        .get("created")
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| chrono::Utc::now().timestamp());
     let choice = value
         .get("choices")
         .and_then(Value::as_array)
@@ -200,6 +204,7 @@ fn chat_json_to_responses(
     let response = response_object(
         response_id,
         model,
+        created_at,
         status,
         output,
         chat_usage_to_responses(value.get("usage")),
@@ -457,6 +462,7 @@ fn ensure_stream_started(
     let created = response_object(
         state.response_id(),
         state.model(),
+        state.created_at,
         "in_progress",
         Vec::new(),
         Value::Null,
@@ -476,6 +482,7 @@ fn ensure_stream_started(
     let in_progress = response_object(
         state.response_id(),
         state.model(),
+        state.created_at,
         "in_progress",
         Vec::new(),
         Value::Null,
@@ -858,6 +865,7 @@ fn finish_stream(
     let response = response_object(
         state.response_id(),
         state.model(),
+        state.created_at,
         status,
         final_output,
         chat_usage_to_responses(state.usage.as_ref()),
@@ -953,9 +961,15 @@ fn chat_message_text(message: &Value) -> Result<String, String> {
     }
 }
 
+/// `created_at` is threaded in rather than read from the clock here: one
+/// response must report the same creation time in `response.created`,
+/// `response.in_progress` and the terminal event. Calling `Utc::now()` per
+/// call made the streaming path emit a terminal `created_at` one second off
+/// from its own opening event whenever the wall clock ticked over mid-stream.
 fn response_object(
     response_id: &str,
     model: &str,
+    created_at: i64,
     status: &str,
     output: Vec<Value>,
     usage: Value,
@@ -972,7 +986,7 @@ fn response_object(
     json!({
         "id": response_id,
         "object": "response",
-        "created_at": chrono::Utc::now().timestamp(),
+        "created_at": created_at,
         "status": status,
         "background": false,
         "error": native_response_error(status, native_finish_reason),
@@ -1149,7 +1163,10 @@ fn failed_response_from_error(value: &Value) -> Value {
     json!({
         "id": value.get("id").cloned().unwrap_or_else(|| json!("resp_ai_switch")),
         "object": "response",
-        "created_at": chrono::Utc::now().timestamp(),
+        "created_at": value
+            .get("created")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| chrono::Utc::now().timestamp()),
         "status": "failed",
         "error": {
             "code": value.pointer("/error/code").cloned().unwrap_or(Value::Null),
@@ -1171,7 +1188,7 @@ fn failed_response_event(state: &ChatStreamState, value: &Value, sequence_number
         "response": {
             "id": state.response_id(),
             "object": "response",
-            "created_at": chrono::Utc::now().timestamp(),
+            "created_at": state.created_at,
             "status": "failed",
             "model": state.model(),
             "error": {
@@ -2117,6 +2134,49 @@ mod tests {
     };
     use serde_json::Value;
     use std::collections::BTreeMap;
+
+    /// One response must report one creation time. The streaming path used to
+    /// read the clock again for the terminal event, so a stream that started
+    /// at 1790134800 could complete at `created_at: 1790134801` — a stream
+    /// contradicting its own opening frame, and a wall-clock-dependent test
+    /// failure roughly one run in five.
+    #[test]
+    fn every_event_of_one_streamed_response_shares_a_single_created_at() {
+        let body = concat!(
+            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let converted = chat_response_to_responses(
+            200,
+            Some("text/event-stream"),
+            body.as_bytes(),
+            &BTreeMap::new(),
+        )
+        .expect("sse conversion");
+        let text = String::from_utf8_lossy(&converted.body);
+
+        let stamps: Vec<i64> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+            .filter_map(|event| {
+                event
+                    .pointer("/response/created_at")
+                    .and_then(Value::as_i64)
+            })
+            .collect();
+
+        assert!(
+            stamps.len() >= 3,
+            "expected created/in_progress/completed frames, got {stamps:?}"
+        );
+        assert!(
+            stamps.iter().all(|stamp| *stamp == stamps[0]),
+            "one response must not report several creation times: {stamps:?}"
+        );
+    }
 
     #[test]
     fn force_reasoning_fills_missing_reasoning_on_plain_assistant_turns() {

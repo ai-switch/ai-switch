@@ -59,8 +59,9 @@ use commands::terminal_commands::{
     list_terminal_sessions, resize_terminal, write_terminal_input,
 };
 use commands::usage_stats_commands::{
-    get_model_price_configs, get_session_usage_stats, get_usage_overview,
-    reload_model_price_overrides, save_model_price_configs,
+    compact_usage_history, get_model_price_configs, get_session_usage_stats,
+    get_usage_history_storage, get_usage_overview, reload_model_price_overrides,
+    save_model_price_configs,
 };
 use commands::web_service_commands::{
     create_mobile_pairing, disconnect_tailscale, get_tailscale_status, get_web_server_status,
@@ -461,6 +462,13 @@ pub fn run() {
             {
                 tauri::async_runtime::spawn(writer.run());
             }
+            // Bring pre-existing plain-text response previews into their
+            // compressed form. Delayed and off the startup path: it shares the
+            // database with the proxy, and a database that keeps its previews
+            // plain is larger than it needs to be, not broken.
+            crate::services::usage_history_compaction_service::spawn_background_migration(
+                state.pool.clone(),
+            );
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             {
                 state
@@ -613,6 +621,8 @@ pub fn run() {
             save_model_price_configs,
             get_session_usage_stats,
             get_usage_overview,
+            get_usage_history_storage,
+            compact_usage_history,
             reload_model_price_overrides,
             list_target_apps,
             list_target_config_statuses,

@@ -65,6 +65,7 @@ import type {
   TargetConfigStatus,
   TerminalSession,
   UsageOverview,
+  UsageHistoryStorage,
   WebServerStatus,
   WebServiceConfig,
   UpdateOfficialAccount,
@@ -246,6 +247,21 @@ export function saveModelPriceConfigs(configs: Record<string, ModelPriceConfig>)
 
 export function reloadModelPriceOverrides(): Promise<number> {
   return invoke("reload_model_price_overrides");
+}
+
+/** Unused space in the database file that a compaction could return. */
+export function getUsageHistoryStorage(): Promise<UsageHistoryStorage> {
+  return invoke("get_usage_history_storage");
+}
+
+/**
+ * Rebuild the database file compactly.
+ *
+ * Slow on purpose and never automatic: `VACUUM` copies the whole database under
+ * an exclusive lock, so this belongs behind a button the user pressed.
+ */
+export function compactUsageHistory(): Promise<UsageHistoryStorage> {
+  return invoke("compact_usage_history");
 }
 
 /**

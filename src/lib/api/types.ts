@@ -93,6 +93,18 @@ export type DiskSpaceStatus = {
   volumes: DiskVolumeSpace[];
 };
 
+/**
+ * How much of the database file is unused space.
+ *
+ * `reclaimable_bytes` is the freelist: pages the app has stopped using but that
+ * still occupy the file. Only a compaction returns them to the filesystem, and
+ * it is the difference between this figure and zero that says whether one is
+ * worth running.
+ */
+export type UsageHistoryStorage = {
+  reclaimable_bytes: number;
+};
+
 export type InterfaceFormat =
   | "openai"
   | "openai-responses"

@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { parseUsageMetadata, prettyJsonOrText } from "../../src/lib/usageMetadata";
+import {
+  decodeStoredBody,
+  looksBase64,
+  parseUsageMetadata,
+  prettyJsonOrText,
+} from "../../src/lib/usageMetadata";
+import { brotliCompressSync } from "zlib";
+
+/** Exactly what the Rust writer stores: base64 of a brotli stream. */
+function encodeLikeTheProxy(text: string): string {
+  return brotliCompressSync(Buffer.from(text, "utf8")).toString("base64");
+}
 
 describe("parseUsageMetadata", () => {
   it("pulls out the fields the detail panel names", () => {
@@ -30,6 +41,14 @@ describe("parseUsageMetadata", () => {
     expect(parsed.formatted).toContain('"path": "/v1/messages"');
   });
 
+  it("prefers the compressed preview over the legacy plain one", () => {
+    const parsed = parseUsageMetadata(
+      JSON.stringify({ response_body: "stale", response_body_br: "cHJldmlldw==" }),
+    );
+
+    expect(parsed.responseBody).toBe("cHJldmlldw==");
+  });
+
   it("treats blank and non-scalar fields as absent", () => {
     const parsed = parseUsageMetadata(
       JSON.stringify({ target_url: "   ", trace_id: null, error_message: { code: 1 } }),
@@ -54,6 +73,41 @@ describe("parseUsageMetadata", () => {
     expect(parsed.valid).toBe(true);
     expect(parsed.formatted).toBe("[\n  1,\n  2\n]");
     expect(parsed.targetUrl).toBeNull();
+  });
+});
+
+describe("decodeStoredBody", () => {
+  it("decompresses what the proxy writes", async () => {
+    const text = 'data: {"usage":{"prompt_tokens":120}}\n\n'.repeat(20);
+    await expect(decodeStoredBody(encodeLikeTheProxy(text))).resolves.toBe(text);
+  });
+
+  it("hands back a plain preview untouched", async () => {
+    for (const plain of [
+      '{"error":{"message":"expired"}}',
+      'data: {"id":"chatcmpl-1"}',
+      "",
+      "hello world",
+    ]) {
+      await expect(decodeStoredBody(plain)).resolves.toBe(plain);
+    }
+  });
+
+  it("falls back to the text when base64 shape is a coincidence", async () => {
+    // Valid base64 alphabet and length, but not a brotli stream.
+    await expect(decodeStoredBody("AAAA")).resolves.toBe("AAAA");
+  });
+});
+
+describe("looksBase64", () => {
+  it("rejects the shapes real previews have", () => {
+    expect(looksBase64('{"a":1}')).toBe(false);
+    expect(looksBase64("data: {}")).toBe(false);
+    expect(looksBase64("abc")).toBe(false);
+  });
+
+  it("accepts a padded encoding", () => {
+    expect(looksBase64("cHJldmlldw==")).toBe(true);
   });
 });
 

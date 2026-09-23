@@ -16,6 +16,7 @@ import { normalizeThemePreference, type ThemePreference } from "../lib/theme";
 import { AutostartSettings } from "../components/settings/autostart-settings";
 import { RouteProxyHttpsSettings } from "../components/settings/route-proxy-https-settings";
 import { NotificationSettings } from "../components/settings/notification-settings";
+import { UsageStorageSettings } from "../components/settings/usage-storage-settings";
 import { WebServiceSettings } from "../components/settings/web-service-settings";
 import { useState } from "react";import { MotionPresence } from "../components/motion/MotionPrimitives";
 import {
@@ -363,6 +364,7 @@ export function SettingsScreen({
           {t("settings.dataDir", { path: settings.data_dir })}
         </p>
         <AutostartSettings />
+        <UsageStorageSettings />
         <label className="flex max-w-xl items-start gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-[12px] font-semibold text-stone-700">
           <input
             aria-label={t("settings.ccswitch.label")}
