@@ -466,8 +466,12 @@ pub fn run() {
             // compressed form. Delayed and off the startup path: it shares the
             // database with the proxy, and a database that keeps its previews
             // plain is larger than it needs to be, not broken.
-            crate::services::usage_history_compaction_service::spawn_background_migration(
-                state.pool.clone(),
+            //
+            // Spawned on Tauri's runtime for the same reason as the live log
+            // above: this setup hook is not inside a Tokio context.
+            tauri::async_runtime::spawn(
+                crate::services::usage_history_compaction_service::
+                    compress_stored_previews_after_startup(state.pool.clone()),
             );
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             {

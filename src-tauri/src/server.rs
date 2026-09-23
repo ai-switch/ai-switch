@@ -432,8 +432,12 @@ pub async fn run_from_env() -> Result<(), String> {
     // Bring pre-existing plain-text response previews into their compressed
     // form. Delayed and off the startup path: it shares the database with the
     // proxy, and a database that keeps its previews plain is larger than it
-    // needs to be, not broken.
-    crate::services::usage_history_compaction_service::spawn_background_migration(state.pool.clone());
+    // needs to be, not broken. Already inside a Tokio context here, unlike the
+    // desktop setup hook.
+    tokio::spawn(
+        crate::services::usage_history_compaction_service::
+            compress_stored_previews_after_startup(state.pool.clone()),
+    );
 
     // The standalone server composes the route proxy into this listener. Do not
     // restore the desktop service here: it would bind a second port.

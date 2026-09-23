@@ -199,29 +199,33 @@ fn encode_row(metadata_json: &str) -> Option<(String, u64, u64)> {
     (after < before).then_some((rewritten, before, after))
 }
 
-/// Run the migration in the background, off the startup path.
+/// Wait out the startup rush, then compress the stored previews.
 ///
-/// Spawned once per process. Failures are logged rather than raised: a database
-/// that keeps its plain previews is bigger than it needs to be, not broken.
-pub fn spawn_background_migration(pool: SqlitePool) {
-    tokio::spawn(async move {
-        tokio::time::sleep(START_DELAY).await;
-        match migrate_stored_response_bodies(&pool).await {
-            Ok(summary) if summary.migrated > 0 => {
-                eprintln!(
-                    "usage history: compressed {} response previews, {} skipped, {:.1} MiB -> {:.1} MiB",
-                    summary.migrated,
-                    summary.skipped,
-                    summary.original_bytes as f64 / 1024.0 / 1024.0,
-                    summary.compressed_bytes as f64 / 1024.0 / 1024.0,
-                );
-            }
-            Ok(_) => {}
-            Err(error) => {
-                eprintln!("usage history: could not compress stored response previews: {error}");
-            }
+/// Returns the future instead of spawning it, because the two callers do not
+/// share a runtime: the desktop spawns it on Tauri's runtime (its setup hook
+/// is *not* inside a Tokio context, so a `tokio::spawn` here panics with "there
+/// is no reactor running"), while the standalone server is already async and
+/// spawns it on Tokio. Same reason the live log hands its writer back.
+///
+/// Failures are logged rather than raised: a database that keeps its plain
+/// previews is bigger than it needs to be, not broken.
+pub async fn compress_stored_previews_after_startup(pool: SqlitePool) {
+    tokio::time::sleep(START_DELAY).await;
+    match migrate_stored_response_bodies(&pool).await {
+        Ok(summary) if summary.migrated > 0 => {
+            eprintln!(
+                "usage history: compressed {} response previews, {} skipped, {:.1} MiB -> {:.1} MiB",
+                summary.migrated,
+                summary.skipped,
+                summary.original_bytes as f64 / 1024.0 / 1024.0,
+                summary.compressed_bytes as f64 / 1024.0 / 1024.0,
+            );
         }
-    });
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("usage history: could not compress stored response previews: {error}");
+        }
+    }
 }
 
 /// How much of the file is free pages that only `VACUUM` can return.
