@@ -202,7 +202,7 @@ Each row shows: time, account name, status code, path, model, token total, price
 
 Clicking "details" expands a row to show the account name, account ID, source, metric (`amount` + `unit`), input/output/cache tokens, price, and timestamp, plus two raw blocks:
 
-- **The raw upstream response**, from `metadata_json.response_body`. Successful requests keep only the first **2 KiB**; failed requests keep the first **16 KiB** — diagnosis needs the whole error body, whereas a short slice of a successful response is enough to identify it.
+- **The raw upstream response**. Rows written by current versions keep it in `metadata_json.response_body_br`, brotli-compressed and then base64-encoded; rows written before that upgrade keep it as plain text in `response_body`. Successful requests keep only the first **2 KiB**; failed requests keep the first **16 KiB** — diagnosis needs the whole error body, whereas a short slice of a successful response is enough to identify it. When querying the database yourself, accept both keys: reading only `response_body` makes every compressed row look like it has no response body at all.
 - **The full `metadata_json`**, pretty-printed. If it fails to parse it is shown verbatim with a notice.
 
 The fields the proxy writes into `metadata_json`:
@@ -219,7 +219,8 @@ The fields the proxy writes into `metadata_json`:
 | `trace_id` | Trace ID (used to look up the selected account when a model test goes through the proxy) |
 | `error_message` | Error message |
 | `requested_model` / `upstream_model` | The model the client asked for and the model actually sent upstream |
-| `response_body` | The truncated upstream response body |
+| `response_body_br` | The truncated upstream response body, brotli-compressed and base64-encoded (the key rows are written under now) |
+| `response_body` | Same, as plain text; only rows written before the upgrade still have it |
 
 Model tests write more fields into `metadata_json` — see [Model Connectivity Tests](/en/guide/model-test).
 

@@ -522,6 +522,49 @@ db, out = sys.argv[1], sys.argv[2]
 MARKERS = ('response.reasoning_summary', '"type":"reasoning"', '"type": "reasoning"',
            'thinking_delta', '"type":"thinking"', 'redacted_thinking', 'reasoning_content')
 
+# 只提示一次，别每行刷一遍。
+_brotli_missing = [False]
+
+
+def stored_body(meta):
+    """取出响应体预览。
+
+    新版把预览用 brotli 压缩后以 base64 存在 `response_body_br`，旧行是明文
+    `response_body`。两种都要认——只读旧键会把压缩过的行全部当成「没有响应体」，
+    body_len 变 0、reasoning 判定变空，而且看不出是错的。
+
+    brotli 不在标准库里，装了 brotli / brotlicffi 才解得开。解不开时返回 None
+    （「有但读不出来」）而不是 ''（「没有」），好过给出一个假的 0。
+    """
+    body = meta.get('response_body')
+    if body:
+        return body
+    encoded = meta.get('response_body_br')
+    if not encoded:
+        return ''
+    try:
+        import base64
+        raw = base64.b64decode(encoded)
+    except Exception:
+        return None
+    decompress = None
+    try:
+        import brotli
+        decompress = brotli.decompress
+    except ImportError:
+        try:
+            import brotlicffi
+            decompress = brotlicffi.decompress
+        except ImportError:
+            if not _brotli_missing[0]:
+                _brotli_missing[0] = True
+                print('brotli-missing')
+            return None
+    try:
+        return decompress(raw).decode('utf-8', 'replace')
+    except Exception:
+        return None
+
 
 def upstream_path(meta):
     """上游真正被请求的端点。
@@ -560,19 +603,24 @@ with open(out, 'w', newline='', encoding='utf-8-sig') as fh:
             m = json.loads(meta)
         except Exception:
             continue
-        body = m.get('response_body') or ''
+        body = stored_body(m)
         w.writerow([created, m.get('platform'), m.get('entry_path') or m.get('path'),
                     upstream_path(m), m.get('target_url'),
                     m.get('route_credential_name'), m.get('requested_model'),
                     m.get('upstream_model'), m.get('status'), m.get('success'),
-                    m.get('duration_ms'), len(body),
+                    m.get('duration_ms'), '' if body is None else len(body),
                     any(k in body for k in MARKERS) if body else ''])
 '@
         $pyPath = Join-Path $bundleDir 'export_usage_events.py'
         $csvPath = Join-Path $bundleDir 'usage_events-7d.csv'
         Write-Utf8File $pyPath $py
         try {
-            & $python $pyPath $dbPath $csvPath 2>$null | Out-Null
+            # 不能把输出丢掉：Python 侧靠 stdout 的一行 'brotli-missing' 报
+            # 「响应体已压缩但本机解不开」，丢掉的话 CSV 里就是一堆假的 0。
+            $pyOut = (& $python $pyPath $dbPath $csvPath 2>&1 | Out-String)
+            if ($pyOut -match 'brotli-missing') {
+                Write-Warn '响应体预览已压缩，本机 Python 没有 brotli 模块，body_len / client_has_reasoning 两列留空（装 brotli 后重跑即可补全）'
+            }
             if (Test-Path $csvPath) {
                 Write-Ok "usage_events-7d.csv 已写出（$([math]::Round((Get-Item $csvPath).Length / 1KB)) KB）"
             } else {

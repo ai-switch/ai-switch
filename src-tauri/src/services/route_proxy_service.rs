@@ -9696,12 +9696,18 @@ mod tests {
     fn the_streamed_transform_matches_the_buffered_one_byte_for_byte() {
         // Reasoning, text, a usage tail and the `[DONE]` sentinel: the shapes a
         // Chat upstream actually sends.
+        //
+        // Every chunk carries an explicit `created`, the way a real Chat
+        // upstream sends it. Without it both paths fall back to the clock on
+        // their own, and the two readings land in different seconds whenever
+        // this test happens to straddle one — a diff that is about the test's
+        // wall-clock luck and not about the transform.
         let chat_sse = concat!(
-            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":null},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Let me think.\"},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"apply_patch\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n",
+            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"created\":1700000000,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":null},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"created\":1700000000,\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Let me think.\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"created\":1700000000,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"created\":1700000000,\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"apply_patch\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"cc-1\",\"model\":\"deepseek-chat\",\"created\":1700000000,\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n",
             "data: [DONE]\n\n"
         );
         // `event:` lines next to the payload, a namespaced tool call and an

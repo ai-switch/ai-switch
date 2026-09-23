@@ -206,7 +206,7 @@ END), 0) AS cost_micros
 
 点"详情"展开一行，可以看到账号名、账号 ID、来源、指标（`amount` + `unit`）、输入/输出/缓存 token、价格、时间，以及两块原文：
 
-- **上游原始响应**：来自 `metadata_json.response_body`。成功请求只留前 **2 KiB**，失败请求留前 **16 KiB**——排错更需要看完整的错误体，成功的响应留一小段够定位就行。
+- **上游原始响应**：新写入的行放在 `metadata_json.response_body_br` 里，是 brotli 压缩后再 base64 的结果；升级前写入的旧行是明文 `response_body`。成功请求只留前 **2 KiB**，失败请求留前 **16 KiB**——排错更需要看完整的错误体，成功的响应留一小段够定位就行。自己查库时两个键都要认，只认 `response_body` 会把压缩过的行全部当成「没有响应体」。
 - **完整的 `metadata_json`**：格式化输出。解析失败时原样显示并给出提示。
 
 `metadata_json` 里由代理写入的字段包括：
@@ -223,7 +223,8 @@ END), 0) AS cost_micros
 | `trace_id` | 追踪 ID（模型测试经代理路径时用它反查命中账号） |
 | `error_message` | 错误信息 |
 | `requested_model` / `upstream_model` | 客户端请求的模型与实际发给上游的模型 |
-| `response_body` | 截断后的上游响应体 |
+| `response_body_br` | 截断后的上游响应体，brotli 压缩 + base64（新写入的行用这个键） |
+| `response_body` | 同上，明文；只有升级前写入的旧行还有 |
 
 模型测试写入的 `metadata_json` 字段更多，见 [模型连通性测试](/guide/model-test)。
 
