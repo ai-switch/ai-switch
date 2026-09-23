@@ -1,0 +1,135 @@
+name: Docker
+
+# Publishes a release that is *already* on GitHub Releases to Docker Hub. Kept
+# out of release.yml on purpose: the registry is a third-party system that can
+# reject a perfectly good image — a read-only access token, a token whose
+# account has no write access to the target namespace — and that verdict must
+# never be able to hold up or fail the release itself. Re-publishing an older
+# tag must stay possible long after that tag's build machines are gone, which is
+# why the image is assembled from the Release archives rather than rebuilt from
+# source.
+#
+# In practice the run comes from release.yml's explicit dispatch, not from the
+# release event: GitHub does not start workflow runs from events created by its
+# own GITHUB_TOKEN, which is what release-action publishes with. It also needs
+# `actions: write`, which the workflow-level permissions in release.yml do not
+# grant. The `release` trigger below therefore only covers a release a person
+# published by hand.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, e.g. v0.10.3. Defaults to the latest published release."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.event.inputs.tag || github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-image:
+    name: Publish Docker image
+    runs-on: ubuntu-latest
+
+    env:
+      DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY || 'ai-switch/ai-switch' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve the published release
+        id: release
+        # The application version stamped into the image has to be the tag's, not
+        # the branch's: a manual run for an older tag checks out that same older
+        # tag, but the event-based path does not, and reading package.json from
+        # whatever is on disk is how the wrong version ends up inside a layer.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Empty for `release: published`, where the tag comes from the event.
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$EVENT_TAG}"
+          if [[ -z "$tag" ]]; then
+            # A manual run with no tag targets whatever is currently newest.
+            tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          fi
+
+          # A release that is not on GitHub yet has no archives for the image to
+          # unpack, and a draft has no public download URLs at all. Report a clear
+          # reason instead of failing inside Dockerfile's download stage.
+          draft="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          if [[ "$draft" == "true" ]]; then
+            echo "::error::${tag} is still a draft; publish it before building the Docker image."
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check Docker Hub credentials
+        id: dockerhub_credentials
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${DOCKERHUB_USERNAME:-}" && -n "${DOCKERHUB_TOKEN:-}" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Configure DOCKERHUB_USERNAME and DOCKERHUB_TOKEN repository secrets to publish Docker images. Building without pushing."
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: steps.dockerhub_credentials.outputs.configured == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_REPOSITORY }}
+          # Both tags are derived from the resolved tag rather than from the ref:
+          # `github.ref_name` on a `release: published` run is whatever the
+          # repository's default branch happens to be, which yields `main`/`latest`
+          # and never the version the run is actually for.
+          flavor: latest=false
+          tags: |
+            type=semver,value=${{ steps.release.outputs.tag }},pattern={{version}}
+            type=semver,value=${{ steps.release.outputs.tag }},pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(steps.release.outputs.tag, '-') }}
+
+      - name: Build image (push when configured)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ steps.dockerhub_credentials.outputs.configured == 'true' }}
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            AI_SWITCH_VERSION=${{ steps.release.outputs.version }}
+            AI_SWITCH_REPOSITORY=${{ github.repository }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}

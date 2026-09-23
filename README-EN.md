@@ -201,7 +201,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 Inside the container, the default log queue and store use `redis://redis:6379` and `postgresql://ai_switch:change-me@postgres:5432/ai_switch_logs?sslmode=disable`, via `SAAS_LOGS_REDIS_URL` and `SAAS_LOGS_POSTGRES_URL`. SaaS settings store only environment-name references and do not persist connection strings in the database.
 
-Without Docker Hub credentials, CI still validates the multi-architecture build but skips login and push with a notice. Real build errors still fail the job. Set the `DOCKERHUB_REPOSITORY` repository variable to customize the publication target.
+Without Docker Hub credentials, CI still validates the multi-architecture build but skips login and push with a notice. Real build errors still fail the job. Set the `DOCKERHUB_REPOSITORY` repository variable to customize the publication target. Images are pushed by a dedicated `Docker` workflow that cannot fail a release — see [Docker in the docs site](https://ai-switch.github.io/ai-switch/en/deploy/docker.html) for the full tag list, environment variables and persistence details.
 
 Common overrides:
 

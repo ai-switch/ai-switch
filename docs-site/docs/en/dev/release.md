@@ -228,21 +228,36 @@ How users get these is covered in [installation](/en/guide/installation); runnin
 
 ## Publishing Docker images
 
-The `publish-image` job in `release.yml` runs after the GitHub Release is published. It downloads both `ai-switch-server_<tag>_linux-<arch>.zip` archives for the tag, verifies the `sha256` digest reported by the GitHub API, then builds and pushes a `linux/amd64` plus `linux/arm64` multi-platform image. The image does not compile source, so its runtime is dominated by downloading and unpacking the release archives.
+`.github/workflows/docker.yml` hands a release that is **already published** to Docker Hub. It sits outside `release.yml` for the same reason the package managers do: the registry is a third-party system, and a read-only access token, or a token whose account has no write access to the target namespace, rejects a perfectly good image — a verdict that should not mark an already shipped release red. The other direction matters too: re-publishing a tag from months ago needs no rebuild.
 
-Images receive three kinds of tags: the full version (for example `0.8.7`), `major.minor` (for example `0.8`), and `latest` for stable releases. `-rc`, `-beta`, and `-alpha` prereleases never take `latest`.
+::: warning
+Unlike `package-managers.yml`, there is no keyless alternative here: Docker Hub has no OIDC federation, so pushing can only use a long-lived access token rather than an identity exchanged from the workflow.
+:::
+
+It downloads both `ai-switch-server_<tag>_linux-<arch>.zip` archives for the tag, verifies the `sha256` digest reported by the GitHub API, then builds and pushes a `linux/amd64` plus `linux/arm64` multi-platform image. The image does not compile source, so its runtime is dominated by downloading and unpacking the release archives.
+
+Images receive three kinds of tags: the full version (for example `0.10.3`), `major.minor` (for example `0.10`), and `latest` for stable releases. `-rc`, `-beta`, and `-alpha` prereleases never take `latest`. All three derive from the resolved Release tag rather than `github.ref_name`, which on a `release: published` run is the default branch and would publish an unversioned `latest`.
+
+### How it is triggered
+
+| Trigger | Behaviour |
+| --- | --- |
+| `release.yml` finishes publishing | Automatic: the publish job runs `gh workflow run docker.yml -f tag=<the tag it just published>` |
+| Manual `workflow_dispatch` | Pass a `tag` to re-publish a specific version; leave it empty to target the newest stable release |
+
+A failed dispatch only emits `::warning::`; it never turns the release itself red. The workflow also listens for `release: published` to cover a release a person published by hand.
 
 ### What has to be configured
 
 | Secret / Variable | Kind | Purpose |
 | --- | --- | --- |
 | `DOCKERHUB_USERNAME` | secret | Docker Hub username, or a bot account with push access to the organization |
-| `DOCKERHUB_TOKEN` | secret | Docker Hub access token with read/write permission |
+| `DOCKERHUB_TOKEN` | secret | Docker Hub access token; the permission must be **Read & Write** (a read-only token logs in successfully and then has its push rejected) |
 | `DOCKERHUB_REPOSITORY` | variable, optional | Image repository, defaults to `ai-switch/ai-switch` |
 
-Create the repository on Docker Hub first and confirm the account can write to it. If the secrets are missing, `publish-image` fails with an explicit error; the GitHub Release is already published at that point, so add the secrets and rerun that job without rebuilding the installers.
+Create the repository on Docker Hub first and confirm the account can write to it — write access to the namespace and the token's own scope are two separate things, and a push needs both. Without the secrets the image is still built, with login and push skipped and a notice emitted, so the job does not fail; a rejected push does fail the job, but the GitHub Release is already published at that point, so fix the credentials and re-run this workflow by hand without rebuilding the installers.
 
-See the Docker one-click startup section in the root README for the user-facing command.
+See [Docker](/en/deploy/docker) and the Docker one-click startup section in the root README for the user-facing command.
 
 ## Publishing to package managers (Homebrew / WinGet)
 

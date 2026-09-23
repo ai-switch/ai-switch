@@ -238,21 +238,36 @@ git tag -d v0.6.8
 
 ## 发布 Docker 镜像
 
-`release.yml` 的 `publish-image` 作业在 GitHub Release 发布完成后运行。它按当前 tag 下载两个架构的 `ai-switch-server_<tag>_linux-<arch>.zip`，校验 GitHub API 返回的 `sha256` digest，再构建 `linux/amd64` 与 `linux/arm64` 多架构镜像并推送 Docker Hub。镜像本身不编译源码，所以发布耗时主要取决于下载和解压发布包。
+`.github/workflows/docker.yml` 把**已经发布**的 Release 推给 Docker Hub，和包管理器一样独立于 `release.yml`：registry 是第三方系统，只读的 access token、或 token 所属账号对目标 namespace 没有写权限，都会拒绝一个毫无问题的镜像，而这个结论不该把已经发出去的版本标红。反过来，补发几个月前的 tag 也不需要重新构建。
 
-镜像会打三类 tag：完整版本（如 `0.8.7`）、`major.minor`（如 `0.8`），以及正式版的 `latest`。`-rc`、`-beta`、`-alpha` 预发布不会占用 `latest`。
+::: warning 无法改成免密钥
+和 `package-managers.yml` 不同：Docker Hub 不支持 OIDC 联合身份，所以推镜像只能用长期有效的 Access Token，这个 token 没有办法靠 workflow 身份换到。
+:::
+
+它按当前 tag 下载两个架构的 `ai-switch-server_<tag>_linux-<arch>.zip`，校验 GitHub API 返回的 `sha256` digest，再构建 `linux/amd64` 与 `linux/arm64` 多架构镜像并推送。镜像本身不编译源码，所以耗时主要取决于下载和解压发布包。
+
+镜像会打三类 tag：完整版本（如 `0.10.3`）、`major.minor`（如 `0.10`），以及正式版的 `latest`。`-rc`、`-beta`、`-alpha` 预发布不会占用 `latest`。三类 tag 都由解析出的 Release tag 推导，而不是 `github.ref_name`——`release: published` 触发时后者是默认分支名，推出来的会是没有版本号的 `latest`。
+
+### 触发方式
+
+| 触发 | 行为 |
+| --- | --- |
+| `release.yml` 发布完成 | 自动运行：publish 作业发出 `gh workflow run docker.yml -f tag=<刚发布的 tag>` |
+| 手动 `workflow_dispatch` | 传入 `tag` 补发指定版本；留空则取当前最新的正式 Release |
+
+派发失败只会输出 `::warning::`，不会让发版本身变红。工作流也监听 `release: published`，覆盖有人手动发布 Release 的情况。
 
 ### 需要配置什么
 
 | Secret / Variable | 类型 | 用途 |
 | --- | --- | --- |
-| `DOCKERHUB_USERNAME` | secret | Docker Hub 用户名或组织内有推送权限的机器人账号 |
-| `DOCKERHUB_TOKEN` | secret | Docker Hub Access Token，需要读写权限 |
+| `DOCKERHUB_USERNAME` | secret | Docker Hub 用户名，或组织内有推送权限的机器人账号 |
+| `DOCKERHUB_TOKEN` | secret | Docker Hub Access Token，权限必须是 **Read & Write**（只读 token 会登录成功但推送被拒） |
 | `DOCKERHUB_REPOSITORY` | variable，可选 | 镜像仓库，默认 `ai-switch/ai-switch` |
 
-先在 Docker Hub 创建对应仓库，并确认该账号对仓库有写权限。缺少 secrets 时，`publish-image` 作业会明确失败；此时 GitHub Release 已经发布，可以补齐 secrets 后重新运行该 job，不需要重新构建安装包。
+先在 Docker Hub 创建对应仓库，并确认该账号对仓库有写权限——namespace 的写权限和 token 的 scope 是两回事，两者都满足才能推送。缺少 secrets 时镜像仍然会构建，只是跳过登录和推送并给出提示，作业不会失败；推送本身被拒绝时作业会失败，此时 GitHub Release 已经发布，修好凭据后手动重跑本工作流即可，不需要重新构建安装包。
 
-用户侧用法见根目录 README 的 Docker 一键启动章节。
+用户侧用法见 [Docker 部署](/deploy/docker) 与根目录 README 的 Docker 一键启动章节。
 
 ## 发布到包管理器（Homebrew / WinGet）
 

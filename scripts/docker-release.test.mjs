@@ -8,6 +8,9 @@ import test from "node:test";
 
 const read = async (path) => (await readFile(path, "utf8")).replaceAll("\r\n", "\n");
 
+const DOCKER_WORKFLOW = ".github/workflows/docker.yml";
+const RELEASE_WORKFLOW = ".github/workflows/release.yml";
+
 test("docker image uses verified release archives instead of compiling source", async () => {
   const dockerfile = await read("Dockerfile");
 
@@ -35,12 +38,11 @@ test("docker compose runs the published multi-arch image", async () => {
   assert.equal(/build:/i.test(compose), false);
 });
 
-test("release workflow publishes docker hub images after the github release", async () => {
-  const workflow = await read(".github/workflows/release.yml");
+test("docker workflow publishes docker hub images for an already published release", async () => {
+  const workflow = await read(DOCKER_WORKFLOW);
 
   const dockerJob = workflow.slice(workflow.indexOf("  publish-image:"));
   assert.notEqual(dockerJob, "");
-  assert.match(dockerJob, /needs:\s*\n\s*- publish/);
   assert.match(dockerJob, /DOCKERHUB_USERNAME/);
   assert.match(dockerJob, /DOCKERHUB_TOKEN/);
   assert.match(dockerJob, /id: dockerhub_credentials/);
@@ -50,9 +52,52 @@ test("release workflow publishes docker hub images after the github release", as
   assert.match(dockerJob, /docker\/login-action@/);
   assert.match(dockerJob, /docker\/build-push-action@/);
   assert.match(dockerJob, /linux\/amd64,linux\/arm64/);
-  assert.match(dockerJob, /AI_SWITCH_VERSION=\$\{\{ github\.ref_name \}\}/);
-  assert.match(dockerJob, /AI_SWITCH_REPOSITORY=\$\{\{ github\.repository \}\}/);
-  assert.match(dockerJob, /type=semver,pattern=\{\{version\}\}/);
+});
+
+test("docker workflow tags the image from the resolved release tag", async () => {
+  const workflow = await read(DOCKER_WORKFLOW);
+
+  // `github.ref_name` is the default branch on a `release: published` run, so a
+  // workflow that tags from it publishes `main` and `latest` and never the
+  // version it was actually triggered for. Every tag must come from the tag the
+  // resolve step looked up.
+  assert.match(workflow, /tag="\$\(gh release view --repo "\$GITHUB_REPOSITORY" --json tagName --jq \.tagName\)"/);
+  assert.match(workflow, /echo "tag=\$tag" >> "\$GITHUB_OUTPUT"/);
+  assert.match(workflow, /type=semver,value=\$\{\{ steps\.release\.outputs\.tag \}\},pattern=\{\{version\}\}/);
+  assert.match(workflow, /type=semver,value=\$\{\{ steps\.release\.outputs\.tag \}\},pattern=\{\{major\}\}\.\{\{minor\}\}/);
+  assert.match(workflow, /type=raw,value=latest,enable=\$\{\{ !contains\(steps\.release\.outputs\.tag, '-'\) \}\}/);
+  assert.match(workflow, /AI_SWITCH_VERSION=\$\{\{ steps\.release\.outputs\.version \}\}/);
+  assert.match(workflow, /AI_SWITCH_REPOSITORY=\$\{\{ github\.repository \}\}/);
+
+  // A tag that is not on the repository has nothing to unpack; a draft has no
+  // public download URL either.
+  assert.match(workflow, /gh release view "\$tag" --repo "\$GITHUB_REPOSITORY" --json isDraft --jq \.isDraft/);
+});
+
+test("docker workflow can be dispatched for a hand-picked tag", async () => {
+  const workflow = await read(DOCKER_WORKFLOW);
+
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.match(workflow, /INPUT_TAG: \$\{\{ inputs\.tag \}\}/);
+  assert.match(workflow, /tag="\$\{INPUT_TAG:-\$EVENT_TAG\}"/);
+  assert.match(workflow, /EVENT_TAG: \$\{\{ github\.event\.release\.tag_name \}\}/);
+});
+
+test("the docker publication cannot fail the release", async () => {
+  const workflow = await read(RELEASE_WORKFLOW);
+
+  // The registry verdict is a third-party one — a read-only token or a namespace
+  // the token cannot write to rejects a perfectly good image. The release has
+  // already shipped by then, so the handoff warns and a hand-run of docker.yml
+  // repeats it for the same tag.
+  assert.equal(
+    workflow.includes("publish-image"),
+    false,
+    "the Docker publication lives in its own workflow so it cannot mark a release red",
+  );
+  assert.match(workflow, /gh workflow run docker\.yml/);
+  assert.match(workflow, /if ! gh workflow run docker\.yml/);
+  assert.match(workflow, /::warning::Could not dispatch docker\.yml for \$\{TAG\}/);
 });
 
 test("standalone server fails fast when release environment configuration is invalid", async () => {
@@ -72,7 +117,7 @@ for (const [name, username, token, configured] of [
   ["both secrets", "test-user", "test-token", true],
 ]) {
   test(`Docker credentials check handles ${name} without leaking secrets`, async (t) => {
-    const workflow = await read(".github/workflows/release.yml");
+    const workflow = await read(DOCKER_WORKFLOW);
     const credentialStep = workflow.split("id: dockerhub_credentials")[1]?.split(/\n      - name:/)[0];
     assert.ok(credentialStep, "the workflow must check credentials before logging in");
     const script = credentialStep.split("        run: |\n")[1]?.replace(/^          /gm, "");
@@ -109,7 +154,7 @@ for (const [name, username, token, configured] of [
 }
 
 test("Docker image is still built when publication credentials are unavailable", async () => {
-  const workflow = await read(".github/workflows/release.yml");
+  const workflow = await read(DOCKER_WORKFLOW);
   const dockerJob = workflow.slice(workflow.indexOf("  publish-image:"));
   for (const action of ["docker/setup-qemu-action", "docker/setup-buildx-action", "docker/metadata-action", "docker/build-push-action"]) {
     const step = dockerJob.split(/\n      - name:/).find((part) => part.includes(action));

@@ -161,6 +161,15 @@ describe("package manager handoff", () => {
     // here would give that back.
     expect(workflow).toContain("::warning::Could not dispatch package-managers.yml");
   });
+
+  it("hands the Docker publication off the same way", () => {
+    // Docker Hub is the other registry whose verdict is not ours to control: a
+    // read-only token or a namespace the token cannot write to rejects a good
+    // image, and the release has already shipped by then.
+    expect(workflow).toContain("gh workflow run docker.yml");
+    expect(workflow).toContain("::warning::Could not dispatch docker.yml");
+    expect(workflow).not.toContain("publish-image");
+  });
 });
 
 describe("AppImage Wayland patch", () => {

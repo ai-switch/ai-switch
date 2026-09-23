@@ -216,6 +216,7 @@ AI_SWITCH_PORT=19527 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.co
 
 ## 下一步
 
+- 想用容器跑起来，见 [Docker 部署](/deploy/docker)。
 - 想从外网访问这台服务器，见 [远程访问与 HTTPS](/deploy/remote-access)。
 - 想了解浏览器端的界面与接口细节，见 [Web 服务模式](/deploy/web-service)。
 - 想在本机开发环境跑起来，见 [本地开发](/dev/local-setup)。

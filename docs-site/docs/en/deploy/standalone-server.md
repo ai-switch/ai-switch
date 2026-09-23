@@ -215,6 +215,7 @@ Regenerating the token requires a service restart; any API calls or client confi
 
 ## Next steps
 
+- To run it in a container, see [Docker](/en/deploy/docker).
 - To reach this server from outside your network, see [Remote Access and HTTPS](/en/deploy/remote-access).
 - For browser-side UI and endpoint details, see [Web Service Mode](/en/deploy/web-service).
 - To get it running on a dev machine, see [Local Setup](/en/dev/local-setup).

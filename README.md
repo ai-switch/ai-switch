@@ -201,7 +201,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 容器内日志队列与存储默认使用 `redis://redis:6379` 和 `postgresql://ai_switch:change-me@postgres:5432/ai_switch_logs?sslmode=disable`，对应环境变量是 `SAAS_LOGS_REDIS_URL` 和 `SAAS_LOGS_POSTGRES_URL`。SaaS 设置只保存环境名引用，不在数据库里落库连接串。
 
-若未配置 Docker Hub 凭据，CI 仍会验证双架构镜像构建，但跳过登录和推送并给出提示。实际构建错误仍会使任务失败；自定义发布地址可设置仓库变量 `DOCKERHUB_REPOSITORY`。
+若未配置 Docker Hub 凭据，CI 仍会验证双架构镜像构建，但跳过登录和推送并给出提示。实际构建错误仍会使任务失败；自定义发布地址可设置仓库变量 `DOCKERHUB_REPOSITORY`。镜像由独立的 `Docker` 工作流推送，不会把发版本身拖红；完整的镜像 tag、环境变量与持久化说明见[文档站的 Docker 部署](https://ai-switch.github.io/ai-switch/deploy/docker.html)。
 
 常用覆盖参数：
 
