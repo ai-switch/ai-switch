@@ -4,6 +4,9 @@
 - `.gitattributes` 给 `*.rs/*.mjs/*.ts/*.tsx/*.toml/*.sql/*.yml/*.yaml` 声明 `text eol=lf`，**故意不用** `* text=auto`（会重写 108 个 CRLF markdown 与 `resources/skill-packages`）。`core.autocrlf=false`。
 - `*.json` 无属性按原始字节存；`src-tauri/tauri.conf.json` 仓库里是 **CRLF**，编辑工具写文件会 CRLF→LF，改一行产生 76 行假差异。改完 `sed -i 's/$/\r/' <file>` 补回，`git diff --numstat` 应为 `1 1`。
 - 数 CR 只信 `tr -dc '\r' < f | wc -c` 或 `git ls-files --eol`。别用 `grep -c $'\r'`（恒 0）、`grep -qU`（只给是否）。
+- **markdown 无 `eol` 属性 → 编辑工具（Write/Edit）追加会写 CRLF，文件变 `i/mixed w/mixed`**，git 原样存、不会自愈。`git show HEAD:f` 看到的也是混合版，所以「`git show` 里有 CR」不等于提交被污染。
+- **归一化前必须先做内容等价预校验**，别直接 `tr -d '\r'` 就提交：
+  `diff <(tr -d '\r' < f) <(git show HEAD:f | tr -d '\r')` → 无输出才说明只差行尾；然后 `tr -d '\r' < f > f.tmp && mv f.tmp f`，提交时 `git diff --numstat` 应是**等量** `N N`（如 `184 184`），行数不变。
 
 ## tokio 写文件
 - `write_all` 返回 ≠ 已落盘（1.52 先拷内部缓冲，真正 write 是 blocking 任务）。写完要立刻可读 → 补 `file.flush().await?`。
