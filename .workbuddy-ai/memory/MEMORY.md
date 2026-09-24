@@ -2,7 +2,9 @@
 
 ## 换行符（务必遵守）
 - `.gitattributes` 给 `*.rs/*.mjs/*.ts/*.tsx/*.toml/*.sql/*.yml/*.yaml` 声明 `text eol=lf`，**故意不用** `* text=auto`（会重写 108 个 CRLF markdown 与 `resources/skill-packages`）。`core.autocrlf=false`。
-- `*.json` 无属性按原始字节存；`src-tauri/tauri.conf.json` 仓库里是 **CRLF**，编辑工具写文件会 CRLF→LF，改一行产生 76 行假差异。改完 `sed -i 's/$/\r/' <file>` 补回，`git diff --numstat` 应为 `1 1`。
+- `*.json` 无属性按原始字节存；`src-tauri/tauri.conf.json` 仓库里是 **CRLF**（76 行全 CRLF），编辑工具写文件会 CRLF→LF，改一行产生 76 行假差异。
+- ⚠️ **别用 `sed -i` 改 CRLF 文件**：本机 Git Bash 的 sed 会把 CR 全部剥掉（实测 76 CR → 0 CR，numstat 从 `1 1` 变 `76 76`）。改用 Python 按字节处理：`open(f,'rb')` → `d.replace(b'\n', b'\r\n')` → `open(f,'wb')`。改前先做等价预校验：`git show HEAD:f` 的字节 `.replace(b'\r\n', b'\n')` 再替换版本号，应与当前文件**逐字节相等**。
+- `src-tauri/Cargo.lock` 带 `diff: unset` + `linguist-generated` 属性 → git 当**二进制**，`git diff --stat` 显示 `Bin N -> N bytes`、numstat 是 `- -`。**这是正常的**，不是写坏。且里面 `version = "0.10.x"` 有多处（`ai-switch` 自己 + `blake2` + `md-5` 等同版本号 crate），改版本号必须带 `name = "ai-switch"` 上下文，别全局替换。
 - 数 CR 只信 `tr -dc '\r' < f | wc -c` 或 `git ls-files --eol`。别用 `grep -c $'\r'`（恒 0）、`grep -qU`（只给是否）。
 - **markdown 无 `eol` 属性 → 编辑工具（Write/Edit）追加会写 CRLF，文件变 `i/mixed w/mixed`**，git 原样存、不会自愈。`git show HEAD:f` 看到的也是混合版，所以「`git show` 里有 CR」不等于提交被污染。
 - **归一化前必须先做内容等价预校验**，别直接 `tr -d '\r'` 就提交：
@@ -37,6 +39,8 @@
 - **镜像仓库 `ijry/ai-switch`**（Docker Hub）。`DOCKERHUB_TOKEN` 是个人 PAT → 推 `ai-switch/*` 会 `insufficient_scope`。默认值散落 9 处，改则一起改。
 - **Windows pwsh 掩盖步骤失败**：退出码取最后一条命令，中间 native 命令失败被吞 → 多命令步骤拆成一命令一步。
 - `gh` 本机未登录；从 GCM 取 `gho_` token。仓库公开，可未认证查 CI。本机 proxy 访问不了 Docker Hub（502），看 CI 日志。
+- ⚠️ **CI 不会替你验代码**：`release.yml` 只校验 tag + 收集发布说明（**不跑任何测试**）；push 触发的只有 `APLG Packages`（只覆盖 packages）。**主应用的检查门只有本地那一套 6 项**。
+- ⚠️ **本地 6 项里有 2 项在本机永远跑不过**（2026-09-25 实测，非代码问题）：`pnpm test:run` 退出码 1 但**用例 0 失败**（vitest 写 `%TEMP%` 缓存 `EPERM`）；`pnpm release:manifest:test` 50/56，6 个失败全是 `spawnSync ... EBUSY`。**根因：沙箱下带管道的 `spawnSync` 对任何程序都 EBUSY**（`spawnSync('cmd.exe',...)` 同样 EBUSY，`stdio:'inherit'` 则正常）。`unset NODE_OPTIONS`、改 `TEMP` 到工作区、`dangerouslyDisableSandbox` 都无效。判读时看**用例通过数**而不是退出码。
 
 ## 本机构建
 - `pnpm` 直接敲坏（shim 把 MSYS 路径交原生 node）。用 corepack：`C:/nvm4w/nodejs/node.exe "C:/nvm4w/nodejs/node_modules/corepack/dist/pnpm.js" ...`。前端测试：`C:/Users/Admin/.workbuddy-ai/binaries/node/versions/22.22.2-2/node.exe node_modules/vitest/vitest.mjs run [file]`。
