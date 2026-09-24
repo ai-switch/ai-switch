@@ -14132,6 +14132,45 @@ data: [DONE]\n\n";
     }
 
     #[test]
+    fn the_connectivity_probe_also_carries_the_accounts_one_m_declaration() {
+        // The failure was read off the *probe*: pressing "test" on the anyrouter
+        // account kept answering "1m 上下文已经全量可用，请启用 1m 上下文后重试"
+        // while real Claude Code traffic through the same account was served.
+        // The probe does not enter through `build_upstream_request` — it uses
+        // `build_upstream_request_with_bridge` — so the declaration has to reach
+        // that entry point as well. The two differ only in the turn reminder and
+        // the return type, and this pins that they agree on the marker, so a
+        // future change cannot fix one path and leave the probe reporting the
+        // account broken.
+        let probe = build_upstream_request_with_bridge(
+            &anthropic_alias_credential("claude-haiku-alias", true),
+            "claude",
+            "/v1/messages",
+            None,
+            HeaderMap::new(),
+            br#"{"model":"claude-haiku-alias","max_tokens":16}"#,
+            TurnReminderMode::Skip,
+        )
+        .expect("probe request");
+
+        let beta = probe
+            .headers
+            .get("anthropic-beta")
+            .and_then(|value| value.to_str().ok())
+            .expect("anthropic-beta header");
+        assert!(
+            beta.contains(client_identity::ANTHROPIC_ONE_M_CONTEXT_BETA),
+            "the probe must declare the 1M window the account can serve: {beta}"
+        );
+        // `?beta=true` is the other half of what the relay reads on `/v1/messages`.
+        assert!(
+            probe.target_url.contains("beta=true"),
+            "the messages endpoint needs the beta query flag too: {}",
+            probe.target_url
+        );
+    }
+
+    #[test]
     fn a_catch_all_row_carries_its_one_m_declaration_to_the_aliases_it_rewrites() {
         // Every alias without a row of its own is served by the catch-all, so its
         // declaration is the one that applies — the same resolution the model
@@ -16504,6 +16543,13 @@ data: [DONE]\n\n";
     /// body array (which cc-switch also sends, as `anthropic_beta`) and adaptive
     /// thinking changed nothing. So its 1M backend was simply unavailable — the
     /// relay demanded a declaration it could not then serve.
+    ///
+    /// Re-checked 2026-09-24: the header form still decides, and the backend now
+    /// serves. Across 130 logged requests to this account the split is exact —
+    /// 71 requests without the marker, all 400 in the same 14-minute window; 42
+    /// with it, all 200. So the 503 above was a transient state of the relay, not
+    /// a property of the declaration: a 503 here is worth re-probing, not a reason
+    /// to stop sending the marker.
     #[tokio::test]
     #[ignore = "diagnostic: set ONE_M_PROBE_URL and ONE_M_PROBE_KEY to hit a live relay"]
     async fn probe_one_m_declaration() {
