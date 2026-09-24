@@ -39,6 +39,8 @@
 - `pnpm` 直接敲坏（shim 把 MSYS 路径交原生 node）。用 corepack：`C:/nvm4w/nodejs/node.exe "C:/nvm4w/nodejs/node_modules/corepack/dist/pnpm.js" ...`。前端测试：`C:/Users/Admin/.workbuddy-ai/binaries/node/versions/22.22.2-2/node.exe node_modules/vitest/vitest.mjs run [file]`。
 - **cargo 测试/构建**：Git Bash 内联设 MSVC + Rust 环境（PATH/LIB/LIBPATH/INCLUDE，详见 2026-09-22 日志），**必须 `dangerouslyDisableSandbox: true`**。`CARGO_TARGET_DIR=target-codex`。
   - `cargo build --release` 随机 `os error 5`（杀软干扰）→ **循环重试**，别清 target。重试必须判退出码 `rc=${PIPESTATUS[0]}`，不能只判产物存在。
+  - ⚠️ **沙箱内带 `piped()` 的 spawn 必失败**（`os error 231` ERROR_PIPE_BUSY）→ autocfg 的 std 探测返回 false → indexmap 1.9.3 不 emit `has_std` → schemars 0.8.22 的 `Map<K,V> = IndexMap<K,V>` 报 **E0107**。与 `RUSTC_WRAPPER`/sccache 无关。沙箱自检 `env | grep -q LSBOX_SHMEM_NAME`。
+  - cargo **会缓存并重放构建脚本输出**（只有 `rerun-if-changed=build.rs`，改环境变量不触发重跑）→ 坏结果会一直粘着，必须 `cargo clean -p indexmap`。拿不到非沙箱窗口时的一次性绕过：`cargo clean -p indexmap && CARGO_FEATURE_STD=1 cargo check --lib`（indexmap build.rs 见该变量即跳过探测直接声明 `has_std`），之后普通构建直接复用该健康缓存。
 - 检查服务端编译必须带 `--bin ai-switch-server`，不带会编桌面 `src/main.rs`（`desktop` feature 门控）→ E0425。
 - `bundle.createUpdaterArtifacts: true` 需 `TAURI_SIGNING_PRIVATE_KEY`，未设只产 NSIS 包。
 - Git for Windows `curl` 不认 `/tmp/x`（当 `D:\tmp\x`）；`curl -o` 给相对或 `D:/...`。

@@ -39,10 +39,10 @@ use crate::services::route_failure_scope::is_account_scoped_failure;
 use crate::services::route_model_capability::{
     advertised_model_catalog_entries, catalog_members, codex_effective_context_window,
     codex_reasoning_metadata, effective_context_window_for_upstream, known_upstream_models,
-    model_matches, model_state_key_with_mode, parse_model_capability, parse_model_capability_value,
-    requested_model_from_body, resolve_mapping_target, supports_requested_capability_with_mode,
-    supports_requested_model, CatalogMemberInput, ModelCapability, ModelMatchMode,
-    CODEX_ONE_M_CONTEXT_WINDOW,
+    mapping_declares_one_m_context, model_matches, model_state_key_with_mode,
+    parse_model_capability, parse_model_capability_value, requested_model_from_body,
+    resolve_mapping_target, supports_requested_capability_with_mode, supports_requested_model,
+    CatalogMemberInput, ModelCapability, ModelMatchMode, CODEX_ONE_M_CONTEXT_WINDOW,
 };
 use crate::services::route_pool_model_mode::{
     accepted_prefixes, is_official_model_prefix, split_prefixed_model, PoolModelMode,
@@ -4699,16 +4699,26 @@ fn build_api_upstream_request(
             // Impersonate Claude Code so client-fingerprinting gateways
             // (e.g. agentrouter.org) don't reject us as an unknown client.
             apply_claude_code_identity(headers);
-            // A Codex request wants the 1M window when either:
+            // This request wants the 1M window when any of:
             // - the client signalled it with a `[1M]` model suffix (Claude Code
             //   convention) — that suffix is stripped by the mapping lookup, so it
-            //   survives only in the original inbound body; or
+            //   survives only in the original inbound body;
+            // - the mapping serving it declares `supports_1m`. The declaration is
+            //   per account, while the `[1M]` tag the client sends is written
+            //   pool-wide and is withheld from every account as soon as one of
+            //   them lacks it — so on a mixed pool a tier whose tag was withheld
+            //   reaches a 1M-capable account undeclared, and that upstream answers
+            //   "please enable 1m context and retry". Read the declaration off the
+            //   account the request actually lands on instead;
             // - the resolved upstream model is configured/advertised with a 1M
-            //   context. The catalog promises Codex the full window, so it packs
-            //   up to 1M; without the beta marker Anthropic still caps at 200K and
-            //   the turn dies on a 400. Codex needs no `[1m]` model-name variant —
-            //   the configured/advertised window alone is the signal.
+            //   context (Codex). The catalog promises Codex the full window, so it
+            //   packs up to 1M; without the beta marker Anthropic still caps at
+            //   200K and the turn dies on a 400. Codex needs no `[1m]` model-name
+            //   variant — the configured/advertised window alone is the signal.
             let wants_one_m = client_requested_one_m_context(body)
+                || requested_model_from_body(body).is_some_and(|model| {
+                    mapping_declares_one_m_context(&mappings, &model, model_match_mode)
+                })
                 || (platform == PlatformId::Codex
                     && requested_model_from_body(&rewritten_body)
                         .is_some_and(|m| {
@@ -14075,10 +14085,85 @@ data: [DONE]\n\n";
         assert_eq!(sent["model"], "provider-opus");
     }
 
+    /// One-alias account, with or without the 1M declaration on that alias.
+    fn anthropic_alias_credential(alias: &str, supports_one_m: bool) -> SelectedCredential {
+        let mut mapping = serde_json::json!({"from": alias, "to": "provider-opus"});
+        if supports_one_m {
+            mapping["supports_1m"] = serde_json::json!(true);
+        }
+        let mut credential = anthropic_api_credential();
+        credential.config_json = serde_json::json!({
+            "base_url": "https://api.example.com",
+            "interface_format": "anthropic",
+            "model_mappings": [mapping]
+        })
+        .to_string();
+        credential
+    }
+
+    #[test]
+    fn a_mapping_that_declares_one_m_marks_the_request_without_a_client_suffix() {
+        // The reported failure: the pool withheld the `[1M]` tag from the haiku
+        // pin (one in-pool account did not declare it), so Claude Code sent
+        // `claude-haiku-alias` bare, no beta marker reached the relay, and it
+        // answered "1m 上下文已经全量可用，请启用 1m 上下文后重试" on every
+        // background call. The declaration belongs to the account that serves the
+        // request, so the account's own `supports_1m` has to decide.
+        let (_, headers, body) = build_upstream_request(
+            &anthropic_alias_credential("claude-haiku-alias", true),
+            "claude",
+            "/v1/messages",
+            None,
+            HeaderMap::new(),
+            br#"{"model":"claude-haiku-alias","max_tokens":16}"#,
+        )
+        .expect("haiku request");
+
+        let beta = headers
+            .get("anthropic-beta")
+            .and_then(|value| value.to_str().ok())
+            .expect("anthropic-beta header");
+        assert!(
+            beta.contains(client_identity::ANTHROPIC_ONE_M_CONTEXT_BETA),
+            "the declared 1M window must reach the upstream: {beta}"
+        );
+        let sent: Value = serde_json::from_slice(&body).expect("body json");
+        assert_eq!(sent["model"], "provider-opus");
+    }
+
+    #[test]
+    fn a_catch_all_row_carries_its_one_m_declaration_to_the_aliases_it_rewrites() {
+        // Every alias without a row of its own is served by the catch-all, so its
+        // declaration is the one that applies — the same resolution the model
+        // rewrite uses.
+        let credential = anthropic_alias_credential("claude-model", true);
+        let (_, headers, _) = build_upstream_request(
+            &credential,
+            "claude",
+            "/v1/messages",
+            None,
+            HeaderMap::new(),
+            br#"{"model":"claude-haiku-alias","max_tokens":16}"#,
+        )
+        .expect("catch-all request");
+
+        let beta = headers
+            .get("anthropic-beta")
+            .and_then(|value| value.to_str().ok())
+            .expect("anthropic-beta header");
+        assert!(
+            beta.contains(client_identity::ANTHROPIC_ONE_M_CONTEXT_BETA),
+            "the catch-all's declaration must apply to what it rewrites: {beta}"
+        );
+    }
+
     #[test]
     fn a_plain_model_gets_no_one_m_marker() {
+        // Same request as above against an account that declares nothing: the
+        // marker stays out, so an upstream that cannot serve 1M is never asked
+        // to.
         let (_, headers, _) = build_upstream_request(
-            &anthropic_api_credential(),
+            &anthropic_alias_credential("claude-opus-alias", false),
             "claude",
             "/v1/messages",
             None,
@@ -14093,7 +14178,7 @@ data: [DONE]\n\n";
             .expect("anthropic-beta header");
         assert!(
             !beta.contains(client_identity::ANTHROPIC_ONE_M_CONTEXT_BETA),
-            "a request that did not ask for 1M must not claim it: {beta}"
+            "a mapping that declares no 1M support must not claim it: {beta}"
         );
     }
 

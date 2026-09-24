@@ -230,6 +230,34 @@ pub(crate) fn effective_context_window_for_upstream(
     codex_effective_context_window(declared, stripped)
 }
 
+/// Whether the mapping that will serve this request declares the 1M context
+/// window.
+///
+/// The client's own declaration cannot be the only trigger. Claude Code signals
+/// 1M by tagging the model value it sends, and whether the tag reaches us is
+/// decided for the whole pool at config-write time:
+/// `RouteConfigService::resolve_alias_write` writes `alias[1M]` only when
+/// **every** in-pool account declares the alias, so one account that cannot
+/// serve 1M strips the tag from every request of that tier. A request that then
+/// lands on an account which *can* serve 1M arrives with no declaration at all,
+/// and such an upstream refuses it outright — the relay's "please enable 1m
+/// context and retry".
+///
+/// The mapping's own `supports_1m` is therefore the authoritative signal for the
+/// account the request actually lands on. Resolved exactly like the model
+/// rewrite ([`resolve_mapping_target`]) — specific match first, catch-all last —
+/// so the declaration always belongs to the mapping whose `to` the request is
+/// forwarded with.
+pub(crate) fn mapping_declares_one_m_context(
+    mappings: &[ModelMapping],
+    requested_model: &str,
+    mode: ModelMatchMode,
+) -> bool {
+    specific_mapping_for_request(mappings, requested_model, mode)
+        .or_else(|| mappings.iter().find(|mapping| is_fallback_mapping(mapping)))
+        .is_some_and(|mapping| mapping.supports_1m == Some(true))
+}
+
 pub(crate) fn codex_reasoning_profile(model: &str) -> CodexReasoningProfile {
     match model.trim().to_ascii_lowercase().as_str() {
         "gpt-6-astra" => CodexReasoningProfile {
@@ -1082,9 +1110,10 @@ mod tests {
     use super::{
         alias_for_model_key, catalog_members, codex_default_context_window,
         codex_effective_context_window, codex_reasoning_levels, codex_reasoning_metadata,
-        codex_reasoning_profile, known_upstream_models, model_matches, model_state_key,
-        parse_model_capability, requested_model_from_body, resolve_mapping_target,
-        supports_requested_capability, supports_requested_model, AdvertisedModel,
+        codex_reasoning_profile, known_upstream_models, mapping_declares_one_m_context,
+        model_matches, model_state_key, parse_model_capability, requested_model_from_body,
+        resolve_mapping_target, supports_requested_capability, supports_requested_model,
+        AdvertisedModel,
         CatalogMemberInput, ModelCapability, ModelCatalogMember, ModelMatchMode,
         CODEX_ONE_M_CONTEXT_WINDOW,
     };
@@ -1661,6 +1690,39 @@ mod tests {
                 "upstream={upstream}"
             );
         }
+    }
+
+    #[test]
+    fn the_serving_mapping_owns_the_one_m_declaration() {
+        // The declaration is per account, while the `[1M]` tag the client sends
+        // is written pool-wide and withheld from every account as soon as one of
+        // them lacks it. So the account that actually serves the request has to
+        // be the one whose `supports_1m` decides.
+        let capability = parse_model_capability(
+            r#"{"model_mappings":[{"from":"claude-haiku-alias","to":"upstream-haiku"},{"from":"claude-model","to":"upstream-any","supports_1m":true}]}"#,
+        );
+
+        // The catch-all declares it, so an alias with no row of its own inherits
+        // the declaration.
+        assert!(mapping_declares_one_m_context(
+            &capability.mappings,
+            "claude-not-configured",
+            ModelMatchMode::ClientFacing
+        ));
+        // A row of its own wins over the catch-all — including when it declares
+        // nothing, which is the account that cannot serve 1M.
+        assert!(!mapping_declares_one_m_context(
+            &capability.mappings,
+            "claude-haiku-alias",
+            ModelMatchMode::ClientFacing
+        ));
+        // The `[1M]` suffix is the client's spelling of the same alias, not a
+        // second row: the lookup strips it before matching.
+        assert!(!mapping_declares_one_m_context(
+            &capability.mappings,
+            "claude-haiku-alias[1M]",
+            ModelMatchMode::ClientFacing
+        ));
     }
 
     #[test]

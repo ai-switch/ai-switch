@@ -133,6 +133,16 @@ Bridging handles protocol shape. Several protocol-orthogonal rewrites stack on t
 
 A credential's `model_mappings` applies before bridging: the model name in the body is substituted `from` → `to`. The `gpt-5` you selected in the CLI can become whatever model ID the upstream actually serves, with no CLI config change.
 
+### Declaring the 1M context window
+
+The Claude 1M window has to be declared through `anthropic-beta: context-1m-2025-08-07`, and upstreams disagree on what an undeclared request means: some cap it at 200K, others refuse it outright with `1m 上下文已经全量可用，请启用 1m 上下文后重试`. The proxy adds that header when any of these holds:
+
+- the client tagged the model name with a `[1M]` suffix (the Claude Code convention). The mapping lookup strips the suffix, so the intent can only be read from the original body, before any rewriting;
+- **the account serving the request** has the "1M" box checked on its mapping (`supports_1m`). This one is deliberately per account: the `[1M]` suffix written into the client config is pool-wide, and a single account without the declaration drops the suffix for the whole pool — so the accounts that *can* serve 1M end up receiving an undeclared request;
+- the platform is Codex and the mapping's upstream model is declared or derived as 1M (Codex needs no model-name variant).
+
+A mapping with the box checked also exposes an extra `alias[1m]` variant in the model list.
+
 ### Tool namespace flattening
 
 The Responses protocol lets tools be organized into `namespace` groups; protocols like Chat Completions only have a flat function list. The bridge flattens groups into `namespace__tool` names and carries the mapping in the request context; on the way back it restores the grouped structure from the same table, so the client never notices anything happened.
