@@ -21,7 +21,7 @@ use crate::services::platform_capability_service::PlatformCapabilityService;
 use crate::services::route_model_capability::{
     advertised_model_catalog_entries, catalog_member_inputs, catalog_members,
     client_facing_model_catalog_entries, codex_default_context_window, codex_model_catalog_payload,
-    codex_reasoning_levels, parse_model_capability,
+    normalize_reasoning_levels, parse_model_capability,
 };
 use crate::services::settings_service::SettingsService;
 use directories::BaseDirs;
@@ -581,7 +581,15 @@ impl RouteConfigService {
                 max_output_tokens: CLIENT_MODEL_MAX_OUTPUT_TOKENS,
                 id: model.id,
                 reasoning_levels: if platform == PlatformId::Codex {
-                    codex_reasoning_levels(&model.base_id, model.reasoning_levels.as_deref())
+                    // Write exactly what the account declared, after cleanup —
+                    // no baseline-profile fallback. A model the user gave no
+                    // efforts (audio, image, plain chat) then gets an empty
+                    // list, and the third-party client (ZCode / DSH) omits the
+                    // reasoning control entirely instead of showing an invented
+                    // low/medium/high it cannot honour. The Codex CLI's own
+                    // catalog still fills the profile in via
+                    // `codex_reasoning_levels`, which this deliberately is not.
+                    normalize_reasoning_levels(model.reasoning_levels.as_deref())
                 } else {
                     Vec::new()
                 },
@@ -2177,6 +2185,57 @@ command = "npx"
     }
 
     #[tokio::test]
+    async fn zcode_writes_the_declared_reasoning_levels_verbatim_and_omits_the_block_when_none() {
+        // The third-party ZCode config must mirror the account exactly: a model
+        // that declares efforts gets those efforts (no baseline-profile
+        // padding), and a model that declares none gets no reasoning block at
+        // all — so the client shows a real dropdown or nothing, never an
+        // invented low/medium/high that turns into a bare enable/disable.
+        let fixture = ServiceFixture::new().await;
+        seed_codex_pool_member_with_config(
+            &fixture.pool,
+            &serde_json::json!({
+                "model_mappings": [
+                    { "from": "gpt-5.6-sol", "to": "gpt-5.6-sol", "reasoning_levels": ["medium", "max"] },
+                    { "from": "some-audio-model", "to": "some-audio-model" }
+                ]
+            })
+            .to_string(),
+        )
+        .await;
+
+        RouteConfigService::write_configs_for_home(
+            &fixture.paths,
+            &fixture.pool,
+            &fixture.runtime,
+            BASE_URL,
+            "codex",
+            &fixture.home,
+            Some(&["zcode".to_string()]),
+        )
+        .await
+        .expect("write");
+
+        let raw = tokio::fs::read(fixture.home.join(".zcode/v2/config.json"))
+            .await
+            .expect("read zcode config");
+        let json: Value = serde_json::from_slice(&raw).expect("json");
+        let models = &json["provider"]["ai-switch-codex"]["models"];
+
+        // Declared efforts survive exactly, in order, with no profile padding.
+        assert_eq!(
+            models["gpt-5.6-sol"]["reasoning"]["variants"],
+            serde_json::json!(["medium", "max"])
+        );
+        // No declaration → no reasoning block, so ZCode renders no control.
+        assert!(
+            models["some-audio-model"].get("reasoning").is_none(),
+            "a model with no declared efforts must not get a reasoning block: {}",
+            models["some-audio-model"]
+        );
+    }
+
+    #[tokio::test]
     async fn a_corrupt_zcode_config_does_not_block_the_codex_cli_write() {
         let fixture = ServiceFixture::new().await;
         seed_codex_pool_member(&fixture.pool, "gpt-5.6-sol").await;
@@ -2607,7 +2666,21 @@ model_provider = "ai-switch"
     #[tokio::test]
     async fn deepseek_harness_write_uses_the_configured_custom_path() {
         let fixture = ServiceFixture::new().await;
-        seed_codex_pool_member(&fixture.pool, "gpt-5.6-sol").await;
+        // Declare efforts explicitly: writers now mirror the account verbatim
+        // and no longer pad in a baseline profile, so a mapping with no
+        // reasoning_levels would write no efforts at all.
+        seed_codex_pool_member_with_config(
+            &fixture.pool,
+            &serde_json::json!({
+                "model_mappings": [{
+                    "from": "gpt-5.6-sol",
+                    "to": "gpt-5.6-sol",
+                    "reasoning_levels": ["low", "max"]
+                }]
+            })
+            .to_string(),
+        )
+        .await;
         let custom_path = fixture.home.join("custom-dsh").join("settings.yaml");
         let mut settings = SettingsService::load(&fixture.paths)
             .await

@@ -14,6 +14,7 @@ import {
   getTailscaleStatus,
   getWebServerStatus,
   getWebServiceConfig,
+  getUsageHistoryStorage,
   openRouteProxyHttpsCertificateDirectory,
   regenerateRouteProxyHttpsCertificates,
   reimportRouteProxyRootCa,
@@ -52,6 +53,8 @@ vi.mock("../src/lib/api/client", () => ({
   uninstallRouteProxyRootCa: vi.fn(),
   deleteRouteProxyHttpsCertificates: vi.fn(),
   openRouteProxyHttpsCertificateDirectory: vi.fn(),
+  getUsageHistoryStorage: vi.fn(),
+  compactUsageHistory: vi.fn(),
 }));
 vi.mock("../src/lib/transport", () => ({
   isDesktop: vi.fn(() => true),
@@ -127,6 +130,8 @@ describe("SettingsScreen", () => {
     vi.mocked(uninstallRouteProxyRootCa).mockReset();
     vi.mocked(deleteRouteProxyHttpsCertificates).mockReset();
     vi.mocked(openRouteProxyHttpsCertificateDirectory).mockReset();
+    vi.mocked(getUsageHistoryStorage).mockReset();
+    vi.mocked(getUsageHistoryStorage).mockResolvedValue({ reclaimable_bytes: 0 });
     vi.mocked(createMobilePairing).mockResolvedValue({
       v: 1,
       publicUrl: "https://public.example",

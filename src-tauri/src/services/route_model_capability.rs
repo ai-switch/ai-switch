@@ -259,21 +259,21 @@ pub(crate) fn codex_reasoning_profile(model: &str) -> CodexReasoningProfile {
     }
 }
 
-/// The efforts advertised for one alias: the mapping's own list when it declares
-/// one, else the baseline profile for that model id. Entries are trimmed,
-/// lowercased and deduped so a hand-edited config cannot put `["High","high"]`
-/// in front of the Codex CLI.
+/// Normalizes a declared reasoning-effort list: trim, lowercase, drop empty and
+/// unrecognised entries, and dedupe. Returns exactly what the account declared
+/// (after cleanup) with **no profile fallback** — the caller decides what an
+/// empty result means.
 ///
 /// Unrecognised efforts are dropped rather than passed through. Keeping them
 /// looked like forward compatibility, but nothing downstream can act on one: the
 /// protocol bridges map an effort to a chat `reasoning_effort`, an Anthropic
 /// thinking budget or a Gemini thinking config by exact match and answer `None`
 /// otherwise, which silently strips reasoning from the request. So advertising
-/// `insane` to the Codex CLI let the user select a tier that then quietly did
-/// nothing — or 400ed on the direct Responses path. A genuinely new tier has to
-/// be taught to the bridges first, and then it belongs in this list.
-pub(crate) fn codex_reasoning_levels(model: &str, overrides: Option<&[String]>) -> Vec<String> {
-    let declared = overrides
+/// `insane` let the user select a tier that then quietly did nothing — or 400ed
+/// on the direct Responses path. A genuinely new tier has to be taught to the
+/// bridges first, and then it belongs in `RECOGNISED_REASONING_EFFORTS`.
+pub(crate) fn normalize_reasoning_levels(overrides: Option<&[String]>) -> Vec<String> {
+    overrides
         .map(|levels| {
             let mut seen = HashSet::new();
             levels
@@ -287,7 +287,17 @@ pub(crate) fn codex_reasoning_levels(model: &str, overrides: Option<&[String]>) 
                 })
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// The efforts advertised for one alias in the **Codex CLI's own catalog**: the
+/// mapping's declared list when it has one, else the baseline profile for that
+/// model id. The Codex CLI expects reasoning metadata for every model, so this
+/// keeps the profile fallback. Third-party client configs (ZCode, the DeepSeek
+/// harness) must NOT invent efforts and use [`normalize_reasoning_levels`]
+/// directly instead — see `resolve_client_models`.
+pub(crate) fn codex_reasoning_levels(model: &str, overrides: Option<&[String]>) -> Vec<String> {
+    let declared = normalize_reasoning_levels(overrides);
     if !declared.is_empty() {
         return declared;
     }
@@ -1347,6 +1357,29 @@ mod tests {
         assert_eq!(
             codex_reasoning_levels("gpt-5.6-sol", Some(&declared)),
             vec!["high", "ultra"]
+        );
+    }
+
+    #[test]
+    fn normalize_reasoning_levels_never_falls_back_to_a_profile() {
+        use super::normalize_reasoning_levels;
+        // No declaration and an empty declaration both mean "the account
+        // configured nothing" — the third-party client writer must get an empty
+        // list back so it can omit the reasoning control, not a baseline
+        // low/medium/high the user never asked for.
+        assert!(normalize_reasoning_levels(None).is_empty());
+        assert!(normalize_reasoning_levels(Some(&[])).is_empty());
+        // Cleanup still applies: trim, lowercase, drop unrecognised, dedupe,
+        // preserve declared order.
+        let declared = [
+            " High ".to_string(),
+            "high".to_string(),
+            "insane".to_string(),
+            "low".to_string(),
+        ];
+        assert_eq!(
+            normalize_reasoning_levels(Some(&declared)),
+            vec!["high", "low"]
         );
     }
 
