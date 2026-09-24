@@ -37,11 +37,17 @@
 
 ## 本机构建
 - `pnpm` 直接敲坏（shim 把 MSYS 路径交原生 node）。用 corepack：`C:/nvm4w/nodejs/node.exe "C:/nvm4w/nodejs/node_modules/corepack/dist/pnpm.js" ...`。前端测试：`C:/Users/Admin/.workbuddy-ai/binaries/node/versions/22.22.2-2/node.exe node_modules/vitest/vitest.mjs run [file]`。
-- **cargo 测试/构建**：Git Bash 内联设 MSVC + Rust 环境（PATH/LIB/LIBPATH/INCLUDE，详见 2026-09-22 日志），**必须 `dangerouslyDisableSandbox: true`**。`CARGO_TARGET_DIR=target-codex`。
-  - `cargo build --release` 随机 `os error 5`（杀软干扰）→ **循环重试**，别清 target。重试必须判退出码 `rc=${PIPESTATUS[0]}`，不能只判产物存在。
+- **cargo 测试/构建**：Git Bash 内联设 MSVC + Rust 环境，**必须 `dangerouslyDisableSandbox: true`**。`CARGO_TARGET_DIR=target-codex`。
+  - 现成脚本：`.workbuddy-ai/tmp/rust-test.sh`（gitignore 内，不污染 git；可能被清理，丢了照下面重建）。用法：`cd src-tauri && bash ../.workbuddy-ai/tmp/rust-test.sh test --lib [filter]`。
+  - **MSVC 在 `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`**（注意是 **x86 那个 Program Files**，`Program Files` 下没有）。定位用 `MSYS2_ARG_CONV_EXCL='*' "<x86>/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products '*' -property installationPath`；查 cl.exe 用同工具 `-find 'VC/Tools/MSVC/*/bin/Hostx64/x64/cl.exe'`。当前 toolset `14.44.35207`，SDK `10.0.22621.0`。
+  - **PATH 给 MSVC bin 要用 MSYS 形式**（`/c/Program Files (x86)/...`）；**`LIB`/`INCLUDE`/`LIBPATH` 要用 `cygpath -w` 转 Windows 形式**（`;` 分隔）交给 cl.exe。混用 → `cl.exe: command not found`。`LIB` = `$MSVC/lib/x64;$SDK/Lib/$SDKVER/{ucrt,um}/x64`；`INCLUDE` = `$MSVC/include;$SDK/Include/$SDKVER/{ucrt,um,shared,winrt}`；`LIBPATH` = `$MSVC/lib/x64;$SDK/UnionMetadata/$SDKVER;$SDK/References/$SDKVER`。
+  - **`cargo test --lib` 全量约 2 分钟 → 必须 `run_in_background: true`**。前台会撞 120s 超时被 SIGTERM 掐断，症状是 **stdout 全空 + `Exit Code 1 / Signal SIGTERM`**（看着像环境坏了，其实编译已进行到一半）；把输出重定向到文件再 `tail` 就能看到真相。单测过滤器（如 `test --lib one_m`）也要 ~2 分钟（编译占绝大部分）。
+  - `cargo build --release` 随机 `os error 5`（杀软干扰）→ **循环重试**，别清 target。重试必须判退出码 `rc=${PIPESTATUS[0]}`，不能只判产物存在。该错误出现在 `incremental/*.lock` 删除上时只是 warning，不影响结果。
   - ⚠️ **沙箱内带 `piped()` 的 spawn 必失败**（`os error 231` ERROR_PIPE_BUSY）→ autocfg 的 std 探测返回 false → indexmap 1.9.3 不 emit `has_std` → schemars 0.8.22 的 `Map<K,V> = IndexMap<K,V>` 报 **E0107**。与 `RUSTC_WRAPPER`/sccache 无关。沙箱自检 `env | grep -q LSBOX_SHMEM_NAME`。
   - cargo **会缓存并重放构建脚本输出**（只有 `rerun-if-changed=build.rs`，改环境变量不触发重跑）→ 坏结果会一直粘着，必须 `cargo clean -p indexmap`。拿不到非沙箱窗口时的一次性绕过：`cargo clean -p indexmap && CARGO_FEATURE_STD=1 cargo check --lib`（indexmap build.rs 见该变量即跳过探测直接声明 `has_std`），之后普通构建直接复用该健康缓存。
-- 检查服务端编译必须带 `--bin ai-switch-server`，不带会编桌面 `src/main.rs`（`desktop` feature 门控）→ E0425。
+- 检查服务端编译必须带 `--bin ai-switch-server`，不带会编桌面 `src/main.rs`（`desktop` feature 门控）→ E0425。跑库测试用 `--lib`，同理别带 bin。
+- **`cargo test --lib` 的 `mod tests` 不继承父模块的 `use`** → 新增测试用到父模块已导入的类型（如 `Value`）会报 **E0425 `cannot find type`**，测试模块里自己 `use` 一次。
+- 抓编译错误别用 `... 2>&1 | tail -N`：**warning 会挤掉 `error[...]` 正文**，只剩文件末尾的 warning。定位用 `... 2>&1 | grep -E '^error|^ *--> '`。
 - `bundle.createUpdaterArtifacts: true` 需 `TAURI_SIGNING_PRIVATE_KEY`，未设只产 NSIS 包。
 - Git for Windows `curl` 不认 `/tmp/x`（当 `D:\tmp\x`）；`curl -o` 给相对或 `D:/...`。
 
