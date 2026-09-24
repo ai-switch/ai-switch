@@ -1,8 +1,9 @@
 use super::common::{
-    chat_reasoning_effort, codex_agent_message_as_message, flatten_responses_function_tools,
-    is_droppable_codex_control_item, is_responses_builtin_tool_type, response_tool_name,
-    response_tool_namespace, response_tool_parameters, responses_reasoning_effort,
-    responses_tool_namespaces, ResponsesToolNamespaces,
+    chat_reasoning_effort, codex_agent_message_as_message, first_non_blank,
+    flatten_responses_function_tools, is_droppable_codex_control_item,
+    is_responses_builtin_tool_type, response_tool_name, response_tool_namespace,
+    response_tool_parameters, responses_reasoning_effort, responses_tool_namespaces,
+    tool_call_id_or_fallback, ResponsesToolNamespaces,
 };
 use super::thinking_text::{self, InlineThinkingSplitter, TextSegment};
 use super::TransformedBridgeResponse;
@@ -646,10 +647,7 @@ fn emit_tool_call_delta(
             StreamToolCall {
                 output_index,
                 item_id: format!("fc_{}_{}", sanitize_id(state.response_id()), index),
-                call_id: value
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("call_ai_switch")
+                call_id: tool_call_id_or_fallback(value.get("id").and_then(Value::as_str))
                     .to_string(),
                 ..StreamToolCall::default()
             },
@@ -659,7 +657,17 @@ fn emit_tool_call_delta(
         .tools
         .get_mut(&index)
         .expect("tool call inserted before mutation");
-    if let Some(id) = value.get("id").and_then(Value::as_str) {
+    // Only a non-blank id may replace what an earlier fragment already carried.
+    // Relays differ here: some repeat the header on every fragment, and some send
+    // `"id": ""` on the fragments after the first. Overwriting with the blank
+    // would publish an empty `call_id` — the client has nothing to echo back, and
+    // the next turn's replay is rejected as `function_call call_id is required`.
+    if let Some(id) = value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
         tool.call_id = id.to_string();
     }
     if let Some(function) = value.get("function") {
@@ -912,10 +920,7 @@ fn build_output_items(
         ));
     }
     for (index, tool_call) in tool_calls.iter().enumerate() {
-        let call_id = tool_call
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("call_ai_switch");
+        let call_id = tool_call_id_or_fallback(tool_call.get("id").and_then(Value::as_str));
         let function = tool_call
             .get("function")
             .ok_or_else(|| "Chat tool call is missing function".to_string())?;
@@ -1812,11 +1817,13 @@ fn function_call_to_chat(
     object: &Map<String, Value>,
     tool_namespaces: &ResponsesToolNamespaces,
 ) -> Result<Value, String> {
-    let call_id = object
-        .get("call_id")
-        .or_else(|| object.get("id"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Responses function_call is missing call_id".to_string())?;
+    // A relay may blank `call_id` while the item's own `id` is still intact, so
+    // the empty value has to fall through instead of winning the lookup.
+    let call_id = first_non_blank([
+        object.get("call_id").and_then(Value::as_str),
+        object.get("id").and_then(Value::as_str),
+    ])
+    .ok_or_else(|| "Responses function_call is missing call_id".to_string())?;
     let name = required_string(object, "name", "function_call")?;
     let namespace = object.get("namespace").and_then(Value::as_str);
     // Tools went upstream under their namespace-qualified name. A client that
@@ -1847,11 +1854,11 @@ fn function_call_to_chat(
 }
 
 fn synthetic_tool_call(object: &Map<String, Value>) -> Result<Value, String> {
-    let call_id = object
-        .get("call_id")
-        .or_else(|| object.get("id"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Responses tool call is missing call_id".to_string())?;
+    let call_id = first_non_blank([
+        object.get("call_id").and_then(Value::as_str),
+        object.get("id").and_then(Value::as_str),
+    ])
+    .ok_or_else(|| "Responses tool call is missing call_id".to_string())?;
     let item_type = object.get("type").and_then(Value::as_str).unwrap_or("");
     let name = if item_type == "tool_search_call" {
         "tool_search"
@@ -2632,5 +2639,113 @@ mod tests {
             error.contains("function_call_output is missing call_id"),
             "{error}"
         );
+    }
+
+    /// Relays differ in how they stream tool calls: some repeat the header on
+    /// every fragment, and some blank the `id` after the first. Publishing that
+    /// blank leaves `call_id` empty on the wire, the client has nothing to echo
+    /// back, and the *next* turn replays `"call_id": ""` until a strict
+    /// Responses upstream rejects the whole session with
+    /// `responses function_call call_id is required`.
+    #[test]
+    fn a_blank_tool_call_id_on_a_later_fragment_does_not_erase_the_real_one() {
+        let first = serde_json::json!({
+            "id": "cc-1",
+            "model": "glm-5.3",
+            "choices": [{"index": 0, "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_abc",
+                "type": "function",
+                "function": {"name": "exec", "arguments": "{\"cmd\":"}
+            }]}}]
+        });
+        let second = serde_json::json!({
+            "id": "cc-1",
+            "model": "glm-5.3",
+            "choices": [{"index": 0, "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "",
+                "function": {"arguments": "\"ls\"}"}
+            }]}}]
+        });
+        let body = format!("data: {first}\n\ndata: {second}\n\ndata: [DONE]\n\n");
+
+        let converted = to_responses(200, "text/event-stream", &body);
+        let announced = converted
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+            .find(|event| event["type"] == "response.output_item.added")
+            .expect("the stream must announce the function call");
+
+        assert_eq!(
+            announced["item"]["call_id"], "call_abc",
+            "a later fragment's blank id must not replace the real one: {converted}"
+        );
+    }
+
+    /// The same guard on the non-streaming path, where the relay answers with a
+    /// complete `tool_calls` array whose `id` is blank.
+    #[test]
+    fn a_blank_tool_call_id_in_a_complete_response_falls_back_to_a_usable_id() {
+        let upstream = serde_json::json!({
+            "id": "cc-2",
+            "model": "glm-5.3",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "",
+                        "type": "function",
+                        "function": {"name": "exec", "arguments": "{}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let converted: Value = serde_json::from_str(&to_responses(
+            200,
+            "application/json",
+            &upstream.to_string(),
+        ))
+        .expect("converted body must be JSON");
+
+        let call = converted["output"]
+            .as_array()
+            .expect("output must be an array")
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .expect("a function_call must be emitted");
+        assert_eq!(call["call_id"], "call_ai_switch");
+    }
+
+    /// A replayed `function_call` may carry `"call_id": ""` with its own `id`
+    /// intact. The empty value must fall through to the `id` rather than win the
+    /// lookup, or the output that follows has no id to pair with.
+    #[test]
+    fn a_replayed_function_call_with_a_blank_call_id_uses_its_own_id() {
+        let body = serde_json::json!({
+            "model": "glm-5.3",
+            "input": [
+                {"type": "function_call", "id": "fc_resp_0", "call_id": "", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "", "output": "42"}
+            ]
+        });
+
+        let converted: Value = serde_json::from_slice(
+            &responses_request_to_chat(&serde_json::to_vec(&body).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let tool = converted["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .expect("a tool message must be produced");
+
+        assert_eq!(tool["tool_call_id"], "fc_resp_0");
     }
 }

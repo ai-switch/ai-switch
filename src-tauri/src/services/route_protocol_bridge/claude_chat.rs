@@ -1,4 +1,4 @@
-use super::common::stringify_tool_result_content;
+use super::common::{stringify_tool_result_content, tool_call_id_or_fallback};
 use super::{sse, TransformedBridgeResponse};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -368,10 +368,7 @@ fn chat_message_content_to_anthropic(message: &Value) -> Result<Vec<Value>, Stri
     }
     if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
         for tool_call in tool_calls {
-            let call_id = tool_call
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("call_ai_switch");
+            let call_id = tool_call_id_or_fallback(tool_call.get("id").and_then(Value::as_str));
             let function = tool_call
                 .get("function")
                 .and_then(Value::as_object)
@@ -604,10 +601,7 @@ fn anthropic_sse(
                 )?;
             }
             "tool_use" => {
-                let id = block
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("call_ai_switch");
+                let id = tool_call_id_or_fallback(block.get("id").and_then(Value::as_str));
                 let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
                 let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
                 let partial_json = serde_json::to_string(&input)

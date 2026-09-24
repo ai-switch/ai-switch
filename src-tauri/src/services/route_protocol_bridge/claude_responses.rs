@@ -1,4 +1,4 @@
-use super::common::stringify_tool_result_content;
+use super::common::{stringify_tool_result_content, tool_call_id_or_fallback};
 use super::{sse, TransformedBridgeResponse};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -314,11 +314,11 @@ fn responses_output_to_anthropic_content(value: &Value) -> Result<Vec<Value>, St
                     }
                 }
                 Some("function_call") => {
-                    let call_id = item
-                        .get("call_id")
-                        .or_else(|| item.get("id"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("call_ai_switch");
+                    let call_id = tool_call_id_or_fallback(
+                        item.get("call_id")
+                            .or_else(|| item.get("id"))
+                            .and_then(Value::as_str),
+                    );
                     let name = item.get("name").and_then(Value::as_str).unwrap_or("tool");
                     let arguments = item
                         .get("arguments")
@@ -611,10 +611,7 @@ fn anthropic_sse(
                 )?;
             }
             Some("tool_use") => {
-                let id = block
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("call_ai_switch");
+                let id = tool_call_id_or_fallback(block.get("id").and_then(Value::as_str));
                 let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
                 let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
                 let partial_json = serde_json::to_string(&input)

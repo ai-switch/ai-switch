@@ -239,6 +239,178 @@ pub(super) fn promote_responses_additional_tools(body: &[u8]) -> Result<Option<V
         .map_err(|error| format!("Responses request could not be re-encoded: {error}"))
 }
 
+/// Stand-in `call_id` for a tool call whose upstream never supplied a usable id.
+pub(super) const FALLBACK_TOOL_CALL_ID: &str = "call_ai_switch";
+
+/// The first of `values` that carries a usable id.
+///
+/// A relay may leave `"call_id": ""` while a real `id` sits next to it, so an
+/// empty string has to fall through rather than win the lookup.
+pub(super) fn first_non_blank<'a, I>(values: I) -> Option<&'a str>
+where
+    I: IntoIterator<Item = Option<&'a str>>,
+{
+    values
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+}
+
+/// The tool-call id to publish when the upstream sent a blank or missing one.
+///
+/// Chat-compatible relays differ in how they stream tool calls: some repeat the
+/// header on every fragment, and some send `"id": ""` on the fragments after the
+/// first. An empty string is not an id — publishing it leaves `call_id` blank on
+/// the wire, and the client then has nothing to echo back, so the *next* turn
+/// reaches the upstream with an empty `call_id` and dies on
+/// `responses function_call call_id is required` — or, one bridge earlier, on
+/// `... is missing call_id` when an output can no longer be paired with its call.
+/// See [`repair_blank_call_ids_in_input`] for the replay-side repair.
+pub(super) fn tool_call_id_or_fallback(id: Option<&str>) -> &str {
+    first_non_blank([id]).unwrap_or(FALLBACK_TOOL_CALL_ID)
+}
+
+/// A `function_call` whose `*_output` has not been seen yet.
+struct PendingCallId {
+    call_id: String,
+    /// The client sent a blank `call_id`, so the item's own `id` (or a generated
+    /// one) was substituted. Recorded because it decides what an output carrying
+    /// no id of its own may be matched against — see [`take_pending_call_id`].
+    recovered: bool,
+}
+
+/// Fill in the `call_id`s a client left blank on a replayed Responses turn.
+///
+/// Codex replays the whole transcript on every turn, so one assistant turn that
+/// reached it with `"call_id": ""` poisons the entire session: a strict Responses
+/// upstream rejects every later replay with `function_call call_id is required`,
+/// and the chat / anthropic bridges cannot pair a `*_output` with its call at all
+/// and fail with `... is missing call_id`. The id is rebuilt from the item's own
+/// `id` — Codex stamps a `function_call` with `fc_<response>_<index>`, which is
+/// unique per call and therefore a faithful stand-in.
+///
+/// Returns how many items were repaired, so a caller holding the raw bytes can
+/// keep them when nothing was wrong.
+pub(super) fn repair_blank_call_ids_in_input(input: &mut Value) -> usize {
+    let mut pending: Vec<PendingCallId> = Vec::new();
+    let mut repaired = 0usize;
+    let mut generated = 0usize;
+    match input {
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                repair_call_id_in_item(item, &mut pending, &mut repaired, &mut generated);
+            }
+        }
+        _ => repair_call_id_in_item(input, &mut pending, &mut repaired, &mut generated),
+    }
+    repaired
+}
+
+fn repair_call_id_in_item(
+    item: &mut Value,
+    pending: &mut Vec<PendingCallId>,
+    repaired: &mut usize,
+    generated: &mut usize,
+) {
+    let Some(object) = item.as_object_mut() else {
+        return;
+    };
+    let item_type = object.get("type").and_then(Value::as_str);
+    match item_type {
+        Some("function_call") | Some("custom_tool_call") | Some("tool_search_call") => {
+            // Bind owned strings before touching `object` again: the match
+            // scrutinee below would otherwise keep an immutable borrow alive
+            // across the insert.
+            let explicit = non_blank_str(object.get("call_id")).map(str::to_string);
+            let (call_id, recovered) = match explicit {
+                Some(call_id) => (call_id, false),
+                None => {
+                    *generated += 1;
+                    let call_id = non_blank_str(object.get("id"))
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("{FALLBACK_TOOL_CALL_ID}_{}", *generated));
+                    object.insert("call_id".to_string(), Value::String(call_id.clone()));
+                    *repaired += 1;
+                    (call_id, true)
+                }
+            };
+            pending.push(PendingCallId { call_id, recovered });
+        }
+        // A message starts a fresh turn, so the previous turn's tool round is
+        // over and nothing after it can belong to those calls.
+        Some("message") | Some("agent_message") => pending.clear(),
+        Some("function_call_output")
+        | Some("custom_tool_call_output")
+        | Some("tool_search_output") => {
+            let existing = non_blank_str(object.get("call_id")).map(str::to_string);
+            match existing {
+                Some(call_id) => {
+                    if let Some(index) = pending
+                        .iter()
+                        .position(|entry| entry.call_id == call_id)
+                    {
+                        pending.remove(index);
+                    }
+                }
+                None => {
+                    if let Some(call_id) = take_pending_call_id(pending) {
+                        object.insert("call_id".to_string(), Value::String(call_id));
+                        *repaired += 1;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Claim the `call_id` that an output carrying none of its own belongs to.
+///
+/// `None` means the answer is genuinely ambiguous and the caller must let the
+/// bridge report its own error rather than relabel a tool result.
+fn take_pending_call_id(pending: &mut Vec<PendingCallId>) -> Option<String> {
+    if pending.len() == 1 {
+        return Some(pending.remove(0).call_id);
+    }
+    // Position only carries meaning while no queued call ever had an identity:
+    // the client dropped every `call_id`, so each entry was recovered and the
+    // outputs can only be read in call order. As soon as one call carries a real
+    // id, an anonymous output could belong to any of them, and pairing by
+    // position would attribute one tool's result to another — refuse instead.
+    if !pending.is_empty() && pending.iter().all(|entry| entry.recovered) {
+        return Some(pending.remove(0).call_id);
+    }
+    None
+}
+
+fn non_blank_str(value: Option<&Value>) -> Option<&str> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// [`repair_blank_call_ids_in_input`] over a raw request body.
+///
+/// `Ok(None)` means every `call_id` was already present and the caller can keep
+/// the bytes it had. A body that does not parse is likewise left alone: the
+/// per-dialect converters report malformed requests in their own terms.
+pub(super) fn repair_blank_responses_call_ids(body: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let Ok(mut value) = serde_json::from_slice::<Value>(body) else {
+        return Ok(None);
+    };
+    let Some(input) = value.get_mut("input") else {
+        return Ok(None);
+    };
+    if repair_blank_call_ids_in_input(input) == 0 {
+        return Ok(None);
+    }
+    serde_json::to_vec(&value)
+        .map(Some)
+        .map_err(|error| format!("Responses request could not be re-encoded: {error}"))
+}
+
 /// Stable identity for a tool so the same entry appearing both top-level and in
 /// the carrier is only kept once: `(type, name)`, `(mcp, server_label)`, or the
 /// serialized tool when it has neither.
@@ -623,10 +795,11 @@ mod tests {
     use super::{
         anthropic_thinking_budget, chat_reasoning_effort, codex_agent_message_as_message,
         gemini_thinking_config, is_create_path, is_create_subpath, is_droppable_codex_control_item,
-        promote_responses_additional_tools, responses_tool_namespaces_from_body,
-        stringify_tool_result_content,
+        promote_responses_additional_tools, repair_blank_responses_call_ids,
+        responses_tool_namespaces_from_body, stringify_tool_result_content,
+        tool_call_id_or_fallback,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     /// Binds the advertised effort list to the conversions that have to honour it.
     ///
@@ -959,5 +1132,139 @@ mod tests {
             codex_agent_message_as_message(&json!({"type": "message", "role": "user"})).is_none()
         );
         assert!(codex_agent_message_as_message(&json!({"type": "compaction"})).is_none());
+    }
+
+    #[test]
+    fn a_blank_tool_call_id_is_not_an_id() {
+        assert_eq!(tool_call_id_or_fallback(Some("call_1")), "call_1");
+        assert_eq!(tool_call_id_or_fallback(Some("  call_1  ")), "call_1");
+        assert_eq!(tool_call_id_or_fallback(Some("")), "call_ai_switch");
+        assert_eq!(tool_call_id_or_fallback(Some("   ")), "call_ai_switch");
+        assert_eq!(tool_call_id_or_fallback(None), "call_ai_switch");
+    }
+
+    #[test]
+    fn a_body_whose_call_ids_are_all_present_is_left_byte_exact() {
+        let body = json!({
+            "model": "gpt-5.6",
+            "input": [
+                {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+            ]
+        });
+
+        let repaired = repair_blank_responses_call_ids(&serde_json::to_vec(&body).unwrap())
+            .expect("repair runs");
+        assert!(repaired.is_none(), "nothing was wrong, so no bytes are spent");
+    }
+
+    #[test]
+    fn a_blank_call_id_is_rebuilt_from_the_items_own_id() {
+        let body = json!({
+            "model": "gpt-5.6",
+            "input": [
+                {"type": "function_call", "id": "fc_resp_0", "call_id": "", "name": "read", "arguments": "{}"},
+                {"type": "function_call_output", "id": "fco_1", "call_id": "", "output": "ok"}
+            ]
+        });
+
+        let repaired = repair_blank_responses_call_ids(&serde_json::to_vec(&body).unwrap())
+            .expect("repair runs")
+            .expect("the blank ids are worth rewriting");
+        let repaired: Value = serde_json::from_slice(&repaired).unwrap();
+
+        assert_eq!(repaired["input"][0]["call_id"], "fc_resp_0");
+        assert_eq!(repaired["input"][1]["call_id"], "fc_resp_0");
+    }
+
+    /// The shape that poisoned a real Codex session: two parallel calls, every
+    /// `call_id` blank, and outputs that carry no id of their own to match on.
+    #[test]
+    fn parallel_calls_that_all_lost_their_call_id_are_paired_in_call_order() {
+        let body = json!({
+            "model": "gpt-5.6",
+            "input": [
+                {"type": "function_call", "id": "fc_resp_0", "call_id": "", "name": "exec", "arguments": "{\"cmd\":\"a\"}"},
+                {"type": "function_call", "id": "fc_resp_1", "call_id": "", "name": "exec", "arguments": "{\"cmd\":\"b\"}"},
+                {"type": "function_call_output", "id": "fco_a", "call_id": "", "output": "out-a"},
+                {"type": "function_call_output", "id": "fco_b", "call_id": "", "output": "out-b"}
+            ]
+        });
+
+        let repaired = repair_blank_responses_call_ids(&serde_json::to_vec(&body).unwrap())
+            .expect("repair runs")
+            .expect("the blank ids are worth rewriting");
+        let repaired: Value = serde_json::from_slice(&repaired).unwrap();
+        let input = repaired["input"].as_array().unwrap();
+
+        assert_eq!(input[0]["call_id"], "fc_resp_0");
+        assert_eq!(input[1]["call_id"], "fc_resp_1");
+        assert_eq!(input[2]["call_id"], "fc_resp_0");
+        assert_eq!(input[3]["call_id"], "fc_resp_1");
+    }
+
+    /// The complement of the rule above: once a call *does* carry a real id, an
+    /// anonymous output could belong to any of the queued calls. Rewriting one
+    /// would attribute a tool's result to a different call, so the request is
+    /// left for the bridge to reject.
+    #[test]
+    fn anonymous_output_against_calls_that_kept_their_ids_is_not_guessed() {
+        let body = json!({
+            "model": "gpt-5.6",
+            "input": [
+                {"type": "function_call", "id": "fc_resp_0", "call_id": "call_1", "name": "read", "arguments": "{}"},
+                {"type": "function_call", "id": "fc_resp_1", "call_id": "call_2", "name": "read", "arguments": "{}"},
+                {"type": "function_call_output", "id": "fco_a", "output": "ambiguous"}
+            ]
+        });
+
+        let repaired = repair_blank_responses_call_ids(&serde_json::to_vec(&body).unwrap())
+            .expect("repair runs");
+        assert!(repaired.is_none(), "an ambiguous pairing must not be rewritten");
+    }
+
+    #[test]
+    fn a_call_with_no_id_at_all_still_gets_a_usable_call_id() {
+        let body = json!({
+            "model": "gpt-5.6",
+            "input": [
+                {"type": "function_call", "call_id": "", "name": "read", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "", "output": "ok"}
+            ]
+        });
+
+        let repaired = repair_blank_responses_call_ids(&serde_json::to_vec(&body).unwrap())
+            .expect("repair runs")
+            .expect("the blank ids are worth rewriting");
+        let repaired: Value = serde_json::from_slice(&repaired).unwrap();
+        let input = repaired["input"].as_array().unwrap();
+        let call_id = input[0]["call_id"].as_str().unwrap();
+
+        assert!(!call_id.is_empty());
+        assert_eq!(input[1]["call_id"], call_id);
+    }
+
+    #[test]
+    fn a_message_ends_the_tool_round_so_a_later_output_is_not_matched_across_it() {
+        let body = json!({
+            "model": "gpt-5.6",
+            "input": [
+                {"type": "function_call", "id": "fc_resp_0", "call_id": "", "name": "read", "arguments": "{}"},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]},
+                {"type": "function_call_output", "id": "fco_a", "call_id": "", "output": "stale"}
+            ]
+        });
+
+        let repaired = repair_blank_responses_call_ids(&serde_json::to_vec(&body).unwrap())
+            .expect("repair runs")
+            .expect("only the call is rewritten");
+        let repaired: Value = serde_json::from_slice(&repaired).unwrap();
+        let input = repaired["input"].as_array().unwrap();
+
+        assert_eq!(input[0]["call_id"], "fc_resp_0");
+        assert_eq!(
+            input[2]["call_id"], "",
+            "the output belongs to no call this turn, so it stays blank for the bridge to report"
+        );
     }
 }

@@ -771,7 +771,7 @@ use super::common::{
     anthropic_thinking_budget, codex_agent_message_as_message, flatten_responses_function_tools,
     is_droppable_codex_control_item, is_reasoning_input_item, response_tool_name,
     response_tool_namespace, response_tool_parameters, responses_reasoning_effort,
-    ResponsesToolNamespaces,
+    tool_call_id_or_fallback, ResponsesToolNamespaces,
 };
 use super::{common::parse_base64_data_url, sse, thinking_text, TransformedBridgeResponse};
 use serde_json::{json, Map, Value};
@@ -1645,10 +1645,10 @@ fn anthropic_content_to_responses_output(
                 }));
             }
             Some("tool_use") => {
-                let call_id = item
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("call_ai_switch");
+                // An Anthropic `tool_use` always carries an id, but a blank one is
+                // as unusable as a missing one: the client echoes `call_id` back on
+                // the next turn, and an empty value makes the replay invalid.
+                let call_id = tool_call_id_or_fallback(item.get("id").and_then(Value::as_str));
                 let name = item.get("name").and_then(Value::as_str).unwrap_or("tool");
                 let response_name = response_tool_name(name, tool_namespaces);
                 let arguments =

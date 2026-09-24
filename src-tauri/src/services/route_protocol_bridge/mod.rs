@@ -126,6 +126,13 @@ pub fn prepare_request(
         // see one shape. `None` keeps the caller's bytes as they were.
         let lifted = common::promote_responses_additional_tools(body)?;
         let body = lifted.as_deref().unwrap_or(body);
+        // Same reasoning, one level down: a replayed turn whose `call_id`s are
+        // blank is unusable to every dialect below — the native Responses path
+        // forwards the blank to an upstream that rejects it, and the three
+        // converters cannot pair a `*_output` with its call. Rebuild the ids once
+        // here so no dialect has to carry its own copy of the repair.
+        let repaired = common::repair_blank_responses_call_ids(body)?;
+        let body = repaired.as_deref().unwrap_or(body);
         return match upstream_dialect {
             ApiDialect::OpenAi => Ok(PreparedBridgeRequest {
                 kind: Some(ProtocolBridgeKind::ResponsesToChat),
