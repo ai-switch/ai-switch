@@ -17,6 +17,7 @@ description: AI Switch 如何按请求记录输入/输出/缓存 token 与双币
 | `202607130011_route_credentials.sql` | 增加 `route_credential_id` 列与索引 |
 | `202608060002_route_usage_breakdown.sql` | 增加 6 个拆分列 |
 | `202608200001_route_usage_price_source.sql` | 增加 `price_source`，区分上游实价与本地估算 |
+| `202609270001_usage_request_stats_columns.sql` | 把 `success`、`duration_ms` 提成真实列并回填历史，加请求统计索引 |
 
 拆分列就是 token 与费用的全部来源：
 
@@ -240,11 +241,24 @@ LEFT JOIN usage_events ue
 ```
 
 - **只算 `route_proxy` 与 `route_pool_model_test` 两种来源**，池内单次路由调用不计入。
-- 成功与失败靠 `json_extract(ue.metadata_json, '$.success') = 1` 判定。
+- 成功与失败靠 `success` 列（1 为成功）判定。这一列在写入时从 `metadata_json.success` 提取，历史行由 `202609270001` 迁移回填；老行若从未写过该键则为 `NULL`，聚合里按"非成功"计。
+- 延迟标签（最近一次 / 最近十次均值）读 `duration_ms` 列，同样在写入时从 `metadata_json.duration_ms` 提取。
+- 之所以提成真实列：账号列表对每个 join 行都要取 `success`、`duration_ms`，而同一份 `metadata_json` 还塞着（压缩后的）响应体预览，早先用 `json_extract` 取这俩标量得把整段大 JSON 解析一遍；`usage_events` 从不清理，历史越长列表越慢。`202609270001` 同时加了 `(route_credential_id, source_label, metric_type, created_at)` 索引，让这套聚合走索引而非全表扫描。
 - 成功率 = 成功数 × 100 ÷ 总数；没有请求时为 `NULL`（界面显示 `-`）。
 - **没有时间范围。** 这是账号的全历史累计，不跟着统计面板的时间选择变化。
 
 所以同一个账号，在统计面板里（选"当日"）和在账号列表里看到的请求数很可能不一样——这不是 bug，是两套口径。
+
+## 清理缓存的响应内容
+
+`response_body` / `response_body_br` 是这张表里最占空间的东西，而且从不清理，长期运行后会主导整个数据库文件。既然成功率、耗时、token、价格都已提成独立列，**删掉响应预览不会影响任何统计数字**。
+
+设置页「用量历史的存储 → 清理缓存的响应内容」提供了这个开关：选一个时间范围（7 / 30 / 90 天前，或「全部」），清理该时间点之前所有请求行里的这两个键。清理是分批进行、每批独立事务、可中断可续跑的，只重写 `metadata_json`、不删整行，所以行本身和其余字段都原样保留。
+
+两个前提保证清理不丢东西：
+
+- **`upstream_response_id` 先回填。** 这是代理请求与本机 CLI 会话记录做 merge 的唯一关联键。`202609020003` 之后写入的行在请求时就把它存进了独立列；而更早的旧行只把它藏在响应预览里。启动后有一个一次性后台任务，把旧行预览里的 id 抢救进列，跑在删除之前，所以删预览不会切断关联。
+- **删了不等于文件立刻变小。** 删除只是把这些字节变成 SQLite 的空闲页供后续复用；真正把空间还给文件系统的是「整理数据库」（`VACUUM`）。所以清理会顺带报告清理后可回收的空间，你可以接着点「整理数据库」把它归还。
 
 ## 本机会话用量
 

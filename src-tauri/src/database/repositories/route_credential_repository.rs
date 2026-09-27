@@ -69,31 +69,31 @@ const PAGE_SELECT: &str = "SELECT
     rc.last_failure_message,
     rc.last_failure_response_json,
     COUNT(ue.id) AS request_count,
-    COALESCE(SUM(CASE WHEN json_extract(ue.metadata_json, '$.success') = 1 THEN 1 ELSE 0 END), 0) AS success_count,
-    COUNT(ue.id) - COALESCE(SUM(CASE WHEN json_extract(ue.metadata_json, '$.success') = 1 THEN 1 ELSE 0 END), 0) AS failure_count,
+    COALESCE(SUM(CASE WHEN ue.success = 1 THEN 1 ELSE 0 END), 0) AS success_count,
+    COUNT(ue.id) - COALESCE(SUM(CASE WHEN ue.success = 1 THEN 1 ELSE 0 END), 0) AS failure_count,
     CASE WHEN COUNT(ue.id) = 0 THEN NULL
-         ELSE CAST(COALESCE(SUM(CASE WHEN json_extract(ue.metadata_json, '$.success') = 1 THEN 1 ELSE 0 END), 0) AS REAL) * 100.0 / COUNT(ue.id)
+         ELSE CAST(COALESCE(SUM(CASE WHEN ue.success = 1 THEN 1 ELSE 0 END), 0) AS REAL) * 100.0 / COUNT(ue.id)
     END AS success_rate,
     -- Same latency columns as `list_by_platform`; see the comment there for why they
     -- are subqueries. A reorder answers with a page, so leaving them out here would
     -- blank the latency tags out until the next refetch.
-    (SELECT CAST(json_extract(metadata_json, '$.duration_ms') AS INTEGER)
+    (SELECT duration_ms
        FROM usage_events
       WHERE route_credential_id = rc.id
         AND source_label IN ('route_proxy', 'route_pool_model_test')
         AND metric_type = 'request'
-        AND json_extract(metadata_json, '$.duration_ms') IS NOT NULL
+        AND duration_ms IS NOT NULL
       ORDER BY created_at DESC
       LIMIT 1
     ) AS last_duration_ms,
-    (SELECT AVG(CAST(json_extract(metadata_json, '$.duration_ms') AS REAL))
-       FROM (SELECT metadata_json
+    (SELECT AVG(CAST(duration_ms AS REAL))
+       FROM (SELECT duration_ms
                FROM usage_events
               WHERE route_credential_id = rc.id
                 AND source_label IN ('route_proxy', 'route_pool_model_test')
                 AND metric_type = 'request'
-                AND json_extract(metadata_json, '$.success') = 1
-                AND json_extract(metadata_json, '$.duration_ms') IS NOT NULL
+                AND success = 1
+                AND duration_ms IS NOT NULL
               ORDER BY created_at DESC
               LIMIT 10)
     ) AS avg_recent_duration_ms,
@@ -981,17 +981,17 @@ impl RouteCredentialRepository {
                 rc.last_failure_message,
                 rc.last_failure_response_json,
                 COUNT(ue.id) AS request_count,
-                COALESCE(SUM(CASE WHEN json_extract(ue.metadata_json, '$.success') = 1 THEN 1 ELSE 0 END), 0) AS success_count,
-                COUNT(ue.id) - COALESCE(SUM(CASE WHEN json_extract(ue.metadata_json, '$.success') = 1 THEN 1 ELSE 0 END), 0) AS failure_count,
+                COALESCE(SUM(CASE WHEN ue.success = 1 THEN 1 ELSE 0 END), 0) AS success_count,
+                COUNT(ue.id) - COALESCE(SUM(CASE WHEN ue.success = 1 THEN 1 ELSE 0 END), 0) AS failure_count,
                 CASE WHEN COUNT(ue.id) = 0 THEN NULL
-                     ELSE CAST(COALESCE(SUM(CASE WHEN json_extract(ue.metadata_json, '$.success') = 1 THEN 1 ELSE 0 END), 0) AS REAL) * 100.0 / COUNT(ue.id)
+                     ELSE CAST(COALESCE(SUM(CASE WHEN ue.success = 1 THEN 1 ELSE 0 END), 0) AS REAL) * 100.0 / COUNT(ue.id)
                 END AS success_rate,
-                (SELECT CAST(json_extract(metadata_json, '$.duration_ms') AS INTEGER)
+                (SELECT duration_ms
                    FROM usage_events
                   WHERE route_credential_id = rc.id
                     AND source_label IN ('route_proxy', 'route_pool_model_test')
                     AND metric_type = 'request'
-                    AND json_extract(metadata_json, '$.duration_ms') IS NOT NULL
+                    AND duration_ms IS NOT NULL
                   ORDER BY created_at DESC
                   LIMIT 1
                 ) AS last_duration_ms,
@@ -1002,14 +1002,14 @@ impl RouteCredentialRepository {
                 -- that died on connect reports a duration that says nothing about how
                 -- fast the account answers; `last_duration_ms` keeps them so the most
                 -- recent number is always the most recent request.
-                (SELECT AVG(CAST(json_extract(metadata_json, '$.duration_ms') AS REAL))
-                   FROM (SELECT metadata_json
+                (SELECT AVG(CAST(duration_ms AS REAL))
+                   FROM (SELECT duration_ms
                            FROM usage_events
                           WHERE route_credential_id = rc.id
                             AND source_label IN ('route_proxy', 'route_pool_model_test')
                             AND metric_type = 'request'
-                            AND json_extract(metadata_json, '$.success') = 1
-                            AND json_extract(metadata_json, '$.duration_ms') IS NOT NULL
+                            AND success = 1
+                            AND duration_ms IS NOT NULL
                           ORDER BY created_at DESC
                           LIMIT 10)
                 ) AS avg_recent_duration_ms,
@@ -2380,8 +2380,8 @@ mod tests {
     ) {
         sqlx::query(
             "INSERT INTO usage_events
-             (id, route_credential_id, source_label, metric_type, amount, unit, metadata_json, created_at)
-             VALUES (?, ?, 'route_proxy', 'request', 1, 'count', ?, ?)",
+             (id, route_credential_id, source_label, metric_type, amount, unit, metadata_json, success, duration_ms, created_at)
+             VALUES (?, ?, 'route_proxy', 'request', 1, 'count', ?, ?, ?, ?)",
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(credential_id)
@@ -2390,6 +2390,8 @@ mod tests {
             i32::from(success),
             duration_ms
         ))
+        .bind(i64::from(success))
+        .bind(duration_ms)
         .bind(created_at)
         .execute(pool)
         .await
@@ -2464,11 +2466,12 @@ mod tests {
         crate::database::run_migrations(&pool).await.unwrap();
         let credential = create_api_credential(&pool, "codex", "Untimed").await;
         // A row from before durations were recorded: counted as a request, but it can
-        // neither be the last duration nor enter the average.
+        // neither be the last duration nor enter the average. Post-migration such a
+        // row has `success` backfilled from its metadata and `duration_ms` left NULL.
         sqlx::query(
             "INSERT INTO usage_events
-             (id, route_credential_id, source_label, metric_type, amount, unit, metadata_json, created_at)
-             VALUES (?, ?, 'route_proxy', 'request', 1, 'count', '{\"success\":1}', '2026-09-01T00:00:00Z')",
+             (id, route_credential_id, source_label, metric_type, amount, unit, metadata_json, success, duration_ms, created_at)
+             VALUES (?, ?, 'route_proxy', 'request', 1, 'count', '{\"success\":1}', 1, NULL, '2026-09-01T00:00:00Z')",
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(&credential.id)

@@ -59,9 +59,9 @@ use commands::terminal_commands::{
     list_terminal_sessions, resize_terminal, write_terminal_input,
 };
 use commands::usage_stats_commands::{
-    compact_usage_history, get_model_price_configs, get_session_usage_stats,
-    get_usage_history_storage, get_usage_overview, reload_model_price_overrides,
-    save_model_price_configs,
+    clear_usage_response_bodies, compact_usage_history, get_model_price_configs,
+    get_session_usage_stats, get_usage_history_storage, get_usage_overview,
+    reload_model_price_overrides, save_model_price_configs,
 };
 use commands::web_service_commands::{
     create_mobile_pairing, disconnect_tailscale, get_tailscale_status, get_web_server_status,
@@ -501,6 +501,18 @@ pub fn run() {
                 .await;
             });
 
+            // Lift the upstream response id out of legacy rows' stored previews
+            // and into its own column, so the cache-cleanup feature can later
+            // delete those previews without losing the join to CLI transcripts.
+            // Spawned on Tauri's runtime for the same reason as the live log:
+            // this hook is not inside a Tokio context.
+            let backfill_pool = app.state::<AppState>().inner().pool.clone();
+            tauri::async_runtime::spawn(
+                services::usage_response_id_backfill_service::backfill_upstream_response_ids_after_startup(
+                    backfill_pool,
+                ),
+            );
+
             #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
             {
                 if let Err(err) = app.deep_link().register_all() {
@@ -616,6 +628,7 @@ pub fn run() {
             get_usage_overview,
             get_usage_history_storage,
             compact_usage_history,
+            clear_usage_response_bodies,
             reload_model_price_overrides,
             list_target_apps,
             list_target_config_statuses,

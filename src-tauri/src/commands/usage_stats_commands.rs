@@ -1,5 +1,6 @@
 use crate::app_state::AppState;
 use crate::core::usage_history::{compact_usage_history_core, get_usage_history_storage_core};
+use crate::core::usage_history::{clear_response_bodies_core, ResponseBodyCleanup};
 use crate::core::usage_overview::get_usage_overview_core;
 use crate::core::usage_stats::{
     get_model_price_configs_core, get_session_usage_stats_core, reload_model_price_overrides_core,
@@ -89,6 +90,19 @@ pub async fn compact_usage_history(
     state: State<'_, AppState>,
 ) -> Result<UsageHistoryStorage, ApiError> {
     compact_usage_history_core(&state.pool)
+        .await
+        .map_err(ApiError::from)
+}
+
+/// Delete stored response previews older than `older_than_days`, keeping every
+/// row and statistic. This is the lever that actually bounds the database file;
+/// the space becomes reclaimable and is returned by a follow-up compaction.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn clear_usage_response_bodies(
+    state: State<'_, AppState>,
+    older_than_days: i64,
+) -> Result<ResponseBodyCleanup, ApiError> {
+    clear_response_bodies_core(&state.pool, older_than_days)
         .await
         .map_err(ApiError::from)
 }

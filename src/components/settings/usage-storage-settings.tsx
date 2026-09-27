@@ -1,11 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Database, Loader2, Trash2 } from "lucide-react";
-import { compactUsageHistory, getUsageHistoryStorage } from "../../lib/api/client";
+import { useState } from "react";
+import {
+  clearUsageResponseBodies,
+  compactUsageHistory,
+  getUsageHistoryStorage,
+} from "../../lib/api/client";
 import { formatByteSize } from "../../lib/byteSize";
 import { useI18n } from "../../lib/i18n";
 import { isDesktop } from "../../lib/transport";
 
 const STORAGE_QUERY_KEY = ["usage-history-storage"] as const;
+
+/** The preset "older than" windows the cleanup offers, in days; 0 means all. */
+const CLEANUP_DAY_OPTIONS = [7, 30, 90, 0] as const;
 
 /**
  * Below this, reclaiming costs more than it is worth.
@@ -31,6 +39,7 @@ export function UsageStorageSettings() {
   const desktop = isDesktop();
   const { t } = useI18n();
   const queryClient = useQueryClient();
+  const [cleanupDays, setCleanupDays] = useState<number>(30);
   const storageQuery = useQuery({
     queryKey: STORAGE_QUERY_KEY,
     queryFn: getUsageHistoryStorage,
@@ -42,6 +51,16 @@ export function UsageStorageSettings() {
     mutationFn: compactUsageHistory,
     onSuccess: (result) => {
       queryClient.setQueryData(STORAGE_QUERY_KEY, result);
+    },
+  });
+  const cleanupMutation = useMutation({
+    mutationFn: () => clearUsageResponseBodies(cleanupDays),
+    onSuccess: (result) => {
+      // The cleanup reports the fresh freelist size, so keep the compaction
+      // card's figure in step without an extra round trip.
+      queryClient.setQueryData(STORAGE_QUERY_KEY, {
+        reclaimable_bytes: result.reclaimableBytes,
+      });
     },
   });
 
@@ -105,6 +124,69 @@ export function UsageStorageSettings() {
       {storageQuery.isError || compactMutation.isError ? (
         <p className="text-[11px] font-medium text-red-700">{t("settings.storage.error")}</p>
       ) : null}
+
+      <div className="mt-1 border-t border-stone-200 pt-3">
+        <h4 className="text-[12px] font-semibold text-stone-800">
+          {t("settings.storage.cleanup.title")}
+        </h4>
+        <p className="mt-1 text-[11px] font-medium text-stone-500">
+          {t("settings.storage.cleanup.subtitle")}
+        </p>
+
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <label className="text-[11px] font-medium text-stone-600" htmlFor="cleanup-range">
+            {t("settings.storage.cleanup.rangeLabel")}
+          </label>
+          <select
+            className="rounded-lg border border-stone-200 bg-white px-2 py-1 text-[12px] font-medium text-stone-700 shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            disabled={cleanupMutation.isPending}
+            id="cleanup-range"
+            onChange={(event) => setCleanupDays(Number(event.target.value))}
+            value={cleanupDays}
+          >
+            {CLEANUP_DAY_OPTIONS.map((days) => (
+              <option key={days} value={days}>
+                {t(`settings.storage.cleanup.range.${days}`)}
+              </option>
+            ))}
+          </select>
+
+          <button
+            className="inline-flex w-fit items-center gap-1.5 rounded-xl border border-stone-200 bg-white px-3 py-1.5 text-[12px] font-semibold text-stone-700 shadow-sm motion-control hover:border-stone-300 hover:text-stone-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 disabled:cursor-not-allowed disabled:opacity-55"
+            disabled={cleanupMutation.isPending}
+            onClick={() => cleanupMutation.mutate()}
+            type="button"
+          >
+            {cleanupMutation.isPending ? (
+              <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
+            )}
+            <span>{t("settings.storage.cleanup.action")}</span>
+          </button>
+        </div>
+
+        {cleanupMutation.data ? (
+          cleanupMutation.data.clearedRows > 0 ? (
+            <p className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700">
+              <Check aria-hidden="true" className="h-3 w-3" />
+              {t("settings.storage.cleanup.done", {
+                rows: String(cleanupMutation.data.clearedRows),
+                size: formatByteSize(cleanupMutation.data.reclaimableBytes),
+              })}
+            </p>
+          ) : (
+            <p className="mt-2 text-[11px] font-medium text-stone-500">
+              {t("settings.storage.cleanup.doneNothing")}
+            </p>
+          )
+        ) : null}
+        {cleanupMutation.isError ? (
+          <p className="mt-2 text-[11px] font-medium text-red-700">
+            {t("settings.storage.cleanup.error")}
+          </p>
+        ) : null}
+      </div>
     </div>
   );
 }

@@ -66,6 +66,7 @@ import type {
   TerminalSession,
   UsageOverview,
   UsageHistoryStorage,
+  ResponseBodyCleanup,
   WebServerStatus,
   WebServiceConfig,
   UpdateOfficialAccount,
@@ -262,6 +263,19 @@ export function getUsageHistoryStorage(): Promise<UsageHistoryStorage> {
  */
 export function compactUsageHistory(): Promise<UsageHistoryStorage> {
   return invoke("compact_usage_history");
+}
+
+/**
+ * Delete stored response previews older than `olderThanDays`, keeping every row
+ * and statistic.
+ *
+ * The preview is the largest thing a usage row holds and is never pruned, so
+ * this is what actually bounds the database file. Pass `0` to clear every
+ * preview regardless of age. The freed space becomes reclaimable and is handed
+ * back to the filesystem by a follow-up `compactUsageHistory`.
+ */
+export function clearUsageResponseBodies(olderThanDays: number): Promise<ResponseBodyCleanup> {
+  return invoke("clear_usage_response_bodies", { older_than_days: olderThanDays });
 }
 
 /**

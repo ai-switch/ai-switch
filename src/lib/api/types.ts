@@ -105,6 +105,20 @@ export type UsageHistoryStorage = {
   reclaimable_bytes: number;
 };
 
+/**
+ * What a response-preview cleanup cleared.
+ *
+ * The preview is the largest thing a usage row stores; deleting it changes no
+ * statistic, because those live in their own columns. `clearedRows` is how many
+ * rows were stripped, `freedMetadataBytes` the logical shrink, and
+ * `reclaimableBytes` how much a follow-up compaction could now return to disk.
+ */
+export type ResponseBodyCleanup = {
+  clearedRows: number;
+  freedMetadataBytes: number;
+  reclaimableBytes: number;
+};
+
 export type InterfaceFormat =
   | "openai"
   | "openai-responses"

@@ -59,4 +59,6 @@ pub mod target_service;
 pub mod upstream_response_id;
 pub mod usage_history_compaction_service;
 pub mod usage_overview_service;
+pub mod usage_response_body_cleanup_service;
+pub mod usage_response_id_backfill_service;
 pub mod web_service;

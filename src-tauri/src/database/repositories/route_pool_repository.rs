@@ -11,6 +11,27 @@ use uuid::Uuid;
 
 pub struct RoutePoolRepository;
 
+/// Pull the two request stats the account list reads out of the metadata JSON,
+/// so they can be stored as real columns beside it.
+///
+/// Returns `(success, duration_ms)` as nullable columns. Anything that isn't a
+/// clean value — unparseable JSON, a missing key, a non-numeric duration — maps
+/// to `None`, which is byte-for-byte the pre-migration state the list already
+/// treats as "not a success" / "no timing". `success` is stored as SQLite's
+/// 1/0, matching what `json_extract(..., '$.success')` returned for the boolean
+/// the aggregates compared against `= 1`.
+fn request_stat_columns(metadata_json: &str) -> (Option<i64>, Option<i64>) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(metadata_json) else {
+        return (None, None);
+    };
+    let success = value
+        .get("success")
+        .and_then(serde_json::Value::as_bool)
+        .map(i64::from);
+    let duration_ms = value.get("duration_ms").and_then(serde_json::Value::as_i64);
+    (success, duration_ms)
+}
+
 impl RoutePoolRepository {
     pub async fn migrate_legacy_pool_views(pool: &SqlitePool) -> Result<(), AppError> {
         let mut tx =
@@ -890,10 +911,15 @@ impl RoutePoolRepository {
         metadata_json: &str,
     ) -> Result<(), AppError> {
         let now = Utc::now().to_rfc3339();
+        // Mirror `success`/`duration_ms` into their columns for the request rows
+        // this path also writes (route_pool routing calls come through here).
+        // Token and cost rows carry neither key, so both stay NULL — which is
+        // exactly what the request-only aggregates expect to skip.
+        let (success, duration_ms) = request_stat_columns(metadata_json);
         sqlx::query(
             "INSERT INTO usage_events
-             (id, route_credential_id, source_label, metric_type, amount, unit, metadata_json, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, route_credential_id, source_label, metric_type, amount, unit, metadata_json, success, duration_ms, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(account_id)
@@ -902,6 +928,8 @@ impl RoutePoolRepository {
         .bind(amount)
         .bind(unit)
         .bind(metadata_json)
+        .bind(success)
+        .bind(duration_ms)
         .bind(&now)
         .execute(pool)
         .await
@@ -924,13 +952,22 @@ impl RoutePoolRepository {
         upstream_response_id: Option<&str>,
     ) -> Result<(), AppError> {
         let now = Utc::now().to_rfc3339();
+        // The account list reads these two from real columns now, so lift them
+        // out of the metadata document at write time. Parsing one small object
+        // on the write path is cheap; it spares every list refresh from having
+        // to `json_extract` them out of a blob padded with the response preview.
+        // `metadata_json` stays the source of truth other readers rely on, so a
+        // parse failure or a missing key simply leaves the column NULL — exactly
+        // the state a pre-migration row is in, which the aggregates already read
+        // as "not a success" / "no timing".
+        let (success, duration_ms) = request_stat_columns(metadata_json);
         sqlx::query(
             "INSERT INTO usage_events
              (id, route_credential_id, source_label, metric_type, amount, unit,
               metadata_json, input_tokens, output_tokens, cache_tokens,
               price_usd_micros, price_cny_micros, price_currency, price_source,
-              upstream_response_id, created_at)
-             VALUES (?, ?, ?, 'request', 1, 'count', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              upstream_response_id, success, duration_ms, created_at)
+             VALUES (?, ?, ?, 'request', 1, 'count', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(account_id)
@@ -944,6 +981,8 @@ impl RoutePoolRepository {
         .bind(&usage.price_currency)
         .bind(&usage.price_source)
         .bind(upstream_response_id)
+        .bind(success)
+        .bind(duration_ms)
         .bind(&now)
         .execute(pool)
         .await
@@ -1630,6 +1669,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stats.requests[0].upstream_response_id, None);
+    }
+
+    #[tokio::test]
+    async fn request_event_lifts_success_and_duration_into_columns() {
+        // The account list reads these two from real columns, so the writer has
+        // to populate them from the metadata it is handed — a boolean `success`
+        // as SQLite 1/0, a numeric `duration_ms` verbatim.
+        let pool = crate::database::create_memory_pool().await.unwrap();
+        crate::database::run_migrations(&pool).await.unwrap();
+        let account_id = create_credential(&pool, "claude", "ClaudeOne").await;
+
+        RoutePoolRepository::insert_request_event(
+            &pool,
+            &account_id,
+            "route_proxy",
+            r#"{"success":true,"duration_ms":1234}"#,
+            &RouteUsageBreakdown::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row = sqlx::query("SELECT success, duration_ms FROM usage_events LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<Option<i64>, _>("success"), Some(1));
+        assert_eq!(row.get::<Option<i64>, _>("duration_ms"), Some(1234));
+    }
+
+    #[tokio::test]
+    async fn request_event_columns_are_null_when_metadata_omits_them() {
+        // A metadata object without the keys — or unparseable — leaves both
+        // columns NULL, matching the pre-migration state the aggregates read as
+        // "not a success" / "no timing".
+        let pool = crate::database::create_memory_pool().await.unwrap();
+        crate::database::run_migrations(&pool).await.unwrap();
+        let account_id = create_credential(&pool, "claude", "ClaudeOne").await;
+
+        RoutePoolRepository::insert_request_event(
+            &pool,
+            &account_id,
+            "route_proxy",
+            r#"{"status":200}"#,
+            &RouteUsageBreakdown::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row = sqlx::query("SELECT success, duration_ms FROM usage_events LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<Option<i64>, _>("success"), None);
+        assert_eq!(row.get::<Option<i64>, _>("duration_ms"), None);
     }
 
     #[tokio::test]

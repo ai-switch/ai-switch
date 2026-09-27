@@ -17,6 +17,7 @@ All usage lands in the `usage_events` table. The table itself dates from an earl
 | `202607130011_route_credentials.sql` | Added the `route_credential_id` column and its index |
 | `202608060002_route_usage_breakdown.sql` | Added six breakdown columns |
 | `202608200001_route_usage_price_source.sql` | Added `price_source`, separating a real upstream price from a local estimate |
+| `202609270001_usage_request_stats_columns.sql` | Promoted `success` and `duration_ms` to real columns, backfilled history, and added a request-stats index |
 
 Those breakdown columns are the entire source of token and cost data:
 
@@ -236,11 +237,24 @@ LEFT JOIN usage_events ue
 ```
 
 - **Only the `route_proxy` and `route_pool_model_test` sources count**; single in-pool routing calls do not.
-- Success versus failure is decided by `json_extract(ue.metadata_json, '$.success') = 1`.
+- Success versus failure is decided by the `success` column (1 means success). It is lifted from `metadata_json.success` at write time; history was backfilled by migration `202609270001`, and a legacy row that never wrote the key stays `NULL`, which the aggregate reads as "not a success".
+- The latency tags (last request / mean of the last ten) read the `duration_ms` column, likewise lifted from `metadata_json.duration_ms` at write time.
+- Why real columns: the account list reads `success` and `duration_ms` for every joined row, yet that same `metadata_json` also carries the (compressed) response-body preview, so `json_extract` used to parse a large blob just to pull two scalars. `usage_events` is never pruned, so the list only ever got slower. `202609270001` also adds a `(route_credential_id, source_label, metric_type, created_at)` index so this aggregation seeks the index instead of scanning the whole table.
 - Success rate = successes × 100 ÷ total; with no requests it is `NULL` (the UI shows `-`).
 - **There is no time range.** This is the account's full history, and it does not follow the stats panel's range selector.
 
 So for the same account, the request count on the stats panel (with "Today" selected) and the one on the account list are very likely to differ. That is not a bug; they are two different definitions.
+
+## Clearing cached response bodies
+
+`response_body` / `response_body_br` is the largest thing this table stores, and it is never pruned, so on a long-lived install it dominates the file. Since success rate, latency, tokens, and price were all lifted into their own columns, **deleting the response preview changes no statistic**.
+
+Settings → "Usage history storage → Clear cached response bodies" is that switch: pick a range (older than 7 / 30 / 90 days, or "All") and it strips those two keys from every request row before that point. Cleanup runs in batches, each in its own transaction, resumable and interruptible; it only rewrites `metadata_json` and never deletes a row, so the row and its other fields stay intact.
+
+Two preconditions keep cleanup lossless:
+
+- **`upstream_response_id` is backfilled first.** It is the sole join key between a proxied request and the local CLI transcript. Rows written since `202609020003` store it in its own column at request time; older rows only had it inside the preview. A one-time startup task lifts that id from legacy previews into the column, running before any deletion, so clearing previews never severs the join.
+- **Deleting is not the same as shrinking the file.** Deletion turns those bytes into SQLite free pages for reuse; only "Compact the database" (`VACUUM`) returns them to the filesystem. So cleanup reports how much space is now reclaimable, and you can follow it with the compaction button to hand it back.
 
 ## Local session usage
 

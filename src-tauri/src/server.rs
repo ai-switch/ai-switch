@@ -429,6 +429,18 @@ pub async fn run_from_env() -> Result<(), String> {
         });
     }
 
+    // Lift the upstream response id out of legacy rows' stored previews into its
+    // own column, mirroring the desktop app, so the cache-cleanup feature can
+    // later delete those previews without losing the CLI-transcript join.
+    {
+        let pool = state.pool.clone();
+        tokio::spawn(
+            crate::services::usage_response_id_backfill_service::backfill_upstream_response_ids_after_startup(
+                pool,
+            ),
+        );
+    }
+
     // The standalone server composes the route proxy into this listener. Do not
     // restore the desktop service here: it would bind a second port.
 
