@@ -52,6 +52,13 @@
   - `cargo build --release` 随机 `os error 5`（杀软干扰）→ **循环重试**，别清 target。重试必须判退出码 `rc=${PIPESTATUS[0]}`，不能只判产物存在。该错误出现在 `incremental/*.lock` 删除上时只是 warning，不影响结果。
   - ⚠️ **沙箱内带 `piped()` 的 spawn 必失败**（`os error 231` ERROR_PIPE_BUSY）→ autocfg 的 std 探测返回 false → indexmap 1.9.3 不 emit `has_std` → schemars 0.8.22 的 `Map<K,V> = IndexMap<K,V>` 报 **E0107**。与 `RUSTC_WRAPPER`/sccache 无关。沙箱自检 `env | grep -q LSBOX_SHMEM_NAME`。
   - cargo **会缓存并重放构建脚本输出**（只有 `rerun-if-changed=build.rs`，改环境变量不触发重跑）→ 坏结果会一直粘着，必须 `cargo clean -p indexmap`。拿不到非沙箱窗口时的一次性绕过：`cargo clean -p indexmap && CARGO_FEATURE_STD=1 cargo check --lib`（indexmap build.rs 见该变量即跳过探测直接声明 `has_std`），之后普通构建直接复用该健康缓存。
+  - ⚠️ **C 盘满会让一批与代码无关的测试假失败**（2026-09-30 实测：C: 320G 只剩 100M）。
+    cargo/rustc 的临时文件落在 `%TEMP%`（默认 C 盘）→ `os error 112`「磁盘空间不足」，
+    症状是一整片 `route_config_service::tests` 全挂（panic 正文里带
+    `"File operation failed", details: Some("磁盘空间不足。 (os error 112)")`），
+    外加零散几个 tailscale / target_service / route_quota。**判读时先 `df -h /c`**，
+    别当成代码回归。`rust-test.sh` 已把 `TEMP`/`TMP` 固定到
+    `.workbuddy-ai/tmp/rtemp`（D 盘），修好后再跑即 0 failed。
 - 检查服务端编译必须带 `--bin ai-switch-server`，不带会编桌面 `src/main.rs`（`desktop` feature 门控）→ E0425。跑库测试用 `--lib`，同理别带 bin。
 - **`cargo test --lib` 的 `mod tests` 不继承父模块的 `use`** → 新增测试用到父模块已导入的类型（如 `Value`）会报 **E0425 `cannot find type`**，测试模块里自己 `use` 一次。
 - 抓编译错误别用 `... 2>&1 | tail -N`：**warning 会挤掉 `error[...]` 正文**，只剩文件末尾的 warning。定位用 `... 2>&1 | grep -E '^error|^ *--> '`。
