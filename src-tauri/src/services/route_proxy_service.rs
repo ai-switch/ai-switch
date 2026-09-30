@@ -10169,6 +10169,7 @@ mod tests {
                     .expect("proxy");
             let request = json!({
                 "model": "gpt-6-astra", "store": false, "include": ["reasoning.encrypted_content"],
+                "prompt_cache_key": "codex-cli-key",
                 "input": [
                     {"type": "reasoning", "id": "rs_bad", "encrypted_content": "bad", "summary": [{"type": "summary_text", "text": "keep plan"}]},
                     {"type": "message", "id": "msg_1", "role": "user", "content": "continue"},
@@ -10264,7 +10265,10 @@ mod tests {
                     .await
                     .unwrap();
             let request = json!({
-                "model": "gpt-6-astra", "input": [
+                "model": "gpt-6-astra",
+                "include": ["reasoning.encrypted_content"],
+                "prompt_cache_key": "codex-cli-key",
+                "input": [
                     {"type": "item_reference", "id": "fc_foreign"},
                     {"type": "function_call_output", "call_id": "call_1", "output": "42"},
                     {"id": "msg_implicit"}, {"type": null, "id": "rs_implicit"}
@@ -10397,7 +10401,12 @@ mod tests {
                     RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
                         .await
                         .unwrap();
-                let request = json!({"model": "gpt-6-astra", "store": false, "input": [item]});
+                let request = json!({
+                    "model": "gpt-6-astra", "store": false,
+                    "include": ["reasoning.encrypted_content"],
+                    "prompt_cache_key": "codex-cli-key",
+                    "input": [item]
+                });
                 let response = reqwest::Client::new()
                     .post(format!(
                         "{}/v1/responses",
@@ -12563,6 +12572,7 @@ mod tests {
         const VALID: &str = "gAAAAAAAAAAAAQEBAQEBAQEBAQEBAQEBAQICAgICAgICAgICAgICAgIDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw==";
         let request = json!({
             "model": "gpt-6-astra", "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "codex-cli-key",
             "input": [
                 {"type": "reasoning", "id": "rs_foreign", "summary": [], "encrypted_content": VALID},
                 {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},
@@ -12618,6 +12628,7 @@ mod tests {
     fn conservative_cleanup_only_sanitizes_opted_in_native_requests() {
         let request = json!({
             "model": "gpt-6-astra", "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "codex-cli-key",
             "input": [
                 {"type": "reasoning", "summary": [], "encrypted_content": "foreign-history"},
                 {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},

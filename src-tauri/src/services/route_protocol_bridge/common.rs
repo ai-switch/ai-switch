@@ -3,6 +3,94 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) type ResponsesToolNamespaces = BTreeMap<String, String>;
 
+/// The one `include` value New API's Codex channels accept.
+///
+/// Their `/v1/responses` handler validates the request against the Codex CLI's
+/// shape and answers `invalid codex request` (`code: invalid_responses_request`)
+/// unless `include` is exactly `["reasoning.encrypted_content"]` and
+/// `prompt_cache_key` is a non-empty string. Measured against anyrouter
+/// (2026-09-30): an absent `include`, `include: []`, and
+/// `include: ["reasoning.summary"]` are all refused, while a *superset* passes the
+/// gate and then 520s at the relay's origin — so the value has to be exactly this
+/// single entry, not the client's list plus this one.
+pub(super) const CODEX_ENCRYPTED_REASONING_INCLUDE: &str = "reasoning.encrypted_content";
+
+/// Supply the two fields a Codex-shaped Responses request has to carry but no
+/// client except the Codex CLI knows to send.
+///
+/// Both are filled only where the client left nothing to honour: an existing
+/// non-empty `include` or `prompt_cache_key` is the client's own intent — and, for
+/// the key, the one its prompt cache is keyed on — so it is left untouched. A
+/// non-empty `include` the upstream refuses stays refused: replacing it would
+/// silently drop what the client asked for, and merging does not work either (see
+/// [`CODEX_ENCRYPTED_REASONING_INCLUDE`]).
+pub(super) fn ensure_codex_request_shape(object: &mut Map<String, Value>) {
+    if include_is_blank(object.get("include")) {
+        object.insert(
+            "include".to_string(),
+            Value::Array(vec![Value::String(
+                CODEX_ENCRYPTED_REASONING_INCLUDE.to_string(),
+            )]),
+        );
+    }
+
+    if prompt_cache_key_is_blank(object.get("prompt_cache_key")) {
+        let key = prompt_cache_key(object);
+        object.insert("prompt_cache_key".to_string(), Value::String(key));
+    }
+}
+
+/// An absent `include` and an empty one both mean "no extra outputs requested", so
+/// both are the bridge's to fill. Anything else is a request to honour — including
+/// a malformed non-array, which the upstream cannot read and which is therefore
+/// replaced with a shape it can.
+fn include_is_blank(include: Option<&Value>) -> bool {
+    match include {
+        Some(Value::Array(values)) => values.is_empty(),
+        _ => true,
+    }
+}
+
+fn prompt_cache_key_is_blank(key: Option<&Value>) -> bool {
+    match key {
+        Some(Value::String(value)) => value.trim().is_empty(),
+        _ => true,
+    }
+}
+
+/// The `prompt_cache_key` to send when the client did not name one.
+///
+/// The upstream refuses an empty value, so it can never be omitted. Deriving it
+/// from the conversation's opening user turn instead of minting a fresh UUID keeps
+/// it stable across the turns of one conversation — which is what the upstream
+/// prompt cache keys on. A per-request random value would accept the request and
+/// then forfeit every cache hit the CLI's own traffic gets.
+///
+/// Chat clients carry the turn list in `messages`, Responses clients in `input`,
+/// and both spell a turn's role the same way, so one scan covers both dialects.
+fn prompt_cache_key(object: &Map<String, Value>) -> String {
+    use sha2::{Digest, Sha256};
+
+    let opening_turn = ["messages", "input"]
+        .iter()
+        .filter_map(|field| object.get(*field).and_then(Value::as_array))
+        .find_map(|turns| {
+            turns
+                .iter()
+                .find(|turn| turn.get("role").and_then(Value::as_str) == Some("user"))
+        });
+    // A body with no user turn still needs a key; hashing the whole request keeps
+    // the fallback deterministic instead of random.
+    let seed = opening_turn
+        .and_then(|turn| serde_json::to_string(turn).ok())
+        .unwrap_or_else(|| serde_json::to_string(object).unwrap_or_default());
+
+    Sha256::digest(seed.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 pub(super) fn responses_reasoning_effort(object: &Map<String, Value>) -> Option<String> {
     let effort = object
         .get("reasoning")

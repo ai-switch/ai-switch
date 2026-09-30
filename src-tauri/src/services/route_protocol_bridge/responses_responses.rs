@@ -1,6 +1,6 @@
 use super::common::{
-    repair_blank_call_ids_in_input, response_tool_name, response_tool_namespace,
-    ResponsesToolNamespaces,
+    ensure_codex_request_shape, repair_blank_call_ids_in_input, response_tool_name,
+    response_tool_namespace, ResponsesToolNamespaces,
 };
 use super::TransformedBridgeResponse;
 use serde_json::{Map, Value};
@@ -41,6 +41,12 @@ pub(super) fn responses_request_to_responses(body: &[u8]) -> Result<Vec<u8>, Str
     if object.get("store").and_then(Value::as_bool) == Some(false) {
         clear_unstored_reasoning_ids(&mut object);
     }
+
+    // The Codex CLI sends these itself, but any other Responses client on a
+    // codex-platform pool does not — and a New API Codex channel refuses the
+    // request outright without them. A client that already named either one keeps
+    // its own value.
+    ensure_codex_request_shape(&mut object);
 
     serde_json::to_vec(&Value::Object(object))
         .map_err(|error| format!("Could not serialize Responses request: {error}"))
@@ -380,5 +386,88 @@ mod tests {
             converted["input"][2].get("call_id").is_none(),
             "converted={converted}"
         );
+    }
+
+    /// A Responses client that is not the Codex CLI — WorkBuddy and friends —
+    /// sends neither of the two fields a New API Codex channel demands, and the
+    /// channel refuses the request outright without them. The bridge fills both.
+    #[test]
+    fn supplies_the_codex_shape_a_bare_responses_client_cannot_send() {
+        let converted = converted_request(json!({
+            "model": "gpt-6-astra",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}]
+            }]
+        }));
+
+        assert_eq!(
+            converted["include"],
+            json!(["reasoning.encrypted_content"]),
+            "converted={converted}"
+        );
+        assert!(
+            !converted["prompt_cache_key"]
+                .as_str()
+                .expect("prompt_cache_key is a string")
+                .is_empty(),
+            "converted={converted}"
+        );
+    }
+
+    /// The CLI names both itself. `prompt_cache_key` in particular is what the
+    /// upstream prompt cache is keyed on, so overwriting it would forfeit every
+    /// cache hit the client's own traffic gets.
+    #[test]
+    fn leaves_a_clients_own_codex_shape_untouched() {
+        let converted = converted_request(json!({
+            "model": "gpt-6-astra",
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "client-chosen",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}]
+            }]
+        }));
+
+        assert_eq!(converted["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(
+            converted["prompt_cache_key"], "client-chosen",
+            "converted={converted}"
+        );
+    }
+
+    /// The derived key has to be stable across the turns of one conversation, or
+    /// the upstream sees a new cache partition on every request.
+    #[test]
+    fn derives_the_same_key_for_the_same_opening_turn() {
+        let first = converted_request(json!({
+            "model": "gpt-6-astra",
+            "input": [
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "hi"}]},
+                {"type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "hello"}]},
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "more"}]}
+            ]
+        }));
+        let later = converted_request(json!({
+            "model": "gpt-6-astra",
+            "input": [
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "hi"}]},
+                {"type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "hello"}]},
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "more"}]},
+                {"type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "ok"}]}
+            ]
+        }));
+
+        assert_eq!(first["prompt_cache_key"], later["prompt_cache_key"]);
     }
 }

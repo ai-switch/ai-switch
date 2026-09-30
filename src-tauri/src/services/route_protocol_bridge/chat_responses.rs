@@ -6,6 +6,7 @@
 //! speak chat completions are configured for codex-platform pools too, and a
 //! Responses-only relay rejects a chat body outright.
 
+use super::common::ensure_codex_request_shape;
 use super::TransformedBridgeResponse;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -94,6 +95,10 @@ pub(super) fn chat_request_to_responses(body: &[u8]) -> Result<Vec<u8>, String> 
             result.insert("tool_choice".to_string(), converted);
         }
     }
+
+    // The Codex shape fields a chat client cannot send; a Responses-only relay
+    // rejects the bridged body outright without them.
+    ensure_codex_request_shape(&mut result);
 
     serde_json::to_vec(&Value::Object(result))
         .map_err(|error| format!("Could not serialize Responses request: {error}"))
@@ -927,6 +932,72 @@ mod tests {
         assert_eq!(value["max_output_tokens"], 256);
         assert!(value.get("max_tokens").is_none());
         assert_eq!(value["stream"], true);
+    }
+
+    /// New API's Codex channels answer `invalid codex request` unless the body
+    /// carries `include: ["reasoning.encrypted_content"]` and a non-empty
+    /// `prompt_cache_key`. A chat client sends neither, so the bridge supplies
+    /// both or every bridged request against those relays 400s.
+    #[test]
+    fn the_bridged_body_carries_the_codex_shape_new_api_requires() {
+        let body = json!({
+            "model": "gpt-6-astra",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        });
+
+        let converted = chat_request_to_responses(&serde_json::to_vec(&body).unwrap()).unwrap();
+        let value: Value = serde_json::from_slice(&converted).unwrap();
+
+        assert_eq!(value["include"], json!(["reasoning.encrypted_content"]));
+        let key = value["prompt_cache_key"].as_str().unwrap();
+        assert!(!key.is_empty(), "converted={value}");
+    }
+
+    /// The key has to survive the turns of one conversation: the upstream prompt
+    /// cache keys on it, so a value that changed every turn would accept the
+    /// request and then never hit the cache.
+    #[test]
+    fn the_prompt_cache_key_is_stable_across_the_turns_of_one_conversation() {
+        let key_for = |messages: Value| {
+            let body = json!({"model": "gpt-6-astra", "messages": messages});
+            let converted = chat_request_to_responses(&serde_json::to_vec(&body).unwrap()).unwrap();
+            let value: Value = serde_json::from_slice(&converted).unwrap();
+            value["prompt_cache_key"].as_str().unwrap().to_string()
+        };
+
+        let opening = key_for(json!([
+            {"role": "system", "content": "be terse"},
+            {"role": "user", "content": "weather?"}
+        ]));
+        // Same opening turn, one more exchange replayed on top.
+        let later_turn = key_for(json!([
+            {"role": "system", "content": "be terse"},
+            {"role": "user", "content": "weather?"},
+            {"role": "assistant", "content": "18C"},
+            {"role": "user", "content": "and tomorrow?"}
+        ]));
+        let other_conversation = key_for(json!([
+            {"role": "system", "content": "be terse"},
+            {"role": "user", "content": "summarise this file"}
+        ]));
+
+        assert_eq!(opening, later_turn);
+        assert_ne!(opening, other_conversation);
+    }
+
+    /// The upstream refuses an empty key, so a request with no user turn at all
+    /// still has to come out with one.
+    #[test]
+    fn a_request_without_a_user_turn_still_gets_a_prompt_cache_key() {
+        let body = json!({"model": "gpt-6-astra", "messages": [
+            {"role": "system", "content": "be terse"}
+        ]});
+
+        let converted = chat_request_to_responses(&serde_json::to_vec(&body).unwrap()).unwrap();
+        let value: Value = serde_json::from_slice(&converted).unwrap();
+
+        assert!(!value["prompt_cache_key"].as_str().unwrap().is_empty());
     }
 
     /// DeepSeek's native Responses endpoint rejects replayed tool history when

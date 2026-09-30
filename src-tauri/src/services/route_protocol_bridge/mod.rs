@@ -542,9 +542,26 @@ mod tests {
                 assert_eq!(prepared.kind, None, "unexpected bridge for {path}");
             }
             if platform == PlatformId::Codex && dialect == ApiDialect::OpenAiResponses {
+                // The Responses sanitation bridge keeps every field the client
+                // sent and adds only the two Codex-shape fields a New API Codex
+                // channel demands; see `common::ensure_codex_request_shape`.
+                let sent: Value = serde_json::from_slice(body).unwrap();
+                let sanitized: Value = serde_json::from_slice(&prepared.body).unwrap();
+                for (key, value) in sent.as_object().expect("request object") {
+                    assert_eq!(
+                        sanitized.get(key),
+                        Some(value),
+                        "the bridge dropped or changed `{key}` for {path}"
+                    );
+                }
                 assert_eq!(
-                    serde_json::from_slice::<Value>(&prepared.body).unwrap(),
-                    serde_json::from_slice::<Value>(body).unwrap()
+                    sanitized["include"],
+                    json!(["reasoning.encrypted_content"]),
+                    "expected the Codex include for {path}"
+                );
+                assert!(
+                    !sanitized["prompt_cache_key"].as_str().unwrap().is_empty(),
+                    "expected a prompt_cache_key for {path}"
                 );
             } else {
                 assert_eq!(prepared.body, body);
