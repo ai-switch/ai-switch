@@ -1,12 +1,16 @@
 use crate::error::AppError;
 use chrono::Utc;
 use sha2::{Digest, Sha384};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::SqlitePool;
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions,
+    SqliteSynchronous,
+};
+use sqlx::{Connection, SqlitePool};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 pub mod repositories;
 
@@ -57,7 +61,16 @@ pub async fn create_pool(database_file: &Path) -> Result<SqlitePool, AppError> {
             recoverable: false,
         })?
         .create_if_missing(true)
-        .foreign_keys(true);
+        .foreign_keys(true)
+        // WAL keeps committed transactions recoverable after a power loss:
+        // writes land in the `-wal` sidecar first and only merge into the main
+        // file at checkpoint, so a crash can never leave a half-written page in
+        // the main database (issue #17). `synchronous=NORMAL` is the pairing
+        // SQLite documents as corruption-safe under WAL, and the busy timeout
+        // keeps the connection pool from erroring out on write contention.
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5));
 
     SqlitePoolOptions::new()
         .max_connections(5)
@@ -129,6 +142,15 @@ pub async fn open_migrated_pool(
     backups_dir: &Path,
 ) -> Result<SqlitePool, AppError> {
     let pool = create_pool(database_file).await?;
+
+    // Catch page-level corruption from a non-normal shutdown (issue #17) before
+    // migrations touch anything. Running migrations against a corrupt file fails
+    // opaquely at best and scatters damage at worst, so recover first.
+    if let Err(corruption) = check_integrity(&pool).await {
+        pool.close().await;
+        return recover_from_corruption(database_file, backups_dir, corruption).await;
+    }
+
     match run_migrations(&pool).await {
         Ok(()) => restore_quarantined_database(pool, database_file, backups_dir).await,
         Err(err) if is_recoverable_migration_conflict(&err) => {
@@ -153,6 +175,285 @@ pub async fn open_migrated_pool(
             restore_quarantined_database(pool, database_file, backups_dir).await
         }
         Err(err) => Err(err),
+    }
+}
+
+/// Run `PRAGMA quick_check` and fail unless the database reports `ok`.
+///
+/// `quick_check` is `integrity_check` minus the slower index verification, so it
+/// still catches the page-level damage a crash leaves behind — second references
+/// to a page, rowids out of order, orphaned pages (issue #17) — in a fraction of
+/// the time a full scan would take.
+async fn check_integrity(pool: &SqlitePool) -> Result<(), AppError> {
+    let rows: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
+        .fetch_all(pool)
+        .await
+        .map_err(|err| AppError::Database {
+            code: "database.integrity_check_failed",
+            message: "Could not run PRAGMA quick_check".to_string(),
+            details: Some(err.to_string()),
+            recoverable: false,
+        })?;
+    // A clean database yields exactly one row, "ok". Anything else — a second
+    // row, or a message like "database disk image is malformed" — is corruption.
+    if rows.len() == 1 && rows[0].eq_ignore_ascii_case("ok") {
+        Ok(())
+    } else {
+        Err(AppError::Database {
+            code: "database.corrupt",
+            message: "SQLite reports the local database is corrupt.".to_string(),
+            details: Some(rows.join("\n")),
+            recoverable: false,
+        })
+    }
+}
+
+/// Recover from a corrupt database by salvaging whatever rows survive into a
+/// fresh file, then parking the original under `backups/` and promoting the
+/// salvage.
+///
+/// Page-level corruption from a crash is usually confined to the table being
+/// written at the moment of power loss (issue #17: `usage_events`). The account
+/// and credential tables earlier in the file are typically still readable, so a
+/// row-by-row copy into a clean database recovers them — exactly what the issue
+/// reporter did by hand.
+async fn recover_from_corruption(
+    database_file: &Path,
+    backups_dir: &Path,
+    corruption: AppError,
+) -> Result<SqlitePool, AppError> {
+    let staged = append_suffix(database_file, ".salvage-candidate");
+    let _ = remove_database_files(&staged).await;
+
+    match salvage_database(database_file, &staged).await {
+        Ok(report) if report.created > 0 => {
+            // Bring the salvage up to the current schema before promoting it, so
+            // a salvage that recovered an older schema still opens cleanly.
+            let staged_pool = create_pool(&staged).await?;
+            let migration_outcome = run_migrations(&staged_pool).await;
+            staged_pool.close().await;
+            if migration_outcome.is_err() {
+                let _ = remove_database_files(&staged).await;
+                return Err(preserve_corrupt_original(database_file, &corruption));
+            }
+
+            park_corrupt_database(database_file, backups_dir, &report).await?;
+            rename_database_files(&staged, database_file).await?;
+
+            let pool = create_pool(database_file).await?;
+            restore_quarantined_database(pool, database_file, backups_dir).await
+        }
+        _ => {
+            // Salvage recovered nothing usable. Keep the corrupt original in
+            // place so the user can recover manually — the bytes are intact.
+            let _ = remove_database_files(&staged).await;
+            Err(preserve_corrupt_original(database_file, &corruption))
+        }
+    }
+}
+
+/// Copy every readable table from `source` into a fresh database at `staged`.
+///
+/// Attaches the corrupt source via `ATTACH DATABASE` and recreates schema +
+/// data table by table. A table whose pages are corrupt makes its
+/// `INSERT ... SELECT` fail; that table is skipped and recorded in the report,
+/// but the rest of the copy proceeds.
+#[derive(Debug)]
+struct SalvageReport {
+    created: usize,
+    copied: usize,
+    skipped_schema: Vec<String>,
+    skipped_data: Vec<String>,
+}
+
+async fn salvage_database(source: &Path, staged: &Path) -> Result<SalvageReport, AppError> {
+    let target = SqliteConnectOptions::from_str(&format!("sqlite://{}", staged.display()))
+        .map_err(|err| salvage_error("build staged connection options", err))?
+        .create_if_missing(true)
+        .foreign_keys(false)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(10));
+    // A single connection, not a pool: ATTACH is per-connection, and a pool would
+    // re-establish (or reset) it on every checkout.
+    let mut conn = SqliteConnection::connect_with(&target)
+        .await
+        .map_err(|err| salvage_error("open the staged database", err))?;
+
+    let attach = format!(
+        "ATTACH DATABASE {} AS src",
+        quote_sqlite_literal(&source.display().to_string())
+    );
+    if let Err(err) = sqlx::query(&attach).execute(&mut conn).await {
+        let _ = conn.close().await;
+        return Err(salvage_error("attach the corrupt database for reading", err));
+    }
+
+    let outcome = async {
+        // Recreate schema objects in the staged database, in creation order, so
+        // foreign-key references resolve even though FK enforcement is off.
+        let objects: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT type, name, sql FROM src.sqlite_master \
+             WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' \
+             ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, rowid",
+        )
+        .fetch_all(&mut conn)
+        .await?;
+
+        let mut created = 0usize;
+        let mut skipped_schema = Vec::new();
+        for (_kind, name, sql) in &objects {
+            match sqlx::query(sql).execute(&mut conn).await {
+                Ok(_) => created += 1,
+                Err(_) => skipped_schema.push(name.clone()),
+            }
+        }
+
+        // Preserve the migration ledger so run_migrations is a no-op on the
+        // salvage (or applies only genuinely pending migrations). A missing
+        // ledger is non-fatal: the migrations use CREATE TABLE IF NOT EXISTS.
+        let _: Result<_, sqlx::Error> = sqlx::query(
+            "INSERT INTO main._sqlx_migrations SELECT * FROM src._sqlx_migrations",
+        )
+        .execute(&mut conn)
+        .await;
+
+        // Copy rows table by table. A page-level read failure on one table must
+        // not abort the rest — the accounts live in earlier tables and are what
+        // the user actually needs to recover.
+        let tables: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM main.sqlite_master \
+             WHERE type='table' AND name NOT LIKE 'sqlite_%' \
+             AND name <> '_sqlx_migrations'",
+        )
+        .fetch_all(&mut conn)
+        .await?;
+
+        let mut copied = 0usize;
+        let mut skipped_data = Vec::new();
+        for (name,) in &tables {
+            let stmt = format!("INSERT INTO main.\"{name}\" SELECT * FROM src.\"{name}\"");
+            match sqlx::query(&stmt).execute(&mut conn).await {
+                Ok(_) => copied += 1,
+                Err(_) => skipped_data.push(name.clone()),
+            }
+        }
+
+        Ok::<SalvageReport, sqlx::Error>(SalvageReport {
+            created,
+            copied,
+            skipped_schema,
+            skipped_data,
+        })
+    }
+    .await;
+
+    let _ = sqlx::query("DETACH DATABASE src").execute(&mut conn).await;
+    let _ = conn.close().await;
+
+    outcome.map_err(|err| salvage_error("salvage data from the corrupt database", err))
+}
+
+/// Move a corrupt database and its sidecars into `backups/` under a `.corrupt-`
+/// marker, and leave a note explaining what happened and what was salvaged.
+///
+/// The marker differs from `.migration-conflict-` so these copies are never
+/// picked up by [`restore_quarantined_database`] — a corrupt file is not a
+/// restore candidate.
+async fn park_corrupt_database(
+    database_file: &Path,
+    backups_dir: &Path,
+    report: &SalvageReport,
+) -> Result<(), AppError> {
+    tokio::fs::create_dir_all(backups_dir).await?;
+    let stamp = Utc::now().format("%Y%m%d-%H%M%S");
+    let base_name = database_file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("ai-switch.db");
+
+    for path in database_sidecar_paths(database_file) {
+        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(base_name);
+        let backup_name = format!("{file_name}.corrupt-{stamp}");
+        rename_with_retry(&path, &backups_dir.join(backup_name))
+            .await
+            .map_err(|err| AppError::Filesystem {
+                code: "filesystem.corrupt_quarantine",
+                message: "Could not park the corrupt database file".to_string(),
+                details: Some(format!("{} -> backups/: {err}", path.display())),
+                recoverable: false,
+            })?;
+    }
+
+    let note_path = backups_dir.join(format!("{base_name}.corrupt-{stamp}.txt"));
+    let skipped_schema = if report.skipped_schema.is_empty() {
+        "none".to_string()
+    } else {
+        report.skipped_schema.join(", ")
+    };
+    let skipped_data = if report.skipped_data.is_empty() {
+        "none".to_string()
+    } else {
+        report.skipped_data.join(", ")
+    };
+    let note = format!(
+        "AI Switch detected page-level corruption in this database after an\n\
+         unclean shutdown and recovered what it could into a fresh database.\n\
+         \n\
+         Original database: {base}\n\
+         Timestamp: {stamp}\n\
+         Schema objects recreated: {created}\n\
+         Tables whose data copied cleanly: {copied}\n\
+         Tables whose data could not be read (skipped): {skipped_data}\n\
+         Schema objects that could not be recreated (skipped): {skipped_schema}\n\
+         \n\
+         The original bytes are preserved in this backups/ directory in case\n\
+         you want to attempt a manual recovery.\n",
+        base = database_file.display(),
+        stamp = stamp,
+        created = report.created,
+        copied = report.copied,
+        skipped_data = skipped_data,
+        skipped_schema = skipped_schema,
+    );
+    tokio::fs::write(&note_path, note).await?;
+    Ok(())
+}
+
+/// Surface a fatal error while leaving the corrupt original on disk untouched,
+/// so the user can recover from it manually (the bytes are intact).
+fn preserve_corrupt_original(database_file: &Path, corruption: &AppError) -> AppError {
+    let details = match corruption {
+        AppError::Database { details, .. } => details.clone().unwrap_or_default(),
+        _ => corruption.to_string(),
+    };
+    AppError::Database {
+        code: "database.corrupt",
+        message: "The AI Switch database is corrupt and could not be repaired automatically. \
+                  The original file was left in place so you can recover from it manually."
+            .to_string(),
+        details: Some(format!("{}: {details}", database_file.display())),
+        recoverable: false,
+    }
+}
+
+/// Quote a string as a SQLite single-quoted literal (doubling internal quotes).
+fn quote_sqlite_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn salvage_error(action: &str, err: sqlx::Error) -> AppError {
+    AppError::Database {
+        code: "database.salvage",
+        message: format!("Could not {action}"),
+        details: Some(err.to_string()),
+        recoverable: false,
     }
 }
 
@@ -931,5 +1232,208 @@ mod recovery_tests {
             .await
             .unwrap();
         assert!(super::has_user_data(&pool).await.unwrap());
+    }
+
+    // --- corruption recovery (issue #17) ---
+
+    async fn journal_mode(pool: &SqlitePool) -> String {
+        sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(pool)
+            .await
+            .expect("journal_mode")
+    }
+
+    async fn synchronous_setting(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar("PRAGMA synchronous")
+            .fetch_one(pool)
+            .await
+            .expect("synchronous")
+    }
+
+    async fn insert_usage_event(pool: &SqlitePool, id: &str, payload_bytes: usize) {
+        let metadata = format!("{{\"preview\":\"{}\"}}", "x".repeat(payload_bytes));
+        sqlx::query(
+            "INSERT INTO usage_events (id, source_label, metric_type, amount, unit, metadata_json, created_at)
+             VALUES (?, 'manual', 'request', 1, 'count', ?, '2026-10-02T00:00:00Z')",
+        )
+        .bind(id)
+        .bind(metadata)
+        .execute(pool)
+        .await
+        .expect("insert usage event");
+    }
+
+    // Overwrite one interior B-tree page with 0xFF. A checkpointed database is a
+    // single self-contained file, so an invalid page type byte reliably makes
+    // PRAGMA quick_check report a malformed image, while the earlier pages —
+    // where the accounts live — stay readable. That mirrors issue #17, where the
+    // crash corrupted usage_events but left the account tables intact.
+    async fn corrupt_an_interior_page(database_file: &Path) {
+        let mut bytes = tokio::fs::read(database_file).await.expect("read db");
+        assert!(
+            bytes.len() > 8192,
+            "test database too small to corrupt meaningfully"
+        );
+        let page_size = 4096usize;
+        // Corrupt a page three-quarters into the file: past the schema page and
+        // the small account tables, squarely inside the usage_events data.
+        let start = ((bytes.len() * 3 / 4) / page_size) * page_size;
+        let start = start.max(page_size);
+        let end = (start + page_size).min(bytes.len());
+        for b in &mut bytes[start..end] {
+            *b = 0xFF;
+        }
+        tokio::fs::write(database_file, &bytes)
+            .await
+            .expect("write corrupt db");
+    }
+
+    async fn corrupt_backup_count(backups_dir: &Path) -> usize {
+        let Ok(mut entries) = tokio::fs::read_dir(backups_dir).await else {
+            return 0;
+        };
+        let mut count = 0usize;
+        while let Some(entry) = entries.next_entry().await.expect("backup entry") {
+            if entry.file_name().to_string_lossy().contains(".corrupt-") {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    #[tokio::test]
+    async fn create_pool_enables_wal_with_normal_synchronous() {
+        let dir = tempdir().expect("tempdir");
+        let database_file = dir.path().join("ai-switch.db");
+        let backups_dir = dir.path().join("backups");
+
+        let pool = open_migrated_pool(&database_file, &backups_dir)
+            .await
+            .expect("open");
+
+        // WAL mode is a persistent property of the database file; once set it is
+        // reported on every connection.
+        let mode = journal_mode(&pool).await;
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        // synchronous: 0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA.
+        assert_eq!(
+            synchronous_setting(&pool).await,
+            1,
+            "WAL should pair with NORMAL"
+        );
+    }
+
+    #[tokio::test]
+    async fn quick_check_reports_ok_on_a_healthy_database() {
+        let dir = tempdir().expect("tempdir");
+        let database_file = dir.path().join("ai-switch.db");
+        let backups_dir = dir.path().join("backups");
+
+        let pool = open_migrated_pool(&database_file, &backups_dir)
+            .await
+            .expect("open");
+        insert_account(&pool, "account-healthy").await;
+
+        let result: String = sqlx::query_scalar("PRAGMA quick_check")
+            .fetch_one(&pool)
+            .await
+            .expect("quick_check");
+        assert_eq!(result, "ok");
+    }
+
+    #[tokio::test]
+    async fn salvage_database_copies_schema_data_and_migration_ledger() {
+        let dir = tempdir().expect("tempdir");
+        let source = dir.path().join("source.db");
+        let staged = dir.path().join("staged.db");
+        let backups_dir = dir.path().join("backups");
+
+        let pool = open_migrated_pool(&source, &backups_dir)
+            .await
+            .expect("source open");
+        insert_account(&pool, "account-salvaged").await;
+        insert_usage_event(&pool, "event-1", 32).await;
+        // Checkpoint so the main file holds every committed row before close.
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&pool)
+            .await
+            .expect("checkpoint");
+        pool.close().await;
+
+        let report = super::salvage_database(&source, &staged)
+            .await
+            .expect("salvage");
+        assert!(report.created > 0, "should recreate schema objects: {report:?}");
+        assert!(report.copied > 0, "should copy tables: {report:?}");
+
+        let salvaged = super::create_pool(&staged).await.expect("open staged");
+        assert_eq!(account_count(&salvaged).await, 1);
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM usage_events")
+            .fetch_one(&salvaged)
+            .await
+            .expect("usage count");
+        assert_eq!(events, 1);
+        // The migration ledger travelled with the salvage, so re-running
+        // migrations is a no-op rather than a re-application.
+        super::run_migrations(&salvaged)
+            .await
+            .expect("migrations are a no-op on the salvage");
+    }
+
+    #[tokio::test]
+    async fn corrupt_database_is_salvaged_and_original_is_parked() {
+        let dir = tempdir().expect("tempdir");
+        let database_file = dir.path().join("ai-switch.db");
+        let backups_dir = dir.path().join("backups");
+
+        // One account (early pages) plus a batch of usage_events (later pages) so
+        // the file spans enough pages to corrupt the events without touching the
+        // account.
+        let pool = open_migrated_pool(&database_file, &backups_dir)
+            .await
+            .expect("initial open");
+        insert_account(&pool, "account-to-keep").await;
+        for i in 0..200 {
+            insert_usage_event(&pool, &format!("event-{i}"), 512).await;
+        }
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&pool)
+            .await
+            .expect("checkpoint");
+        pool.close().await;
+        // Drop the WAL sidecars so quick_check reads only the corrupt main file.
+        let _ = tokio::fs::remove_file(&append_suffix(&database_file, "-wal")).await;
+        let _ = tokio::fs::remove_file(&append_suffix(&database_file, "-shm")).await;
+
+        corrupt_an_interior_page(&database_file).await;
+
+        // Sanity-check that the corruption is actually detectable; if it isn't,
+        // the test below would pass for the wrong reason.
+        let probe = super::create_pool(&database_file)
+            .await
+            .expect("corrupt db still opens");
+        let probe_result: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
+            .fetch_all(&probe)
+            .await
+            .expect("quick_check runs");
+        probe.close().await;
+        assert!(
+            !probe_result.iter().any(|r| r.eq_ignore_ascii_case("ok")) || probe_result.len() != 1,
+            "corruption should be detectable by quick_check, got {probe_result:?}"
+        );
+
+        let recovered = open_migrated_pool(&database_file, &backups_dir)
+            .await
+            .expect("recovery should produce a usable database");
+
+        assert_eq!(
+            account_count(&recovered).await,
+            1,
+            "the account on the uncorrupted early pages should survive salvage"
+        );
+        assert!(
+            corrupt_backup_count(&backups_dir).await >= 1,
+            "the corrupt original should be parked under backups/"
+        );
     }
 }
