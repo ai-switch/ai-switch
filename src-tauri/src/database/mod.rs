@@ -983,6 +983,21 @@ mod recovery_tests {
             .expect("account count")
     }
 
+    /// Fold the WAL back into the main database before a test parks the file.
+    ///
+    /// A 0.7.3 quarantine predates WAL, so the artifact it parked was a single
+    /// self-contained `.db`. SQLite does not reliably checkpoint the WAL by the
+    /// time `SqlitePool::close` resolves — on Windows the `rename_with_retry`
+    /// below happens to wait for the file handle, but on macOS the rename
+    /// succeeds immediately and would park a database whose newest rows are
+    /// still in the `-wal`. Checkpointing first makes the test platform-neutral.
+    async fn checkpoint_wal(pool: &SqlitePool) {
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(pool)
+            .await
+            .expect("checkpoint WAL before parking");
+    }
+
     async fn quarantine_file_count(backups_dir: &Path) -> usize {
         // A missing directory is the strongest form of "nothing was
         // quarantined": only quarantine_database_files creates it.
@@ -1050,6 +1065,7 @@ mod recovery_tests {
             .await
             .expect("orphan open");
         insert_account(&orphan_pool, "account-quarantined").await;
+        checkpoint_wal(&orphan_pool).await;
         orphan_pool.close().await;
         let quarantined = backups_dir.join("ai-switch.db.migration-conflict-20260901-193257");
         rename_with_retry(&orphan, &quarantined)
@@ -1107,6 +1123,7 @@ mod recovery_tests {
             .await
             .expect("orphan open");
         insert_account(&orphan_pool, "account-quarantined").await;
+        checkpoint_wal(&orphan_pool).await;
         orphan_pool.close().await;
 
         let seeded = open_migrated_pool(&database_file, &backups_dir)
@@ -1354,10 +1371,7 @@ mod recovery_tests {
         insert_account(&pool, "account-salvaged").await;
         insert_usage_event(&pool, "event-1", 32).await;
         // Checkpoint so the main file holds every committed row before close.
-        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-            .execute(&pool)
-            .await
-            .expect("checkpoint");
+        checkpoint_wal(&pool).await;
         pool.close().await;
 
         let report = super::salvage_database(&source, &staged)
@@ -1396,10 +1410,7 @@ mod recovery_tests {
         for i in 0..200 {
             insert_usage_event(&pool, &format!("event-{i}"), 512).await;
         }
-        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-            .execute(&pool)
-            .await
-            .expect("checkpoint");
+        checkpoint_wal(&pool).await;
         pool.close().await;
         // Drop the WAL sidecars so quick_check reads only the corrupt main file.
         let _ = tokio::fs::remove_file(&append_suffix(&database_file, "-wal")).await;
