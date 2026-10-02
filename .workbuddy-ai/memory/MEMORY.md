@@ -40,7 +40,8 @@
 - **Windows pwsh 掩盖步骤失败**：退出码取最后一条命令，中间 native 命令失败被吞 → 多命令步骤拆成一命令一步。
 - `gh` 本机未登录；从 GCM 取 `gho_` token。仓库公开，可未认证查 CI。本机 proxy 访问不了 Docker Hub（502），看 CI 日志。
 - ✅ **`release.yml` 的 Build 各 job 会跑完整检查**（2026-09-25 核实）：`Typecheck frontend`、`Run frontend tests`、`Test release manifest`、`Run Rust tests`、`Check Rust code`、`Run sidecar tests`、`Check standalone server`、`Build Tauri bundle`。**别只看 `prepare` job 就下结论**（它确实只校验 tag + 收集说明，但检查在 build job 里）。push 触发的 `APLG Packages` 只覆盖 packages。→ 本机跑不过的检查，CI 在 tag 推送后会替你跑一遍。
-- ⚠️ **本地 6 项里有 2 项在本机永远跑不过**（2026-09-25 实测，非代码问题）：`pnpm test:run` 退出码 1 但**用例 0 失败**（vitest 写 `%TEMP%` 缓存 `EPERM`）；`pnpm release:manifest:test` 50/56，6 个失败全是 `spawnSync ... EBUSY`。**根因：沙箱下带管道的 `spawnSync` 对任何程序都 EBUSY**（`spawnSync('cmd.exe',...)` 同样 EBUSY，`stdio:'inherit'` 则正常）。`unset NODE_OPTIONS`、改 `TEMP` 到工作区、`dangerouslyDisableSandbox` 都无效。判读时看**用例通过数**而不是退出码。
+- ⚠️ **本地 6 项里现在只剩 1 项在本机跑不过**（2026-09-30 更新）：`pnpm release:manifest:test` 50/56，6 个失败全是 `spawnSync ... EBUSY`。**根因：沙箱下带管道的 `spawnSync` 对任何程序都 EBUSY**（`spawnSync('cmd.exe',...)` 同样 EBUSY，`stdio:'inherit'` 则正常）。`unset NODE_OPTIONS`、`dangerouslyDisableSandbox` 都无效。判读时看**用例通过数**而不是退出码。
+  - ✅ **`pnpm test:run` 的假失败已修掉**：2026-09-25 时它退出码 1（vitest 写 `%TEMP%` 缓存 `EPERM`，用例 0 失败）。把 `TEMP`/`TMP` 固定到 D 盘后（`release-checks.sh` 已内置），2026-09-30 实测 **RC=0、875 passed / 76 files** —— 那个 EPERM 其实是 **C 盘满**的副作用，不是沙箱限制。
 
 ## 本机构建
 - `pnpm` 直接敲坏（shim 把 MSYS 路径交原生 node）。用 corepack：`C:/nvm4w/nodejs/node.exe "C:/nvm4w/nodejs/node_modules/corepack/dist/pnpm.js" ...`。前端测试：`C:/Users/Admin/.workbuddy-ai/binaries/node/versions/22.22.2-2/node.exe node_modules/vitest/vitest.mjs run [file]`。
