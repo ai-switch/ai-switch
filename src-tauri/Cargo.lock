@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ai-switch"
-version = "0.10.8"
+version = "0.10.9"
 dependencies = [
  "argon2",
  "assert_fs",
