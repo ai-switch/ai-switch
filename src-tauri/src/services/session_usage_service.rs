@@ -603,6 +603,14 @@ fn parse_codex_file(path: &Path) -> ParsedFile {
         // (the response id), and `token_count` events matter. The fourth test
         // finds a `turn_context` that names no model, which would otherwise
         // leave a replayed prefix open; it is only paid for while one is.
+        //
+        // `item_completed` is deliberately absent even though it looks like the
+        // place items moved to: it carries the same item under
+        // `payload.item`, and only the `response_item` copy holds
+        // `encrypted_content` where the upstream id now lives (291 rows against
+        // 0 on a real corpus). Reading it recovered no additional response id
+        // across 41 rollouts and 3518 billable turns, so adding it would only
+        // duplicate the parse.
         if !line.contains("token_count")
             && !line.contains("\"model\"")
             && !line.contains("response_item")
@@ -803,24 +811,91 @@ impl CodexCumulative {
     }
 }
 
-/// The upstream Responses uuid embedded in an assistant `response_item` id.
+/// The upstream Responses uuid carried by an assistant `response_item`.
 ///
-/// `rs_` (reasoning) and `fc_` (function_call) only ever appear in assistant
-/// output. `fco_` is the client's own function_call_output, and a `msg_` on a
-/// user or developer turn is a client-side conversation id — neither joins to a
-/// proxy row, so both are rejected.
+/// Two places carry it, and a rollout needs at least one of them to join to a
+/// proxy row:
+///
+/// * The item id, when Codex writes it with a known prefix. `rs_` (reasoning)
+///   and `fc_` (function_call) only ever appear in assistant output. `fco_` is
+///   the client's own function_call_output, and a `msg_` on a user or developer
+///   turn is a client-side conversation id — neither joins to a proxy row, so
+///   both are rejected.
+/// * `encrypted_content` on a reasoning item, which the Responses API uses to
+///   hand back the upstream item handle for a reasoning blob. Codex records it
+///   verbatim, optionally with a `-<n>` index suffix when one response carried
+///   several reasoning items.
+///
+/// The second form is the load-bearing one for current Codex builds: they emit
+/// reasoning items whose `id` is a locally generated v4 uuid with no prefix at
+/// all, and those match nothing — 0 of 430 such ids on a real corpus. The
+/// prefixed ids still join (727 of 800), but every turn of a session that only
+/// produced unprefixed ones dropped out of the merge and read as unproxied
+/// spend, so both forms are needed.
 fn codex_assistant_response_id(payload: &Value) -> Option<String> {
     let item_type = payload.get("type").and_then(Value::as_str)?;
-    let id = payload.get("id").and_then(Value::as_str)?;
-    let uuid = match item_type {
-        "reasoning" => id.strip_prefix("rs_"),
-        "function_call" => id.strip_prefix("fc_").map(strip_trailing_index),
-        "message" if payload.get("role").and_then(Value::as_str) == Some("assistant") => {
-            id.strip_prefix("msg_")
-        }
+    let prefixed = match item_type {
+        "reasoning" => payload
+            .get("id")
+            .and_then(Value::as_str)?
+            .strip_prefix("rs_"),
+        "function_call" => payload
+            .get("id")
+            .and_then(Value::as_str)?
+            .strip_prefix("fc_")
+            .map(strip_trailing_index),
+        "message" if payload.get("role").and_then(Value::as_str) == Some("assistant") => payload
+            .get("id")
+            .and_then(Value::as_str)?
+            .strip_prefix("msg_"),
         _ => None,
-    }?;
-    (!uuid.trim().is_empty()).then(|| uuid.to_string())
+    };
+    // The prefixed form wins when present: it is the item id the upstream itself
+    // minted, so it needs no shape test and cannot be a client-side uuid.
+    if let Some(id) = prefixed.filter(|id| !id.trim().is_empty()) {
+        return Some(id.to_string());
+    }
+    // Only a reasoning item carries `encrypted_content`, and only there is it
+    // the upstream handle rather than an opaque blob this code cannot read.
+    if item_type != "reasoning" {
+        return None;
+    }
+    encrypted_content_response_id(payload.get("encrypted_content").and_then(Value::as_str)?)
+}
+
+/// Characters in a hyphenated uuid: `8-4-4-4-12`.
+const UUID_LEN: usize = 36;
+
+/// The uuid prefix of an `encrypted_content` value.
+///
+/// Anything that is not a leading dash-free uuid is rejected, which excludes
+/// every other producer of this field: the proxy's own
+/// `ai-switch-anthropic:…` marker and the base64 blobs a Responses-style
+/// provider returns when the item was not routed through this app at all.
+fn encrypted_content_response_id(encrypted: &str) -> Option<String> {
+    let trimmed = encrypted.trim();
+    // `get` rather than indexing: a value shorter than a uuid, or one holding a
+    // multi-byte character inside the first 36 bytes, is not an id.
+    let candidate = trimmed.get(..UUID_LEN)?;
+    let shape_ok = candidate
+        .as_bytes()
+        .iter()
+        .enumerate()
+        .all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            // Uppercase is excluded because no producer writes it, so accepting
+            // it would only ever match nothing.
+            _ => byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase(),
+        });
+    // Whatever follows the uuid must be the optional `-<n>` index, so a longer
+    // base64 blob that merely begins with uuid-shaped characters is not read as
+    // one.
+    let rest = &trimmed[UUID_LEN..];
+    let tail_ok = rest.is_empty()
+        || rest
+            .strip_prefix('-')
+            .is_some_and(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()));
+    (shape_ok && tail_ok).then(|| candidate.to_string())
 }
 
 /// Drop the trailing `_<n>` a function-call id carries (`fc_<uuid>_0`) — but
@@ -1059,6 +1134,107 @@ mod tests {
         assert_eq!(parsed.entries.len(), 1);
         assert_eq!(
             parsed.entries[0].response_id.as_deref(),
+            Some("5d76e101-2615-4e87-8455-72061b36392c")
+        );
+    }
+
+    #[test]
+    fn codex_turn_response_id_falls_back_to_the_encrypted_content_handle() {
+        // Current Codex builds write reasoning items whose `id` is a locally
+        // generated v4 with no prefix, so nothing joins on the id alone. The
+        // upstream handle is in `encrypted_content` instead, with a `-<n>` index
+        // when one response carried several reasoning items. A real rollout of
+        // this shape contributed 929 such handles, of which 436 matched a proxy
+        // row — every one of those turns used to read as unproxied spend.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_jsonl(
+            dir.path(),
+            "rollout.jsonl",
+            &[
+                r#"{"timestamp":"2026-10-02T19:51:50.476Z","type":"turn_context","payload":{"model":"deepseek-v4-flash"}}"#,
+                r#"{"timestamp":"2026-10-02T19:51:50.766Z","type":"response_item","payload":{"type":"reasoning","id":"e34d9c8c-2549-42f2-b07f-ddb454ed7a6a","encrypted_content":"c96a18b7-aaa4-4a74-b482-b2caddb0faab-0"}}"#,
+                &codex_token_count("2026-10-02T19:52:00.000Z", 100, 0, 10),
+            ],
+        );
+
+        let parsed = parse_codex_file(&path);
+
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(
+            parsed.entries[0].response_id.as_deref(),
+            Some("c96a18b7-aaa4-4a74-b482-b2caddb0faab"),
+            "the `-0` index must be dropped so the key matches the proxy row"
+        );
+    }
+
+    #[test]
+    fn codex_encrypted_content_is_read_only_when_it_leads_with_a_uuid() {
+        // Every other producer of this field must stay unreadable, or a turn
+        // joins a proxy row it has nothing to do with.
+        assert_eq!(
+            encrypted_content_response_id("c96a18b7-aaa4-4a74-b482-b2caddb0faab-0"),
+            Some("c96a18b7-aaa4-4a74-b482-b2caddb0faab".to_string())
+        );
+        assert_eq!(
+            encrypted_content_response_id("c96a18b7-aaa4-4a74-b482-b2caddb0faab"),
+            Some("c96a18b7-aaa4-4a74-b482-b2caddb0faab".to_string())
+        );
+        // Leading or trailing whitespace is a transcript artefact, not a
+        // different id.
+        assert_eq!(
+            encrypted_content_response_id("  c96a18b7-aaa4-4a74-b482-b2caddb0faab-12\n"),
+            Some("c96a18b7-aaa4-4a74-b482-b2caddb0faab".to_string())
+        );
+        // This app's own marker on a proxied Anthropic turn.
+        assert_eq!(
+            encrypted_content_response_id("ai-switch-anthropic:abc"),
+            None
+        );
+        // A base64 blob that merely starts with uuid-shaped characters.
+        assert_eq!(
+            encrypted_content_response_id("c96a18b7-aaa4-4a74-b482-b2caddb0faabZ"),
+            None
+        );
+        assert_eq!(encrypted_content_response_id("wbm1:SW50ZXJlc3Q"), None);
+        assert_eq!(encrypted_content_response_id(""), None);
+        assert_eq!(encrypted_content_response_id("not-a-uuid"), None);
+        // Uppercase hex is not what any producer writes, and accepting it would
+        // only ever match nothing.
+        assert_eq!(
+            encrypted_content_response_id("C96A18B7-AAA4-4A74-B482-B2CADDB0FAAB"),
+            None
+        );
+        // Too short to be a uuid.
+        assert_eq!(encrypted_content_response_id("c96a18b7-aaa4"), None);
+    }
+
+    #[test]
+    fn codex_encrypted_content_is_ignored_on_a_non_reasoning_item() {
+        // Only reasoning carries the upstream handle. Anywhere else the same
+        // field is an opaque blob, so a turn must not claim an id from it.
+        let payload = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "id": "5b8c9d0e-1f2a-4c3b-8d7e-6a5b4c3d2e1f",
+            "encrypted_content": "c96a18b7-aaa4-4a74-b482-b2caddb0faab-0",
+        });
+
+        assert_eq!(codex_assistant_response_id(&payload), None);
+    }
+
+    #[test]
+    fn a_prefixed_item_id_wins_over_the_encrypted_content_handle() {
+        // The item id is minted by the upstream itself, so it is the stronger
+        // key: two reasoning items in one response share an `encrypted_content`
+        // uuid but carry distinct `rs_` ids.
+        let payload = serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_5d76e101-2615-4e87-8455-72061b36392c",
+            "encrypted_content": "c96a18b7-aaa4-4a74-b482-b2caddb0faab-0",
+        });
+
+        assert_eq!(
+            codex_assistant_response_id(&payload).as_deref(),
             Some("5d76e101-2615-4e87-8455-72061b36392c")
         );
     }
