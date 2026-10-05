@@ -238,6 +238,38 @@ struct LiveLogState {
     emitter: Option<EventEmitter>,
     /// Present once [`RouteProxyLiveLog::persist_to`] has attached a file.
     sink: Option<mpsc::Sender<String>>,
+    /// Entries the attached writer's queue was too full to accept.
+    dropped_entries: u64,
+    /// Appends the writer attempted and the filesystem refused.
+    append_failures: u64,
+    /// The most recent refusal, verbatim: the error text names the cause.
+    last_append_error: Option<String>,
+    /// The writer task has ended, so nothing reaches disk until a new one is
+    /// attached.
+    writer_lost: bool,
+}
+
+/// Whether the on-disk mirror is actually keeping up.
+///
+/// A mirror that silently stops mirroring is worse than one that is absent: the
+/// file is still there, still plausible, and empty — which reads exactly like
+/// "nothing went wrong" to whoever opens it after the fact. That is how a
+/// fourteen-hour gap in this log went unnoticed. This type is the only way the
+/// failure can announce itself.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct LiveLogHealth {
+    /// A writer is attached. `false` means entries reach the ring but not disk.
+    pub persisting: bool,
+    /// Entries lost to a full queue — the window while a 32 MB segment is
+    /// being compressed and the writer cannot take a line.
+    pub dropped_entries: u64,
+    /// Appends the writer attempted and the filesystem refused.
+    pub append_failures: u64,
+    /// The most recent refusal, kept verbatim.
+    pub last_append_error: Option<String>,
+    /// The writer task has ended, so nothing reaches disk until the next
+    /// attach.
+    pub writer_lost: bool,
 }
 
 #[derive(Clone, Default)]
@@ -280,7 +312,21 @@ impl RouteProxyLiveLog {
             // — the ring keeps the order the UI reads, and the file only has to
             // contain the entries.
             if let Ok(line) = serde_json::to_string(&entry) {
-                let _ = sink.try_send(line);
+                let mut state = self.inner.lock().expect("route proxy live log lock");
+                match sink.try_send(line) {
+                    Ok(()) => {}
+                    // A full queue is the rotation window: the writer is busy
+                    // compressing 32 MB and cannot take a line. The entry is
+                    // gone either way, so at least count it.
+                    Err(mpsc::error::TrySendError::Full(_)) => state.dropped_entries += 1,
+                    // The writer task is gone. Its sender staying in the ring
+                    // would make every later `persist_to` a no-op, so the mirror
+                    // could never come back for the rest of the session.
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        state.sink = None;
+                        state.writer_lost = true;
+                    }
+                }
             }
         }
         if let Some(emitter) = emitter {
@@ -340,6 +386,18 @@ impl RouteProxyLiveLog {
         state.subscribers = state.subscribers.saturating_sub(1);
     }
 
+    /// Whether the mirror is keeping up, and what it has lost if it is not.
+    pub fn health(&self) -> LiveLogHealth {
+        let state = self.inner.lock().expect("route proxy live log lock");
+        LiveLogHealth {
+            persisting: state.sink.is_some(),
+            dropped_entries: state.dropped_entries,
+            append_failures: state.append_failures,
+            last_append_error: state.last_append_error.clone(),
+            writer_lost: state.writer_lost,
+        }
+    }
+
     /// Every entry in the ring, oldest first, regardless of platform.
     ///
     /// Unlike [`Self::subscribe`] this neither filters nor registers a viewer:
@@ -376,6 +434,19 @@ impl LiveLogFileWriter {
                     "route proxy live log: cannot write {}: {error}",
                     self.dir.join(LIVE_LOG_FILE_NAME).display()
                 );
+                // `eprintln!` is this app's only logging, and a packaged Windows
+                // build has no console to print to. A mirror that could not be
+                // opened is exactly what someone will come here to find out,
+                // so the reason goes where it can be read back.
+                {
+                    let mut state = self.ring.lock().expect("route proxy live log lock");
+                    state.append_failures += 1;
+                    state.last_append_error = Some(format!(
+                        "cannot write {}: {error}",
+                        self.dir.join(LIVE_LOG_FILE_NAME).display()
+                    ));
+                    state.writer_lost = true;
+                }
                 // Keep draining rather than returning: a full queue would make
                 // every later `record` pay for a `try_send` that cannot succeed.
                 while self.receiver.recv().await.is_some() {}
@@ -396,9 +467,14 @@ impl LiveLogFileWriter {
         }
         while let Some(line) = self.receiver.recv().await {
             if let Err(error) = segment.append(&line).await {
-                eprintln!("route proxy live log: append failed: {error}");
+                // Counted, not printed: see the open-failure arm above.
+                let mut state = self.ring.lock().expect("route proxy live log lock");
+                state.append_failures += 1;
+                state.last_append_error = Some(error.to_string());
             }
         }
+        let mut state = self.ring.lock().expect("route proxy live log lock");
+        state.writer_lost = true;
     }
 }
 
@@ -1090,6 +1166,111 @@ mod tests {
 
             assert_eq!(text.lines().count(), 1, "append 返回时这条就该已经在盘上");
         });
+    }
+
+    /// 生产上发生过的事：`route-proxy-live-log.jsonl` 在一次轮转后停在 0 字节，
+    /// 之后十几个小时一条都没落盘，而这个文件存在的全部意义就是「出问题那一轮
+    /// 还在」。当时看不出来，是因为死掉的 writer 和健康的 writer 长得一模一样。
+    #[tokio::test]
+    async fn a_dead_writer_is_reported_and_lets_persistence_reattach() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = RouteProxyLiveLog::default();
+        let writer = log.persist_to(dir.path().to_path_buf()).expect("writer");
+        let handle = tokio::spawn(writer.run());
+        log.record(entry("codex", "a"));
+        assert!(log.health().persisting);
+
+        handle.abort();
+        let _ = handle.await;
+
+        // The receiver is gone; this line is the one that used to vanish.
+        log.record(entry("codex", "b"));
+        let health = log.health();
+        assert!(
+            !health.persisting,
+            "死掉的 writer 必须让 persisting 变成 false"
+        );
+        assert!(health.writer_lost);
+
+        // And the sender must not be left behind blocking a re-attach.
+        let writer = log
+            .persist_to(dir.path().to_path_buf())
+            .expect("a new writer must be attachable");
+        tokio::spawn(writer.run());
+        assert!(log.health().persisting, "镜像必须能重新挂上");
+    }
+
+    /// 轮转时 writer 正在压缩 32MB，队列（32 深）会满，条目**确实**会丢。
+    /// 区别只在于丢的时候有没有人记下来。
+    #[test]
+    fn a_full_queue_is_counted_rather_than_dropped_silently() {
+        let log = RouteProxyLiveLog::default();
+        // 挂一个 writer 但从不运行它，于是没有任何东西来排空队列。
+        let (sink, _receiver) = mpsc::channel(2);
+        {
+            let mut state = log.inner.lock().expect("lock");
+            state.sink = Some(sink);
+        }
+        for index in 0..10 {
+            log.record(entry("codex", &format!("e{index}")));
+        }
+        let health = log.health();
+        assert!(health.persisting, "队列满不等于 writer 死了");
+        assert_eq!(
+            health.dropped_entries, 8,
+            "超出队列深度的那几条必须被计数，而不是无声丢弃"
+        );
+    }
+
+    /// 镜像打不开时也要留下原因——这正是事后有人来翻这个文件时要找的东西。
+    #[tokio::test]
+    async fn a_mirror_that_cannot_be_opened_says_why() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // 把日志文件占成一个目录，`open_append` 必然失败。
+        std::fs::create_dir(dir.path().join(LIVE_LOG_FILE_NAME)).expect("block the path");
+        let log = RouteProxyLiveLog::default();
+        let writer = log.persist_to(dir.path().to_path_buf()).expect("writer");
+        tokio::spawn(writer.run());
+        // 让 run() 走到 open 失败那一支。
+        for _ in 0..200 {
+            if log.health().append_failures > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let health = log.health();
+        assert_eq!(health.append_failures, 1);
+        assert!(
+            health
+                .last_append_error
+                .as_deref()
+                .is_some_and(|error| error.contains(LIVE_LOG_FILE_NAME)),
+            "失败原因要指名那个文件，实际 {:?}",
+            health.last_append_error
+        );
+        assert!(health.writer_lost);
+    }
+
+    /// 一次成功的镜像必须是干净的：健康时这两个计数器必须是 0，否则上面那些
+    /// 测试就只是测了计数器会涨。
+    #[tokio::test]
+    async fn a_healthy_mirror_reports_nothing_lost() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = RouteProxyLiveLog::default();
+        let writer = log.persist_to(dir.path().to_path_buf()).expect("writer");
+        let handle = tokio::spawn(writer.run());
+        for index in 0..5 {
+            log.record(entry("codex", &format!("e{index}")));
+        }
+        drop(log.persist_to(dir.path().to_path_buf()));
+        let health = log.health();
+        assert!(health.persisting);
+        assert_eq!(health.dropped_entries, 0);
+        assert_eq!(health.append_failures, 0);
+        assert!(!health.writer_lost);
+        assert_eq!(health.last_append_error, None);
+        handle.abort();
+        let _ = handle.await;
     }
 
     #[test]

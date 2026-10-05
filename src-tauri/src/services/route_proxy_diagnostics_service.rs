@@ -72,6 +72,7 @@ pub async fn build(
     // when this cloned every entry.
     let entries = live_log.snapshot();
     let entry_count = entries.len();
+    let mirror = live_log.health();
     let meta = json!({
         "kind": "meta",
         "format_version": DIAGNOSTICS_FORMAT_VERSION,
@@ -93,6 +94,11 @@ pub async fn build(
             "file_name": LIVE_LOG_FILE_NAME,
             "entries": entry_count,
             "summary": summarize(&entries),
+            // Whether the on-disk mirror was actually mirroring. Without this a
+            // gap in the file is indistinguishable from a quiet afternoon: the
+            // bundle would happily report a window of entries and say nothing
+            // about the requests that never made it to disk.
+            "mirror": mirror,
         },
         "settings": match SettingsService::load(paths).await {
             Ok(settings) => settings_summary(&settings),

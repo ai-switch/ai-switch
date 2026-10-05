@@ -115,6 +115,67 @@ fn frame_payload(block: &str) -> Option<String> {
     Some(data)
 }
 
+/// Whether a buffered prefix already carries an SSE payload frame.
+///
+/// Gateways that have to queue a request answer with keepalive comments before
+/// any real frame — OpenRouter sends `: OPENROUTER PROCESSING` while it waits.
+/// Those bytes say nothing about how the request ended, so a caller deciding
+/// "is this attempt still retryable?" has to look past them.
+///
+/// Deliberately the same test as the "did any data frame arrive?" check in
+/// [`crate::services::response_failure_service::stream_disconnected_before_completion`]:
+/// the two have to agree on when a stream really started, or a stream gets one
+/// verdict when it is streamed and another when it is buffered.
+pub fn sse_payload_started(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    text.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("data:")
+            .map(str::trim)
+            .is_some_and(|data| !data.is_empty() && data != "[DONE]")
+    })
+}
+
+#[cfg(test)]
+mod payload_started_tests {
+    use super::sse_payload_started;
+
+    /// The shape that made this rule necessary: a gateway parks the client on
+    /// comment frames, then reports the failure. Nothing was delivered, so the
+    /// attempt is still retryable.
+    #[test]
+    fn keepalive_comments_alone_are_not_content() {
+        let padding = ": OPENROUTER PROCESSING\n\n: OPENROUTER PROCESSING\n\n";
+        assert!(!sse_payload_started(padding.as_bytes()));
+    }
+
+    #[test]
+    fn a_failure_frame_counts_as_content_so_it_can_be_inspected() {
+        let padding = ": OPENROUTER PROCESSING\n\n";
+        let failure = "data: {\"choices\":[],\"error\":{\"code\":502}}\n\n";
+        assert!(!sse_payload_started(padding.as_bytes()));
+        assert!(sse_payload_started(
+            format!("{padding}{failure}").as_bytes()
+        ));
+    }
+
+    #[test]
+    fn the_done_sentinel_and_bare_data_lines_are_not_content() {
+        assert!(!sse_payload_started(b"data: [DONE]\n\n"));
+        assert!(!sse_payload_started(b"data:\n\n"));
+        assert!(!sse_payload_started(b""));
+    }
+
+    /// A frame split across chunks still counts once its `data:` prefix lands,
+    /// which is all this predicate claims.
+    #[test]
+    fn a_data_prefix_is_enough() {
+        assert!(sse_payload_started(
+            b"data: {\"type\":\"response.created\"}"
+        ));
+    }
+}
+
 /// What a finished stream turned out to contain.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StreamOutcome {

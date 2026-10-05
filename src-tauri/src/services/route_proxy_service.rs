@@ -57,7 +57,7 @@ use crate::services::route_proxy_live_log::{
     stage_preview, truncated_stage_names, RouteProxyLiveLog, RouteProxyLiveLogEntry,
     LIVE_LOG_ELISION_MARKER, LIVE_LOG_RAW_PREVIEW_LIMIT, LIVE_LOG_STAGE_LIMIT,
 };
-use crate::services::route_proxy_stream::StreamObserver;
+use crate::services::route_proxy_stream::{sse_payload_started, StreamObserver};
 use axum::body::Body;
 use axum::extract::State as AxumState;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
@@ -93,6 +93,24 @@ const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// went silent. Without it such a stall never returns an error, so the failover
 /// loop never runs and the CLI hangs forever.
 const UPSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// How long to wait before re-sending a streamed request whose upstream
+/// reported a failure frame instead of answering.
+///
+/// Deliberately short and fixed rather than read from the credential's failure
+/// policy: an upstream that fails this way has already answered, in
+/// milliseconds, so a policy-sized backoff — commonly seconds — would cost the
+/// caller far more than the retry is worth. The failure is transient on the
+/// upstream's side and re-asking usually lands on a healthy provider.
+const STREAM_DISCONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
+
+/// The most keepalive padding to hold back while waiting for real content.
+///
+/// Past this the stream is forwarded as it stands. Without a cap, an upstream
+/// that only ever emits comment frames could hold the request open indefinitely
+/// in the hope that a payload frame is still coming.
+const STREAM_PRIME_HOLDBACK_LIMIT: usize = 64 * 1024;
+
 /// Public xAI Grok CLI OAuth client ID (CLIProxyAPI / Grok CLI).
 const XAI_OAUTH_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 // Keep in sync with CLIProxyAPI xai_executor (cli-chat-proxy identity headers).
@@ -1053,6 +1071,7 @@ pub(crate) async fn forward_request(
                         .await;
                     }
                     let metadata = route_proxy_request_metadata(
+                        attempt,
                         &platform,
                         selected,
                         &path,
@@ -1137,6 +1156,7 @@ pub(crate) async fn forward_request(
                 )
                 .await;
                 let metadata = route_proxy_request_metadata(
+                    attempt,
                     &platform,
                     &credential,
                     &path,
@@ -1224,6 +1244,7 @@ pub(crate) async fn forward_request(
                 let should_retry_same_credential =
                     credential_retry_count < failure_policy.retry_count as usize;
                 let metadata = route_proxy_request_metadata(
+                    attempt,
                     &platform,
                     &credential,
                     &path,
@@ -1328,92 +1349,69 @@ pub(crate) async fn forward_request(
                     )
                 });
             let mut stream = Box::pin(upstream.bytes_stream());
-            // Wait for the first chunk while still inside the retry loop: until
-            // a byte reaches the client this attempt can still be abandoned for
-            // the next account, which is the whole reason to prime rather than
-            // return immediately.
-            let first_chunk = match futures_util::StreamExt::next(&mut stream).await {
-                Some(Ok(chunk)) => chunk,
-                Some(Err(error)) => {
-                    let error_message = describe_upstream_transport_error(
-                        &credential.display_name,
-                        "could not read upstream response",
-                        &error,
-                        state.upstream_timeouts,
-                    );
-                    handle_stream_prime_failure(
-                        &state,
-                        pool,
-                        &platform,
-                        &credential,
-                        &error_message,
-                        StreamPrimeContext {
-                            attempt,
-                            path: &path,
-                            target_url: &target_url,
-                            status,
-                            trace_id: trace_id.as_deref(),
-                            request_start,
-                            requested_model: requested_model.as_deref(),
-                            upstream_model: upstream_model.as_deref(),
-                            model_key: selected_model_key.as_deref(),
-                            bridge_name: bridge_name.as_deref(),
-                            client_request: &body_bytes,
-                            upstream_request: &upstream_request_bytes,
-                            upstream_headers: &request_headers,
-                        },
-                        credential_retry_count < failure_policy.retry_count as usize,
-                        failure_policy,
-                        &mut retry_queue,
-                        credential_index,
-                        credential_retry_count,
-                        &mut retry_errors,
-                    )
-                    .await;
-                    continue;
-                }
-                None => {
-                    let error_message = format!(
-                        "{}: upstream closed the stream before sending any data",
-                        credential.display_name
-                    );
-                    handle_stream_prime_failure(
-                        &state,
-                        pool,
-                        &platform,
-                        &credential,
-                        &error_message,
-                        StreamPrimeContext {
-                            attempt,
-                            path: &path,
-                            target_url: &target_url,
-                            status,
-                            trace_id: trace_id.as_deref(),
-                            request_start,
-                            requested_model: requested_model.as_deref(),
-                            upstream_model: upstream_model.as_deref(),
-                            model_key: selected_model_key.as_deref(),
-                            bridge_name: bridge_name.as_deref(),
-                            client_request: &body_bytes,
-                            upstream_request: &upstream_request_bytes,
-                            upstream_headers: &request_headers,
-                        },
-                        credential_retry_count < failure_policy.retry_count as usize,
-                        failure_policy,
-                        &mut retry_queue,
-                        credential_index,
-                        credential_retry_count,
-                        &mut retry_errors,
-                    )
-                    .await;
-                    continue;
+            // Wait for real content while still inside the retry loop: until a
+            // payload byte reaches the client this attempt can still be
+            // abandoned for the next account, which is the whole reason to prime
+            // rather than return immediately.
+            //
+            // "Real content" deliberately excludes keepalive comments. A gateway
+            // that has to queue the request answers with comment frames first —
+            // OpenRouter sends `: OPENROUTER PROCESSING` for seconds — and only
+            // then emits either the opening payload frame or a failure frame.
+            // Forwarding the comments would spend the one moment a retry is
+            // still possible, which is how a queued request that later reported
+            // `provider_unavailable` used to reach the client as
+            // `stream disconnected before completion` with nothing to retry on.
+            let mut primed: Vec<u8> = Vec::new();
+            // `Some((message, delay))` ends the attempt before any payload byte
+            // reached the client, so it is still a retry. The delay is carried
+            // per failure kind rather than read once from the policy: see
+            // `STREAM_DISCONNECT_RETRY_DELAY`.
+            let prime_failure: Option<(String, Option<Duration>)> = loop {
+                match futures_util::StreamExt::next(&mut stream).await {
+                    Some(Ok(chunk)) => {
+                        primed.extend_from_slice(&chunk);
+                        if primed.len() >= STREAM_PRIME_HOLDBACK_LIMIT {
+                            // Nothing left worth protecting: hand it on and let
+                            // the observer judge how the stream ends.
+                            break None;
+                        }
+                        if !sse_payload_started(&primed) {
+                            continue;
+                        }
+                        // A gateway that reports failure in a 200 body usually
+                        // does it in the opening payload frame. Catch it here,
+                        // where failover still works.
+                        break detect_response_failed(&primed).map(|failure| {
+                            (
+                                format!("{}: {}", credential.display_name, failure.message),
+                                Some(STREAM_DISCONNECT_RETRY_DELAY),
+                            )
+                        });
+                    }
+                    Some(Err(error)) => {
+                        break Some((
+                            describe_upstream_transport_error(
+                                &credential.display_name,
+                                "could not read upstream response",
+                                &error,
+                                state.upstream_timeouts,
+                            ),
+                            None,
+                        ));
+                    }
+                    None => {
+                        break Some((
+                            format!(
+                                "{}: upstream closed the stream before sending any data",
+                                credential.display_name
+                            ),
+                            None,
+                        ));
+                    }
                 }
             };
-
-            // A gateway that reports failure in a 200 body usually does it in
-            // the opening frame. Catch that here, where failover still works.
-            if let Some(failure) = detect_response_failed(&first_chunk) {
-                let error_message = format!("{}: {}", credential.display_name, failure.message);
+            if let Some((error_message, retry_delay)) = prime_failure {
                 handle_stream_prime_failure(
                     &state,
                     pool,
@@ -1438,6 +1436,7 @@ pub(crate) async fn forward_request(
                     !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
                         && credential_retry_count < failure_policy.retry_count as usize,
                     failure_policy,
+                    retry_delay,
                     &mut retry_queue,
                     credential_index,
                     credential_retry_count,
@@ -1446,6 +1445,7 @@ pub(crate) async fn forward_request(
                 .await;
                 continue;
             }
+            let first_chunk = axum::body::Bytes::from(primed);
 
             let next_index = (credential_index + 1) % credentials.len();
             let _ =
@@ -1504,6 +1504,7 @@ pub(crate) async fn forward_request(
                 let should_retry_same_credential =
                     credential_retry_count < failure_policy.retry_count as usize;
                 let metadata = route_proxy_request_metadata(
+                    attempt,
                     &platform,
                     &credential,
                     &path,
@@ -1615,6 +1616,7 @@ pub(crate) async fn forward_request(
                     )
                     .await;
                     let metadata = route_proxy_request_metadata(
+                        attempt,
                         &platform,
                         &credential,
                         &path,
@@ -1720,6 +1722,7 @@ pub(crate) async fn forward_request(
             None
         };
         let metadata = route_proxy_request_metadata(
+            attempt,
             &platform,
             &credential,
             &path,
@@ -2121,6 +2124,8 @@ fn upstream_path_from_target_url(target_url: Option<&str>) -> Option<String> {
 /// `entry_path` is the path the *client* called, not the upstream endpoint.
 /// The upstream endpoint is `upstream_path`, derived from `target_url`.
 fn route_proxy_request_metadata(
+    // Which try this row records: 1 for the first send, 2 for the first retry.
+    attempt: usize,
     platform: &str,
     credential: &SelectedCredential,
     entry_path: &str,
@@ -2146,6 +2151,13 @@ fn route_proxy_request_metadata(
         "target_url": target_url,
         "status": status,
         "success": success,
+        // A request log that cannot say how many times a request had to
+        // be re-sent cannot answer the first question anyone asks of a
+        // model that keeps dropping streams: is the proxy retrying, or is
+        // the upstream failing? `attempt` is the ordinal; `retry_count` is
+        // the retries behind it.
+        "attempt": attempt,
+        "retry_count": attempt.saturating_sub(1),
         "duration_ms": elapsed_millis(started_at),
         "trace_id": trace_id,
         "error_message": error_message,
@@ -2854,12 +2866,16 @@ async fn handle_stream_prime_failure(
     context: StreamPrimeContext<'_>,
     retry_same_credential: bool,
     failure_policy: RouteCredentialFailurePolicy,
+    // Overrides the policy's own backoff when this failure kind has a better
+    // delay than a generic one. `None` keeps the policy's interval.
+    retry_delay: Option<Duration>,
     retry_queue: &mut VecDeque<(usize, usize)>,
     credential_index: usize,
     credential_retry_count: usize,
     retry_errors: &mut Vec<String>,
 ) {
     let metadata = route_proxy_request_metadata(
+        context.attempt,
         platform,
         credential,
         context.path,
@@ -2904,7 +2920,10 @@ async fn handle_stream_prime_failure(
         None,
     );
     if retry_same_credential {
-        wait_for_credential_retry(failure_policy).await;
+        match retry_delay {
+            Some(delay) => tokio::time::sleep(delay).await,
+            None => wait_for_credential_retry(failure_policy).await,
+        }
         retry_queue.push_front((credential_index, credential_retry_count + 1));
     } else {
         record_route_credential_failure(
@@ -2990,6 +3009,7 @@ impl StreamCompletion {
         apply_estimated_price(&mut usage, priced_model.as_deref());
 
         let metadata = route_proxy_request_metadata(
+            attempt,
             &platform,
             &credential,
             &path,
@@ -7756,6 +7776,47 @@ mod tests {
         (format!("http://{address}/v1"), calls)
     }
 
+    /// An upstream that serves a different script per call, so a retry is
+    /// distinguishable from the attempt that triggered it.
+    ///
+    /// The last script is reused once the list runs out, so a test that expects
+    /// exactly N calls still has a defined answer if the proxy over-retries.
+    async fn start_scripted_sse_upstream(
+        scripts: Vec<Vec<&'static str>>,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let app = Router::new().fallback(move || {
+            let scripts = scripts.clone();
+            let calls = Arc::clone(&handler_calls);
+            async move {
+                let index = calls.fetch_add(1, Ordering::SeqCst);
+                let chunks = scripts
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| scripts.last().cloned().unwrap_or_default());
+                let stream = futures_util::stream::iter(chunks.into_iter().map(|chunk| {
+                    Ok::<_, std::io::Error>(axum::body::Bytes::from_static(chunk.as_bytes()))
+                }));
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from_stream(stream))
+                    .expect("scripted sse response")
+            }
+        });
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind scripted sse upstream");
+        let address = listener.local_addr().expect("scripted sse address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve scripted sse");
+        });
+        (format!("http://{address}/v1"), calls)
+    }
+
     /// An upstream that returns 200 with SSE headers and then closes without
     /// sending a single byte of body.
     async fn start_empty_stream_upstream() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
@@ -9540,6 +9601,191 @@ mod tests {
         RouteProxyService::stop(&runtime).await.expect("stop proxy");
     }
 
+    /// The shape that actually produced `stream disconnected before completion`
+    /// for OpenRouter-routed models: the gateway parks the client on keepalive
+    /// comments, then reports `provider_unavailable` instead of answering.
+    ///
+    /// Not one payload byte reached the client, so the attempt is still
+    /// retryable — and before this rule it was not, because the comments were
+    /// forwarded the moment they arrived and spent the only window a retry has.
+    #[tokio::test]
+    async fn stream_failing_after_keepalive_padding_is_retried() {
+        use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
+        use crate::database::{create_memory_pool, run_migrations};
+
+        const PADDING: [&str; 3] = [
+            ": OPENROUTER PROCESSING\n\n",
+            ": OPENROUTER PROCESSING\n\n",
+            ": OPENROUTER PROCESSING\n\n",
+        ];
+        const PROVIDER_UNAVAILABLE: &str = "data: {\"id\":\"gen-1\",\"choices\":[],\"error\":{\"code\":502,\"message\":\"Provider returned an empty response\",\"metadata\":{\"error_type\":\"provider_unavailable\"}}}\n\n";
+
+        let (upstream, calls) = start_scripted_sse_upstream(vec![
+            [PADDING[0], PADDING[1], PADDING[2], PROVIDER_UNAVAILABLE].to_vec(),
+            CHUNKED_SSE_PARTS.to_vec(),
+        ])
+        .await;
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        // retry_interval_ms is set far above the delay this failure kind uses, so
+        // a regression that falls back to the policy backoff shows up as a slow
+        // test rather than a silent one.
+        let credential_id = create_proxy_api_credential_with_config(
+            &pool,
+            "queued-then-empty",
+            &upstream,
+            json!({"failure_policy": {"retry_count": 2, "retry_interval_ms": 30_000}}),
+        )
+        .await;
+        RoutePoolRepository::replace_members(&pool, "codex", std::slice::from_ref(&credential_id))
+            .await
+            .expect("pool members");
+        let route_key =
+            RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-test")
+                .await
+                .expect("route key");
+        let runtime = RouteProxyRuntimeState::default();
+        let proxy = RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+            .await
+            .expect("start proxy");
+
+        let started = Instant::now();
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/v1/chat/completions",
+                proxy.base_url.as_deref().expect("base url")
+            ))
+            .bearer_auth(route_key)
+            .json(&json!({"model":"gpt-5.5","messages":[],"stream":true}))
+            .send()
+            .await
+            .expect("proxy response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.bytes().await.expect("proxy body");
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the attempt that reported provider_unavailable must be retried"
+        );
+        assert_eq!(
+            body,
+            CHUNKED_SSE_PARTS.concat().as_bytes(),
+            "the client gets the retried stream, never the failure frame"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the retry must wait the stream-disconnect delay, not the credential's \
+             30s policy backoff; took {elapsed:?}"
+        );
+
+        RouteProxyService::stop(&runtime).await.expect("stop proxy");
+    }
+
+    /// Holding the comments back must not cost a healthy stream anything: the
+    /// padding is still forwarded verbatim, ahead of the payload.
+    #[tokio::test]
+    async fn keepalive_padding_on_a_healthy_stream_is_forwarded_unchanged() {
+        use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
+        use crate::database::{create_memory_pool, run_migrations};
+
+        const PADDING: &str = ": OPENROUTER PROCESSING\n\n";
+        let mut script = vec![PADDING];
+        script.extend(CHUNKED_SSE_PARTS.iter().copied());
+        let (upstream, calls) = start_scripted_sse_upstream(vec![script]).await;
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let credential_id = create_proxy_api_credential(&pool, "padded", &upstream).await;
+        RoutePoolRepository::replace_members(&pool, "codex", std::slice::from_ref(&credential_id))
+            .await
+            .expect("pool members");
+        let route_key =
+            RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-test")
+                .await
+                .expect("route key");
+        let runtime = RouteProxyRuntimeState::default();
+        let proxy = RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+            .await
+            .expect("start proxy");
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/v1/chat/completions",
+                proxy.base_url.as_deref().expect("base url")
+            ))
+            .bearer_auth(route_key)
+            .json(&json!({"model":"gpt-5.5","messages":[],"stream":true}))
+            .send()
+            .await
+            .expect("proxy response");
+        let body = response.bytes().await.expect("proxy body");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a healthy stream must not be retried"
+        );
+        let mut expected = PADDING.to_string();
+        expected.push_str(&CHUNKED_SSE_PARTS.concat());
+        assert_eq!(body, expected.as_bytes(), "padding is forwarded verbatim");
+
+        RouteProxyService::stop(&runtime).await.expect("stop proxy");
+    }
+
+    /// Padding must not become an unbounded stall: once the hold-back passes its
+    /// cap the stream is forwarded as it stands, whatever it contains.
+    #[tokio::test]
+    async fn endless_keepalive_padding_stops_holding_the_request() {
+        use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
+        use crate::database::{create_memory_pool, run_migrations};
+
+        // Comfortably past STREAM_PRIME_HOLDBACK_LIMIT, so the hold-back has
+        // to give up rather than wait for a payload frame that never comes.
+        let filler = ": OPENROUTER PROCESSING\n\n".repeat(4096);
+        assert!(
+            filler.len() > STREAM_PRIME_HOLDBACK_LIMIT,
+            "前提：这段填充必须超过 hold-back 上限，否则测的就不是上限而是转发"
+        );
+        let filler: &'static str = Box::leak(filler.into_boxed_str());
+        let (upstream, calls) = start_scripted_sse_upstream(vec![vec![filler]]).await;
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let credential_id = create_proxy_api_credential(&pool, "endless-padding", &upstream).await;
+        RoutePoolRepository::replace_members(&pool, "codex", std::slice::from_ref(&credential_id))
+            .await
+            .expect("pool members");
+        let route_key =
+            RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-test")
+                .await
+                .expect("route key");
+        let runtime = RouteProxyRuntimeState::default();
+        let proxy = RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+            .await
+            .expect("start proxy");
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/v1/chat/completions",
+                proxy.base_url.as_deref().expect("base url")
+            ))
+            .bearer_auth(route_key)
+            .json(&json!({"model":"gpt-5.5","messages":[],"stream":true}))
+            .send()
+            .await
+            .expect("proxy response");
+        let body = response.bytes().await.expect("proxy body");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            body,
+            filler.as_bytes(),
+            "the padding is released once capped"
+        );
+
+        RouteProxyService::stop(&runtime).await.expect("stop proxy");
+    }
+
     /// A stream that dies before its first byte has touched nothing on the
     /// client, so it must still fail over to the next account.
     #[tokio::test]
@@ -9890,6 +10136,7 @@ mod tests {
     fn request_metadata_records_the_upstream_path_beside_the_client_one() {
         let credential = streaming_gate_credential("api");
         let metadata: Value = serde_json::from_str(&route_proxy_request_metadata(
+            1,
             "codex",
             &credential,
             "/v1/responses",
@@ -9911,6 +10158,40 @@ mod tests {
             "the legacy key keeps its old meaning for older readers"
         );
         assert_eq!(metadata["upstream_path"], "/v1/chat/completions");
+    }
+
+    /// "Is the proxy retrying, or is the upstream failing?" is not answerable
+    /// from a request log that records only success/failure: every row of a
+    /// retried request looks identical to every other.
+    #[test]
+    fn request_metadata_records_the_attempt_and_its_retry_count() {
+        let credential = streaming_gate_credential("api");
+        let parse = |attempt: usize| -> Value {
+            serde_json::from_str(&route_proxy_request_metadata(
+                attempt,
+                "codex",
+                &credential,
+                "/v1/responses",
+                None,
+                Some(200),
+                true,
+                None,
+                Instant::now(),
+                None,
+                Some("gpt-5"),
+                Some("gpt-5"),
+                None,
+            ))
+            .expect("metadata json")
+        };
+
+        let first = parse(1);
+        assert_eq!(first["attempt"], 1);
+        assert_eq!(first["retry_count"], 0, "the first send is not a retry");
+
+        let third = parse(3);
+        assert_eq!(third["attempt"], 3);
+        assert_eq!(third["retry_count"], 2);
     }
 
     #[test]
