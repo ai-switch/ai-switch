@@ -155,11 +155,12 @@ function GroupTable({
   const hidden = rows.length - shown.length;
   return (
     <div className="overflow-hidden rounded-xl border border-stone-200">
-      <div className="grid grid-cols-[1.6fr_0.6fr_0.8fr_0.8fr_0.8fr] gap-2 border-b border-stone-100 bg-stone-50 px-3 py-2 text-[11px] font-medium text-stone-500">
+      <div className="grid grid-cols-[1.6fr_0.6fr_0.8fr_0.8fr_0.8fr_0.8fr] gap-2 border-b border-stone-100 bg-stone-50 px-3 py-2 text-[11px] font-medium text-stone-500">
         <span>{header}</span>
         <span className="text-right">请求</span>
         <span className="text-right">输入</span>
         <span className="text-right">输出</span>
+        <span className="text-right">缓存</span>
         <span className="text-right">费用</span>
       </div>
       {shown.length === 0 ? (
@@ -168,7 +169,7 @@ function GroupTable({
         <div className="divide-y divide-stone-100">
           {shown.map((row) => (
             <div
-              className="grid grid-cols-[1.6fr_0.6fr_0.8fr_0.8fr_0.8fr] gap-2 px-3 py-2 text-[12px]"
+              className="grid grid-cols-[1.6fr_0.6fr_0.8fr_0.8fr_0.8fr_0.8fr] gap-2 px-3 py-2 text-[12px]"
               key={row.key}
             >
               <span className="truncate text-stone-800" title={row.key}>
@@ -182,6 +183,12 @@ function GroupTable({
               </span>
               <span className="text-right text-stone-600" title={formatExactCount(row.output_tokens)}>
                 {formatCompactCount(row.output_tokens)}
+              </span>
+              <span
+                className="text-right text-stone-600"
+                title={`缓存读取 ${formatExactCount(row.cache_read_tokens)}；缓存写入 ${formatExactCount(row.cache_write_tokens)}`}
+              >
+                {formatCompactCount(row.cache_read_tokens + row.cache_write_tokens)}
               </span>
               <span className="text-right text-stone-800">{formatCostMicros(row.cost_micros)}</span>
             </div>

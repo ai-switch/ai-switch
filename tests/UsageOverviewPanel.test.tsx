@@ -206,6 +206,32 @@ describe("UsageOverviewPanel", () => {
     expect(await screen.findByText("claude-haiku-4-5")).toBeInTheDocument();
   });
 
+  it("shows cache totals and read/write details in every grouping dimension", async () => {
+    const overview = overviewFixture();
+    for (const rows of Object.values(overview.groups)) {
+      rows[0].cache_write_tokens = 12_345;
+      rows[0].cache_read_tokens = 1_000_000;
+    }
+    vi.mocked(getUsageOverview).mockResolvedValue(overview);
+    renderPanel();
+    await screen.findByText("1.1万");
+
+    for (const name of ["模型", "平台", "账号", "来源"]) {
+      await userEvent.click(screen.getByRole("button", { name }));
+      const heading = await screen.findByText("缓存", { exact: true });
+      expect(heading.parentElement?.textContent).toContain("请求输入输出缓存费用");
+      expect(screen.getByTitle("缓存读取 1,000,000；缓存写入 12,345"))
+        .toHaveTextContent("1.01百万");
+    }
+  });
+
+  it("shows zero cache explicitly in grouped rows", async () => {
+    renderPanel();
+    await screen.findByText("1.1万");
+    await userEvent.click(screen.getByRole("button", { name: "模型" }));
+    expect(await screen.findByTitle("缓存读取 0；缓存写入 0")).toHaveTextContent("0");
+  });
+
   it("collapses again when the active dimension is clicked a second time", async () => {
     renderPanel();
     await screen.findByText("1.1万");
