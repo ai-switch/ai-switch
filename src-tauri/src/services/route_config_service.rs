@@ -180,7 +180,9 @@ impl RouteConfigService {
         base_url: &str,
         home: &Path,
     ) -> Result<Vec<ConfigWriteOutcome>, AppError> {
-        let _authentication_guard = DirectModeService::authentication_guard().await;
+        // 批量后台重写按固定顺序持有客户端写锁，保留原有组回滚边界。
+        let _codex_guard = DirectModeService::authentication_guard("codex").await;
+        let _claude_guard = DirectModeService::authentication_guard("claude").await;
         let base_url = normalize_base_url(base_url)?;
         let platforms = RouteProxyKeyRepository::list_platforms(pool).await?;
         let registry = TargetAdapterRegistry::new();
@@ -388,7 +390,7 @@ impl RouteConfigService {
         platform: &str,
         route_proxy_key: &str,
     ) -> Result<ConfigWriteOutcome, AppError> {
-        let _authentication_guard = DirectModeService::authentication_guard().await;
+        let _authentication_guard = DirectModeService::authentication_guard(platform).await;
         let base_url = normalize_base_url(base_url)?;
         let platform = PlatformId::parse(platform)?;
         PlatformCapabilityService::require(platform, PlatformOperation::ConfigWrite)?;

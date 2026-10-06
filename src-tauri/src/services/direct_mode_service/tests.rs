@@ -557,3 +557,156 @@ async fn official_logout_does_not_block_an_explicit_new_direct_account() {
         "account"
     );
 }
+
+#[tokio::test]
+async fn review_restore_same_official_keeps_rotated_tokens() {
+    let (root, paths, pool, runtime) = fixture().await;
+    let id = codex_official(&pool).await;
+    std::fs::create_dir_all(root.path().join(".codex")).unwrap();
+    let path = root.path().join(".codex/auth.json");
+    std::fs::write(&path,json!({"auth_mode":"chatgpt","tokens":{"access_token":"at","refresh_token":"rt","id_token":"id","account_id":"account"}}).to_string()).unwrap();
+    DirectModeService::enable_for_home(&paths, &pool, &runtime, root.path(), &id)
+        .await
+        .unwrap();
+    let mut auth: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    auth["tokens"]["refresh_token"] = json!("rotated");
+    auth["tokens"]["access_token"] = json!("new-at");
+    std::fs::write(&path, auth.to_string()).unwrap();
+    RouteConfigService::write_configs_for_home(
+        &paths,
+        &pool,
+        &runtime,
+        "http://127.0.0.1:19527",
+        "codex",
+        root.path(),
+        Some(&["codex".into()]),
+    )
+    .await
+    .unwrap();
+    let restored: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(restored["tokens"]["refresh_token"], "rotated");
+}
+
+#[tokio::test]
+async fn review_refresh_lock_allows_other_accounts_and_status_reads() {
+    let _first = DirectModeService::refresh_guard("review-client", "account-a").await;
+    let sibling = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        DirectModeService::refresh_guard("review-client", "account-b"),
+    )
+    .await;
+    assert!(sibling.is_ok(), "无关账号不能被网络刷新阻塞");
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        DirectModeService::status_guard("review-client")
+    )
+    .await
+    .is_ok());
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(20),
+        DirectModeService::refresh_guard("review-client", "account-a")
+    )
+    .await
+    .is_err());
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(20),
+        DirectModeService::authentication_guard("review-client")
+    )
+    .await
+    .is_err());
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        DirectModeService::authentication_guard("other-client")
+    )
+    .await
+    .is_ok());
+}
+
+#[tokio::test]
+async fn review_claude_baseline_follows_multiple_token_rotations() {
+    let (root, paths, pool, runtime) = fixture().await;
+    std::fs::create_dir_all(root.path().join(".claude")).unwrap();
+    let path = root.path().join(".claude/.credentials.json");
+    std::fs::write(&path,json!({"claudeAiOauth":{"accessToken":"at","refreshToken":"rt","expiresAt":4070908800000i64,"scopes":["user:inference"]},"other":"keep"}).to_string()).unwrap();
+    let credential = RouteCredentialRepository::create(
+        &pool,
+        "claude",
+        "official",
+        "test",
+        None,
+        "ok",
+        None,
+        r#"{"access_token":"at","refresh_token":"rt"}"#,
+        r#"{"expired":4070908800,"scopes":["user:inference"]}"#,
+        "{}",
+    )
+    .await
+    .unwrap();
+    DirectModeService::enable_for_home(&paths, &pool, &runtime, root.path(), &credential.id)
+        .await
+        .unwrap();
+    for token in ["rotation-1", "rotation-2"] {
+        let mut auth: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        auth["claudeAiOauth"]["refreshToken"] = json!(token);
+        std::fs::write(&path, auth.to_string()).unwrap();
+        DirectModeService::enable_for_home(&paths, &pool, &runtime, root.path(), &credential.id)
+            .await
+            .unwrap();
+    }
+    RouteConfigService::write_configs_for_home(
+        &paths,
+        &pool,
+        &runtime,
+        "http://127.0.0.1:19527",
+        "claude",
+        root.path(),
+        Some(&["claude_code".into()]),
+    )
+    .await
+    .unwrap();
+    let auth: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(auth["claudeAiOauth"]["refreshToken"], "rotation-2");
+    assert_eq!(auth["other"], "keep");
+    assert!(auth.get("aiSwitchDirectCredentialId").is_none());
+}
+
+#[tokio::test]
+async fn review_waiting_request_reloads_latest_credential() {
+    let (root, _paths, pool, _runtime) = fixture().await;
+    let _root = root;
+    let id = codex_official(&pool).await;
+    let row = RouteCredentialRepository::get(&pool, &id).await.unwrap();
+    let stale = SelectedCredential {
+        id: id.clone(),
+        platform: "codex".into(),
+        kind: "official".into(),
+        display_name: "test".into(),
+        status: "ok".into(),
+        route_priority: 3,
+        max_concurrency: 5,
+        secret_payload_json: row.secret_payload_json.clone(),
+        config_json: r#"{"expired":1,"token_endpoint":"http://127.0.0.1:1"}"#.into(),
+    };
+    let guard = DirectModeService::refresh_guard("codex", &id).await;
+    let task_pool = pool.clone();
+    let task = tokio::spawn(async move {
+        crate::services::route_proxy_service::maybe_refresh_official_credential(
+            &task_pool, &stale, None,
+        )
+        .await
+    });
+    let mut secret: Value = serde_json::from_str(&row.secret_payload_json).unwrap();
+    secret["access_token"] = json!("new-valid-token");
+    secret["refresh_token"] = json!("new-refresh");
+    RouteCredentialRepository::update_secret_and_config(
+        &pool,
+        &id,
+        &secret.to_string(),
+        r#"{"expired":4070908800}"#,
+    )
+    .await
+    .unwrap();
+    drop(guard);
+    let updated = task.await.unwrap().unwrap();
+    assert!(updated.secret_payload_json.contains("new-valid-token"));
+}

@@ -5086,7 +5086,25 @@ pub async fn maybe_refresh_official_credential(
     }
 
     let _authentication_guard =
-        crate::services::direct_mode_service::DirectModeService::authentication_guard().await;
+        crate::services::direct_mode_service::DirectModeService::refresh_guard(
+            &credential.platform,
+            &credential.id,
+        )
+        .await;
+    // 在同账号锁之后重读：前一请求可能刚刚轮换了 refresh token。
+    let latest: Option<(String, String)> = sqlx::query_as(
+        "SELECT secret_payload_json, config_json FROM route_credentials WHERE id = ?",
+    )
+    .bind(&credential.id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| "无法读取账号最新认证".to_string())?;
+    let current = latest.map(|(secret_payload_json, config_json)| SelectedCredential {
+        secret_payload_json,
+        config_json,
+        ..credential.clone()
+    });
+    let credential = current.as_ref().unwrap_or(credential);
     if let Some(native) =
         crate::services::direct_mode_service::DirectModeService::official_for_proxy(
             pool, credential,

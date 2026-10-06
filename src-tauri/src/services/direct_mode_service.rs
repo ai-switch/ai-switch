@@ -13,16 +13,48 @@ use crate::services::direct_mode_auth::{self, failure};
 use crate::services::route_proxy_service::SelectedCredential;
 use serde_json::{json, Value};
 use sqlx::{FromRow, SqlitePool};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, Weak};
 use storage::{apply_changes, Change, Location};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use uuid::Uuid;
 
-// 同时保护切换和代理读取原生登录，防止文件已切到 B、数据库仍指向 A 的短暂窗口。
-static SWITCH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-fn switch_lock() -> &'static Mutex<()> {
-    SWITCH_LOCK.get_or_init(|| Mutex::new(()))
+// 客户端读写锁只将切换与认证读取隔离；不同账号刷新并行，同账号串行。
+fn client_lock(platform: &str) -> Arc<RwLock<()>> {
+    static LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Weak<RwLock<()>>>>> = OnceLock::new();
+    let key = if platform == "claude_code" {
+        "claude"
+    } else {
+        platform
+    };
+    let mut locks = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("client lock map");
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(RwLock::new(()));
+    locks.insert(key.into(), Arc::downgrade(&lock));
+    lock
+}
+fn account_lock(platform: &str, id: &str) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<std::sync::Mutex<HashMap<(String, String), Weak<Mutex<()>>>>> =
+        OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("account lock map");
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let key = (platform.to_string(), id.to_string());
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
 }
 
 #[derive(Clone, FromRow)]
@@ -83,8 +115,19 @@ struct CredentialSync {
 
 pub struct DirectModeService;
 impl DirectModeService {
-    pub(crate) async fn authentication_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        switch_lock().lock().await
+    pub(crate) async fn authentication_guard(platform: &str) -> OwnedRwLockWriteGuard<()> {
+        client_lock(platform).write_owned().await
+    }
+    pub(crate) async fn status_guard(platform: &str) -> OwnedRwLockReadGuard<()> {
+        client_lock(platform).read_owned().await
+    }
+    pub(crate) async fn refresh_guard(
+        platform: &str,
+        id: &str,
+    ) -> (OwnedMutexGuard<()>, OwnedRwLockReadGuard<()>) {
+        let account = account_lock(platform, id).lock_owned().await;
+        let client = Self::status_guard(platform).await;
+        (account, client)
     }
     /// 只允许宿主本机调用；不接收前端提供的地址、路径或密钥。
     pub async fn enable(
@@ -109,8 +152,12 @@ impl DirectModeService {
         home: &Path,
         id: &str,
     ) -> Result<DirectModeStatus, AppError> {
-        let _switch = switch_lock().lock().await;
+        let initial = RouteCredentialRepository::get(pool, id).await?;
+        let _switch = Self::authentication_guard(&initial.platform).await;
         let credential = RouteCredentialRepository::get(pool, id).await?;
+        if initial.platform != credential.platform {
+            return Err(state_error());
+        }
         if credential.archived_at.is_some() {
             return Err(failure(
                 "direct_mode.archived",
@@ -160,6 +207,20 @@ impl DirectModeService {
         let backup_dir = paths.backups_dir.join("direct-mode").join(&operation);
         let config_backup = backup(&backup_dir, "config.previous", &existing).await?;
         let auth_backup = backup(&backup_dir, "auth.previous", &existing_auth).await?;
+        let mut baseline_auth = old
+            .as_ref()
+            .map(|r| r.auth_backup_path.clone())
+            .unwrap_or(auth_backup);
+        if let Some(saved) = sync.as_ref() {
+            let original = read_backup(baseline_auth.as_deref()).await?;
+            if let Some(updated) =
+                refreshed_baseline(&credential.platform, original.as_deref(), saved)?
+            {
+                let target = backup_dir.join("auth.baseline-refreshed");
+                ConfigWriter::write_private_backup(&target, &updated).await?;
+                baseline_auth = Some(target.to_string_lossy().into_owned());
+            }
+        }
         let row = Record {
             client_key: client.into(),
             credential_id: id.into(),
@@ -175,10 +236,7 @@ impl DirectModeService {
                 .as_ref()
                 .map(|r| r.config_backup_path.clone())
                 .unwrap_or(config_backup),
-            auth_backup_path: old
-                .as_ref()
-                .map(|r| r.auth_backup_path.clone())
-                .unwrap_or(auth_backup),
+            auth_backup_path: baseline_auth,
             updated_at: chrono::Utc::now().to_rfc3339(),
         };
         let changes = vec![
@@ -198,14 +256,17 @@ impl DirectModeService {
     }
 
     pub async fn statuses(pool: &SqlitePool) -> Result<Vec<DirectModeStatus>, AppError> {
-        let _switch = switch_lock().lock().await;
         let rows: Vec<Record> =
             sqlx::query_as("SELECT * FROM client_direct_modes ORDER BY client_key")
                 .fetch_all(pool)
                 .await
                 .map_err(|_| state_error())?;
         let mut results = Vec::new();
-        for row in rows {
+        for stale in rows {
+            let _read = Self::status_guard(&stale.platform).await;
+            let Some(row) = record(pool, &stale.client_key).await? else {
+                continue;
+            };
             let current = ConfigWriter::inspect(Path::new(&row.config_path)).await;
             let status = match current {
                 Ok(s)
@@ -259,8 +320,8 @@ impl DirectModeService {
         request: ConfigWriteRequest,
         preserve_direct: bool,
     ) -> Result<Vec<ConfigWriteOutcome>, AppError> {
-        let _switch = switch_lock().lock().await;
         let client = request.adapter.client_key();
+        let _switch = Self::authentication_guard(request.adapter.platform().as_str()).await;
         let Some(old) = record(pool, client).await? else {
             return ConfigWriteCoordinator::write_group(paths, pool, runtime, vec![request]).await;
         };
@@ -289,6 +350,11 @@ impl DirectModeService {
         let sync = sync_before_switch(pool, Some(&old)).await?;
         let original_config = read_backup(old.config_backup_path.as_deref()).await?;
         let original_auth = read_backup(old.auth_backup_path.as_deref()).await?;
+        let original_auth = match sync.as_ref() {
+            Some(saved) => refreshed_baseline(&old.platform, original_auth.as_deref(), saved)?
+                .or(original_auth),
+            None => original_auth,
+        };
         let cleaned = clean_for_route(
             &old.platform,
             current.bytes.as_deref(),
@@ -628,6 +694,70 @@ fn clean_for_route(
     Ok(doc.to_string().into_bytes())
 }
 
+/// 只在确认备份属于正在刷新的同一账号时更新认证；否则恢复原账号。
+fn refreshed_baseline(
+    platform: &str,
+    original: Option<&[u8]>,
+    saved: &CredentialSync,
+) -> Result<Option<Vec<u8>>, AppError> {
+    let Some(original) = original else {
+        return Ok(None);
+    };
+    let mut auth: Value = serde_json::from_slice(original).map_err(|_| state_error())?;
+    let before: Value = serde_json::from_str(&saved.before_secret).map_err(|_| state_error())?;
+    let latest: Value = serde_json::from_str(&saved.secret).map_err(|_| state_error())?;
+    let config: Value = serde_json::from_str(&saved.config).map_err(|_| state_error())?;
+    let (root, refresh) = if platform == "codex" {
+        ("tokens", "refresh_token")
+    } else {
+        ("claudeAiOauth", "refreshToken")
+    };
+    let same = if platform == "codex" {
+        auth[root]["account_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .is_some_and(|id| Some(id) == before["account_id"].as_str())
+    } else {
+        // refresh token 是该登录的凭据，不通过订阅类型等非唯一字段猜测身份。
+        auth[root][refresh]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .is_some_and(|r| Some(r) == before["refresh_token"].as_str())
+    };
+    if !same {
+        return Ok(None);
+    }
+    for (source, target) in [
+        (
+            "access_token",
+            if platform == "codex" {
+                "access_token"
+            } else {
+                "accessToken"
+            },
+        ),
+        ("refresh_token", refresh),
+        ("id_token", "id_token"),
+    ] {
+        if let Some(v) = latest.get(source).filter(|v| v.is_string()) {
+            auth[root][target] = v.clone();
+        }
+    }
+    if platform == "claude" {
+        if let Some(exp) = config["expired"].as_i64() {
+            auth[root]["expiresAt"] = json!(exp * 1000);
+        }
+        if let Some(scopes) = config.get("scopes").filter(|v| v.is_array()) {
+            auth[root]["scopes"] = scopes.clone();
+        }
+    } else if let Some(refresh) = config.get("last_refresh") {
+        auth["last_refresh"] = refresh.clone();
+    }
+    Ok(Some(
+        serde_json::to_vec_pretty(&auth).map_err(|_| state_error())?,
+    ))
+}
+
 fn restore_auth(
     platform: &str,
     current: Option<&[u8]>,
@@ -676,10 +806,10 @@ fn ensure_environment(platform: &str, home: &Path) -> Result<(), AppError> {
     {
         return Err(failure("direct_mode.environment_conflict",&format!("检测到自定义 {home_key}。为避免写错客户端目录，本次未修改；请先使用默认客户端目录。")));
     }
-    let keys: &[&str] = if platform == "codex" {
-        &["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_API_KEY"]
+    let keys: Vec<&str> = if platform == "codex" {
+        vec!["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_API_KEY"]
     } else {
-        direct_mode_auth::CLAUDE_AUTH_ENV
+        direct_mode_auth::claude_managed_env().collect()
     };
     for key in keys {
         if std::env::var_os(key).is_some_and(|v| !v.is_empty()) {

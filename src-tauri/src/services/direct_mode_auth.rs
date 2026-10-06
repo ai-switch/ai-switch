@@ -1,6 +1,7 @@
 //! 直连配置的纯生成器；不读取用户真实登录，不把解析输入带进错误信息。
 use crate::config_writer::hash_bytes;
 use crate::error::AppError;
+use crate::models::route_credential::CLAUDE_MODEL_SLOTS;
 use serde_json::{json, Map, Value};
 use toml_edit::{value, Document, Item, Table};
 
@@ -107,15 +108,17 @@ pub(crate) const CLAUDE_AUTH_ENV: &[&str] = &[
     "ANTHROPIC_CUSTOM_HEADERS",
     "ANTHROPIC_MODEL",
     "CLAUDE_CODE_SUBAGENT_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
     "AI_SWITCH_ROUTE_PROXY",
     "AI_SWITCH_ROUTE_PROXY_API_KEY",
 ];
+
+pub(crate) fn claude_managed_env() -> impl Iterator<Item = &'static str> {
+    CLAUDE_AUTH_ENV.iter().copied().chain(
+        CLAUDE_MODEL_SLOTS
+            .iter()
+            .flat_map(|slot| [slot.model_env_key, slot.name_env_key]),
+    )
+}
 
 /// 仅移除会改变认证、模型或端点选择的配置；权限、MCP、插件等原样保留。
 pub(crate) fn clean_claude_settings(existing: Option<&[u8]>) -> Result<Value, AppError> {
@@ -133,8 +136,8 @@ pub(crate) fn clean_claude_settings(existing: Option<&[u8]>) -> Result<Value, Ap
                 "Claude 的 env 必须是对象，未覆盖原文件。",
             )
         })?;
-    for key in CLAUDE_AUTH_ENV {
-        env.remove(*key);
+    for key in claude_managed_env() {
+        env.remove(key);
     }
     if let Some(ai_switch) = root_obj.get_mut("aiSwitch").and_then(Value::as_object_mut) {
         ai_switch.remove("routeProxy");
@@ -301,11 +304,16 @@ pub(crate) fn render(
             providers.insert("ai-switch-direct", Item::Table(provider));
             auth = json!({"auth_mode":"apikey","OPENAI_API_KEY":key});
         } else {
-            doc["model_provider"] = value("openai");
-            if doc
-                .get("model")
+            let custom_provider = doc
+                .get("model_provider")
                 .and_then(Item::as_str)
-                .is_some_and(|m| m.contains('/'))
+                .is_some_and(|p| p != "openai");
+            doc["model_provider"] = value("openai");
+            if custom_provider
+                || doc
+                    .get("model")
+                    .and_then(Item::as_str)
+                    .is_some_and(|m| m.contains('/'))
             {
                 doc.remove("model");
             }
@@ -423,9 +431,9 @@ pub(crate) fn fingerprint(platform: &str, config: &[u8]) -> Result<String, AppEr
     } else {
         let root = object(Some(config))?;
         let mut env = Map::new();
-        for key in CLAUDE_AUTH_ENV {
-            if let Some(v) = root["env"].get(*key) {
-                env.insert((*key).into(), v.clone());
+        for key in claude_managed_env() {
+            if let Some(v) = root["env"].get(key) {
+                env.insert(key.into(), v.clone());
             }
         }
         json!({"env":env,"model":root["model"],"helper":root["apiKeyHelper"]})
@@ -616,5 +624,36 @@ mod tests {
             Some(b"broken")
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    #[test]
+    fn review_api_to_official_clears_unqualified_model() {
+        let r = render(
+            "codex",
+            "official",
+            r#"{"access_token":"at","refresh_token":"rt","id_token":"id","account_id":"a"}"#,
+            "{}",
+            Some(b"model_provider = \"ai-switch-direct\"\nmodel = \"deepseek-v4-flash\"\n"),
+            None,
+        )
+        .unwrap();
+        let doc: toml::Value = toml::from_str(std::str::from_utf8(&r.config).unwrap()).unwrap();
+        assert!(doc.get("model").is_none());
+    }
+    #[test]
+    fn review_claude_clears_every_declared_model_slot() {
+        let mut env = serde_json::Map::new();
+        for slot in crate::models::route_credential::CLAUDE_MODEL_SLOTS {
+            env.insert(slot.model_env_key.into(), json!("route-alias"));
+            env.insert(slot.name_env_key.into(), json!("route-label"));
+        }
+        env.insert("EDITOR".into(), json!("vim"));
+        let result =
+            clean_claude_settings(Some(json!({"env":env}).to_string().as_bytes())).unwrap();
+        assert_eq!(result["env"], json!({"EDITOR":"vim"}));
     }
 }
