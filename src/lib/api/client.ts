@@ -11,6 +11,7 @@ import type {
   CodexOAuthStatus,
   ConfigWriteClientStatus,
   ConfigWriteOutcome,
+  DirectModeStatus,
   CopyRouteCredentialInput,
   CreateRoutePoolGroupInput,
   DeleteRoutePoolGroupInput,
@@ -861,4 +862,13 @@ export type NotificationChannelKind =
 
 export function testNotification(kind: NotificationChannelKind): Promise<void> {
   return invoke("test_notification", { kind });
+}
+
+// 仅注册为桌面命令，不向远端 Web/租户开放宿主认证写入。
+export function getClientDirectModes(): Promise<DirectModeStatus[]> {
+  return invoke("get_client_direct_modes");
+}
+
+export function enableClientDirectMode(credentialId: string): Promise<DirectModeStatus> {
+  return invoke("enable_client_direct_mode", { credentialId });
 }

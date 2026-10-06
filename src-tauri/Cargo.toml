@@ -99,3 +99,7 @@ libc = "0.2"
 
 [dev-dependencies]
 assert_fs = "1"
+
+# Claude Code 在 macOS 使用原生 Keychain；密钥不得出现在命令行参数中。
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }

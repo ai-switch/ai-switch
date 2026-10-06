@@ -69,6 +69,11 @@ function rustSources(dir: string): string[] {
 }
 
 describe("command contract", () => {
+  it("keeps direct authentication writes desktop-only", () => {
+    expect(desktopOnlyCommands).toContain("enable_client_direct_mode");
+    expect(readSource("src-tauri/src/web/handlers/mod.rs")).not.toContain('"enable_client_direct_mode" =>');
+  });
+
   it("keeps Codex OAuth login desktop-only", () => {
     for (const command of ["start_codex_oauth", "get_codex_oauth_status", "cancel_codex_oauth"]) {
       expect(desktopOnlyCommands).toContain(command);

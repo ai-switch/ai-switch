@@ -63,6 +63,16 @@ function setup(overrides: Partial<React.ComponentProps<typeof ConfigWriteTargets
 }
 
 describe("ConfigWriteTargetsDialog", () => {
+  it("直连提示只涵盖本次勾选客户端，取消勾选后不提交该客户端", async () => {
+    const { onSubmit } = setup({ directClientKeys: ["codex"] });
+    expect(screen.getByRole("note")).toHaveTextContent("Codex CLI");
+    await userEvent.click(screen.getByRole("checkbox", { name: /Codex CLI/ }));
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("checkbox", { name: /ZCode/ }));
+    await userEvent.click(screen.getByRole("button", { name: "写入" }));
+    expect(onSubmit).toHaveBeenCalledWith(["zcode"], null);
+  });
+
   it("lists every client with its file status", () => {
     setup();
 

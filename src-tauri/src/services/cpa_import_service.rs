@@ -30,6 +30,23 @@ pub fn parse_cpa_text(
     let value: Value = serde_json::from_str(trimmed)?;
 
     match value {
+        Value::Object(object) if platform == "claude" && object.contains_key("claudeAiOauth") => {
+            let mut native = object
+                .get("claudeAiOauth")
+                .and_then(Value::as_object)
+                .cloned()
+                .ok_or_else(|| {
+                    validation_error(
+                        "validation.cpa_shape",
+                        "claudeAiOauth must be an object",
+                        None,
+                    )
+                })?;
+            if let Some(expiry) = native.get("expiresAt").cloned() {
+                native.insert("expired".to_string(), expiry);
+            }
+            parse_cpa_object(platform, &native).map(|credential| vec![credential])
+        }
         Value::Object(object) => match object.get("accounts") {
             Some(accounts) => parse_cpa_accounts_wrapper(&platform, accounts),
             None => parse_cpa_object(&platform, &object).map(|credential| vec![credential]),
@@ -436,5 +453,23 @@ mod tests {
         assert!(parsed[0].config_json.contains("xai-grok-workspace/0.2.93"));
         assert!(parsed[0].config_json.contains("x-grok-client-version"));
         assert!(parsed[0].config_json.contains("X-XAI-Token-Auth"));
+    }
+}
+
+#[cfg(test)]
+mod native_claude_auth_tests {
+    use super::*;
+    #[test]
+    fn imports_native_claude_oauth_with_expiry_and_scopes_for_direct_mode() {
+        let input = r#"{"claudeAiOauth":{"accessToken":"at","refreshToken":"rt","expiresAt":4070908800000,"scopes":["user:inference","user:profile"],"subscriptionType":"max"}}"#;
+        let rows = parse_cpa_text("claude", input).unwrap();
+        let config: Value = serde_json::from_str(&rows[0].config_json).unwrap();
+        assert_eq!(config["expired"], 4070908800000i64);
+        let secret: Value = serde_json::from_str(&rows[0].secret_payload_json).unwrap();
+        assert_eq!(secret["access_token"], "at");
+        assert_eq!(
+            config["raw"]["scopes"],
+            json!(["user:inference", "user:profile"])
+        );
     }
 }

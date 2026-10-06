@@ -17,6 +17,7 @@ use crate::paths::AppPaths;
 use crate::services::config_write_service::{
     route_config_path_context, ConfigWriteCoordinator, ConfigWriteRequest, ConfigWriteRuntimeState,
 };
+use crate::services::direct_mode_service::DirectModeService;
 use crate::services::platform_capability_service::PlatformCapabilityService;
 use crate::services::route_model_capability::{
     advertised_model_catalog_entries, catalog_member_inputs, catalog_members,
@@ -129,7 +130,7 @@ impl RouteConfigService {
                     client_models: client_models.clone(),
                 },
             };
-            match ConfigWriteCoordinator::write_group(paths, pool, runtime, vec![request]).await {
+            match DirectModeService::write_route(paths, pool, runtime, request, false).await {
                 Ok(group) => {
                     any_succeeded |= group.iter().any(|outcome| outcome.status == "succeeded");
                     outcomes.extend(group);
@@ -179,6 +180,7 @@ impl RouteConfigService {
         base_url: &str,
         home: &Path,
     ) -> Result<Vec<ConfigWriteOutcome>, AppError> {
+        let _authentication_guard = DirectModeService::authentication_guard().await;
         let base_url = normalize_base_url(base_url)?;
         let platforms = RouteProxyKeyRepository::list_platforms(pool).await?;
         let registry = TargetAdapterRegistry::new();
@@ -229,6 +231,14 @@ impl RouteConfigService {
                 ));
                 continue;
             };
+            if DirectModeService::has_direct(pool, adapter.client_key()).await? {
+                skipped.push(skipped_outcome(
+                    adapter.target_key(),
+                    parsed.as_str(),
+                    "direct_mode.preserved",
+                ));
+                continue;
+            }
             if parsed == PlatformId::Codex {
                 Self::write_codex_model_catalog(pool, home).await?;
             }
@@ -339,6 +349,9 @@ impl RouteConfigService {
             RouteProxyKeyRepository::list_aliases_for_platform(pool, platform.as_str()).await?;
 
         for adapter in adapters {
+            if DirectModeService::has_direct(pool, adapter.client_key()).await? {
+                continue;
+            }
             let path = adapter.resolve_path_with_context(home, &path_context);
             let Ok(existing) = tokio::fs::read(&path).await else {
                 // A file we manage is gone; writing would recreate it.
@@ -375,6 +388,7 @@ impl RouteConfigService {
         platform: &str,
         route_proxy_key: &str,
     ) -> Result<ConfigWriteOutcome, AppError> {
+        let _authentication_guard = DirectModeService::authentication_guard().await;
         let base_url = normalize_base_url(base_url)?;
         let platform = PlatformId::parse(platform)?;
         PlatformCapabilityService::require(platform, PlatformOperation::ConfigWrite)?;
@@ -396,6 +410,13 @@ impl RouteConfigService {
                 client_models,
             },
         };
+        if DirectModeService::has_direct(pool, request.adapter.client_key()).await? {
+            return Ok(skipped_outcome(
+                request.adapter.target_key(),
+                platform.as_str(),
+                "direct_mode.preserved",
+            ));
+        }
         if platform == PlatformId::Codex {
             Self::write_codex_model_catalog(pool, home).await?;
         }

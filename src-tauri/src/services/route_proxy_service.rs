@@ -5085,6 +5085,23 @@ pub async fn maybe_refresh_official_credential(
         return Ok(credential.clone());
     }
 
+    let _authentication_guard =
+        crate::services::direct_mode_service::DirectModeService::authentication_guard().await;
+    if let Some(native) =
+        crate::services::direct_mode_service::DirectModeService::official_for_proxy(
+            pool, credential,
+        )
+        .await?
+    {
+        let native_secret = parse_json_object(&native.secret_payload_json, "secret")?;
+        let native_config = parse_json_object(&native.config_json, "config")?;
+        if access_token_is_expired_with_secret(&native_config, Some(&native_secret)) {
+            return Err(
+                "官方账号处于直连模式，请启动对应原生客户端刷新登录，或切回算力池。".to_string(),
+            );
+        }
+        return Ok(native);
+    }
     let secret = parse_json_object(&credential.secret_payload_json, "secret")?;
     let config = parse_json_object(&credential.config_json, "config")?;
     let has_access = string_value(&secret, "access_token").is_some()

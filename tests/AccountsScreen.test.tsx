@@ -20,6 +20,8 @@ import {
   getRoutePool,
   getRouteProxyKey,
   getRouteProxyStatus,
+  getClientDirectModes,
+  enableClientDirectMode,
   getUsageOverview,
   getSettings,
   importExternalClientAccounts,
@@ -104,6 +106,8 @@ vi.mock("../src/lib/api/client", () => ({
   getRoutePool: vi.fn(),
   getRouteProxyKey: vi.fn(),
   getRouteProxyStatus: vi.fn(),
+  getClientDirectModes: vi.fn(),
+  enableClientDirectMode: vi.fn(),
   getUsageOverview: vi.fn(),
   importExternalClientAccounts: vi.fn(),
   importOfficialRouteCredentialsFromFiles: vi.fn(),
@@ -496,11 +500,84 @@ function dispatchPointerEvent(
 }
 
 describe("AccountsScreen", () => {
+  it("直连首次说明取消时不写入任何客户端", async () => {
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "启用 Team Account 的直连模式" }));
+    const dialog = screen.getByRole("dialog", { name: "启用直连模式" });
+    expect(within(dialog).getByText(/精确模式/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/其他客户端/)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(enableClientDirectMode).not.toHaveBeenCalled();
+    expect(localStorage.getItem("ai-switch:direct-mode-notice:v1")).toBeNull();
+  });
+
+  it("直连成功后显示绑定账号并记住首次确认", async () => {
+    const status = {client_key:"codex",credential_id:"cred-official-1",platform:"codex",credential_kind:"official",status:"active",updated_at:"2026-10-06T00:00:00Z",restart_required:true} as const;
+    vi.mocked(enableClientDirectMode).mockImplementation(async () => {
+      vi.mocked(getClientDirectModes).mockResolvedValue([status]);
+      return status;
+    });
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "启用 Team Account 的直连模式" }));
+    await userEvent.click(screen.getByRole("button", { name: "确认启用直连" }));
+    await waitFor(() => expect(enableClientDirectMode).toHaveBeenCalledWith("cred-official-1"));
+    expect(await screen.findByRole("button", { name: "Team Account 直连中，恢复算力池" })).toBeInTheDocument();
+    expect(localStorage.getItem("ai-switch:direct-mode-notice:v1")).toBe("accepted");
+    expect(screen.getByRole("status")).toHaveTextContent(/重启/);
+    await userEvent.click(screen.getByRole("button", { name: "Team Account 直连中，恢复算力池" }));
+    vi.mocked(getClientDirectModes).mockResolvedValue([]);
+    const restoreDialog = screen.getByRole("dialog");
+    await userEvent.click(screen.getByRole("button", { name: "写入" }));
+    // 等偏好保存与 onSuccess 全部完成，不能让异步保存泄漏到下一条测试的 spy。
+    await waitFor(() => expect(restoreDialog).not.toBeInTheDocument());
+    await waitFor(() => expect(writeRouteProxyConfigs).toHaveBeenCalled());
+    expect(screen.queryByText(/已为 Codex 启用直连模式/)).not.toBeInTheDocument();
+  });
+
+  it("直连失败不记确认状态也不显示直连中", async () => {
+    vi.mocked(enableClientDirectMode).mockRejectedValue(new Error("凭据缺少 scopes"));
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "启用 Team Account 的直连模式" }));
+    await userEvent.click(screen.getByRole("button", { name: "确认启用直连" }));
+    const dialog = screen.getByRole("dialog", { name: "启用直连模式" });
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(/scopes/);
+    expect(localStorage.getItem("ai-switch:direct-mode-notice:v1")).toBeNull();
+    expect(screen.queryByRole("button", { name: /直连中，恢复算力池/ })).not.toBeInTheDocument();
+  });
+
+  it("直连恢复入口默认只勾选当前原生客户端", async () => {
+    vi.mocked(getClientDirectModes).mockResolvedValue([{client_key:"codex",credential_id:"cred-official-1",platform:"codex",credential_kind:"official",status:"active",updated_at:"2026-10-06T00:00:00Z",restart_required:true}]);
+    vi.mocked(getSettings).mockResolvedValue({...settingsFixture,config_write_clients_json:JSON.stringify({codex:["zcode"]})});
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "Team Account 直连中，恢复算力池" }));
+    expect(await screen.findByRole("checkbox", { name: /Codex CLI/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /ZCode/ })).not.toBeChecked();
+  });
+
+  it("已确认说明的用户再次启用直连不重复弹窗", async () => {
+    localStorage.setItem("ai-switch:direct-mode-notice:v1","accepted");
+    vi.mocked(enableClientDirectMode).mockResolvedValue({client_key:"codex",credential_id:"cred-official-1",platform:"codex",credential_kind:"official",status:"active",updated_at:"2026-10-06T00:00:00Z",restart_required:true});
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "启用 Team Account 的直连模式" }));
+    await waitFor(() => expect(enableClientDirectMode).toHaveBeenCalledWith("cred-official-1"));
+    expect(screen.queryByRole("dialog",{name:"启用直连模式"})).not.toBeInTheDocument();
+    expect(await screen.findByText(/已为 Codex 启用直连模式/)).toBeInTheDocument();
+  });
+
+  it("远端界面不提供修改宿主认证的直连按钮", async () => {
+    vi.mocked(isDesktop).mockReturnValue(false);
+    renderScreen();
+    await screen.findByText("Team Account");
+    expect(screen.queryByRole("button",{name:"启用 Team Account 的直连模式"})).not.toBeInTheDocument();
+  });
+
   afterEach(() => {
     vi.useRealTimers();
   });
 
   beforeEach(() => {
+    vi.mocked(getClientDirectModes).mockResolvedValue([]);
+    vi.mocked(enableClientDirectMode).mockReset();
     window.localStorage.clear();
     vi.mocked(isDesktop).mockReturnValue(true);
     vi.mocked(open).mockReset();
@@ -690,6 +767,7 @@ describe("AccountsScreen", () => {
     });
     vi.mocked(listRouteCredentials).mockResolvedValue(credentialsFixture);
     vi.mocked(getSettings).mockResolvedValue(settingsFixture);
+    vi.mocked(saveSettings).mockReset();
     vi.mocked(saveSettings).mockImplementation(async (settings) => settings);
     vi.mocked(archiveRouteCredentials).mockResolvedValue(undefined);
     vi.mocked(refreshRouteCredentialQuota).mockResolvedValue({

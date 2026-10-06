@@ -1115,6 +1115,11 @@ pub async fn dispatch_command(
                 .await
                 .map_err(to_error)?,
         ),
+        "get_client_direct_modes" => to_value(
+            crate::services::direct_mode_service::DirectModeService::statuses(&state.pool)
+                .await
+                .map_err(to_error)?,
+        ),
         "write_route_proxy_configs" => {
             let base_url = optional_string_arg(&args, "baseUrl")?;
             let platform = optional_string_arg(&args, "platform")?.ok_or_else(|| {

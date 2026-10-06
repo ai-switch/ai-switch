@@ -3,6 +3,7 @@ use commands::batch_commands::{
     create_batch, create_official_account, create_provider, get_official_account,
     list_batch_groups, update_official_account,
 };
+use commands::direct_mode_commands::{enable_client_direct_mode, get_client_direct_modes};
 use commands::disk_space_commands::get_disk_space_status;
 use commands::external_client_import_commands::{
     import_external_client_accounts, preview_external_client_import,
@@ -610,6 +611,8 @@ pub fn run() {
             get_route_proxy_status,
             get_route_proxy_key,
             write_route_proxy_configs,
+            get_client_direct_modes,
+            enable_client_direct_mode,
             route_config_write_is_stale,
             get_route_proxy_https_status,
             enable_route_proxy_https,

@@ -27,6 +27,7 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 /// every fresh start and would make an empty database look occupied.
 const USER_DATA_TABLES: &[&str] = &[
     "route_credentials",
+    "client_direct_modes",
     "route_pool_groups",
     "route_pool_members",
     "providers",
@@ -1423,15 +1424,20 @@ mod recovery_tests {
         let probe = super::create_pool(&database_file)
             .await
             .expect("corrupt db still opens");
-        let probe_result: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
+        let probe_result = sqlx::query_scalar::<_, String>("PRAGMA quick_check")
             .fetch_all(&probe)
-            .await
-            .expect("quick_check runs");
+            .await;
         probe.close().await;
-        assert!(
-            !probe_result.iter().any(|r| r.eq_ignore_ascii_case("ok")) || probe_result.len() != 1,
-            "corruption should be detectable by quick_check, got {probe_result:?}"
-        );
+        // 表的数量改变后，同一损坏页可能让 SQLite 直接返回 SQLITE_CORRUPT，
+        // 而不是返回含损坏描述的行；二者都证明损坏被检测到。其他错误仍失败。
+        match probe_result {
+            Ok(rows) => assert!(
+                !rows.iter().any(|r| r.eq_ignore_ascii_case("ok")) || rows.len() != 1,
+                "corruption should be detectable by quick_check, got {rows:?}"
+            ),
+            Err(sqlx::Error::Database(error)) => assert_eq!(error.code().as_deref(), Some("11")),
+            Err(error) => panic!("unexpected quick_check failure: {error}"),
+        }
 
         let recovered = open_migrated_pool(&database_file, &backups_dir)
             .await

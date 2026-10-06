@@ -18,6 +18,7 @@ import {
   FileCode2,
   GripVertical,
   KeyRound,
+  Link2,
   LayoutGrid,
   List,
   MessageSquareText,
@@ -57,6 +58,8 @@ import {
   useExternalClientImportPreview,
 } from "../components/accounts/ExternalClientImportPanel";
 import { CodexOAuthDialog } from "../components/accounts/CodexOAuthDialog";
+import { DirectModeDialog, hasAcceptedDirectModeNotice, rememberDirectModeNotice } from "../components/accounts/DirectModeDialog";
+import type { DirectModeStatus } from "../lib/api/types";
 import { ConfigWriteTargetsDialog } from "../components/accounts/ConfigWriteTargetsDialog";
 import { FormTabs, type FormTab } from "../components/accounts/FormTabs";
 import { RouteCredentialExportDialog } from "../components/accounts/RouteCredentialExportDialog";
@@ -142,6 +145,8 @@ import {
   updateRoutePoolGroup,
   routeConfigWriteIsStale,
   writeRouteProxyConfigs,
+  getClientDirectModes,
+  enableClientDirectMode,
 } from "../lib/api/client";
 import type {
   AccountStatus,
@@ -3062,6 +3067,43 @@ export function AccountsScreen({
   const officialImportReason = capabilityReason(officialImportRule);
   const officialQuotaReason = capabilityReason(officialQuotaRule);
   const modelTestReason = capabilityReason(modelTestRule);
+  const directModeSupported = desktop && (activePlatform === "codex" || activePlatform === "claude");
+  const [pendingDirectCredential, setPendingDirectCredential] = useState<RouteCredential | null>(null);
+  const [directRestoreClient, setDirectRestoreClient] = useState<string | null>(null);
+  const [directModeMessage, setDirectModeMessage] = useState<string | null>(null);
+  const [directModeError, setDirectModeError] = useState<string | null>(null);
+  const directModesQuery = useQuery({
+    queryKey: ["client-direct-modes"],
+    queryFn: getClientDirectModes,
+    enabled: configWriteEnabled && (activePlatform === "codex" || activePlatform === "claude"),
+    staleTime: 10_000,
+    refetchOnWindowFocus: true,
+  });
+  const directModeMutation = useMutation({
+    mutationFn: (credentialId: string) => enableClientDirectMode(credentialId),
+    onMutate: () => { setDirectModeError(null); setDirectModeMessage(null); },
+    onSuccess: (status) => {
+      rememberDirectModeNotice();
+      setPendingDirectCredential(null);
+      queryClient.setQueryData<DirectModeStatus[]>(["client-direct-modes"], (current = []) => [
+        ...current.filter((item) => item.client_key !== status.client_key), status,
+      ]);
+      setDirectModeMessage(`已为 ${status.client_key === "codex" ? "Codex" : "Claude Code"} 启用直连模式，请重启该客户端。其他客户端保持不变。`);
+      void queryClient.invalidateQueries({ queryKey: ["client-direct-modes"] });
+      void queryClient.invalidateQueries({ queryKey: ["route-config-stale"] });
+      void queryClient.invalidateQueries({ queryKey: ["config-write-clients"] });
+    },
+    onError: (error) => {
+      setDirectModeError(formatApiError(error, "直连配置写入失败。"));
+      // 回滚发生冲突时也重新读取真实配置，不能保留上一次的“直连中”标签。
+      void queryClient.invalidateQueries({ queryKey: ["client-direct-modes"] });
+    },
+  });
+  const requestDirectMode = (credential: RouteCredential) => {
+    setDirectModeError(null);
+    if (hasAcceptedDirectModeNotice()) directModeMutation.mutate(credential.id);
+    else setPendingDirectCredential(credential);
+  };
   const [draftPoolIds, setDraftPoolIds] = useState<Set<string>>(() => new Set());
   const [selectedAccountIds, setSelectedAccountIds] = useState<Set<string>>(() => new Set());
   const [batchStatus, setBatchStatus] = useState<AccountStatus | "">("");
@@ -4909,10 +4951,15 @@ export function AccountsScreen({
       }
       return outcomes;
     },
-    onMutate: () => setConfigWriteError(null),
+    onMutate: () => {
+      setConfigWriteError(null);
+      setDirectModeMessage(null);
+      setDirectModeError(null);
+    },
     onSuccess: (outcomes) => {
       setConfigWriteOutcomes(outcomes);
       setConfigWriteDialogOpen(false);
+      setDirectRestoreClient(null);
       // A group resolves as long as one client succeeded, so a partial failure
       // arrives here rather than in `onError`. Without this the only trace is
       // the result panel, which clears itself a few seconds later.
@@ -4925,12 +4972,17 @@ export function AccountsScreen({
         });
         setConfigWriteError(`以下客户端没有写入成功：${names.join("、")}`);
       }
+      void queryClient.invalidateQueries({ queryKey: ["client-direct-modes"] });
       void queryClient.invalidateQueries({ queryKey: ["route-config-stale"] });
       void queryClient.invalidateQueries({
         queryKey: ["config-write-clients", activePlatform],
       });
     },
-    onError: (error) => setConfigWriteError(formatConfigWriteError(error)),
+    onError: (error) => {
+      setConfigWriteError(formatConfigWriteError(error));
+      // 配置可能已写成、但保存勾选偏好失败；模式以文件和后端状态为准。
+      void queryClient.invalidateQueries({ queryKey: ["client-direct-modes"] });
+    },
   });
   // The pool's own `/v1/models` changes the moment this is saved, so it is its own
   // mutation rather than a parameter of the write: a user whose clients discover
@@ -6297,8 +6349,8 @@ export function AccountsScreen({
                 // Platforms without a native config write still open the dialog:
                 // it is where the endpoint parameters for hand-configured clients
                 // live, and the write itself stays gated inside it.
-                disabled={!routeServiceReady || writeConfigsMutation.isPending}
-                onClick={() => setConfigWriteDialogOpen(true)}
+                disabled={!routeServiceReady || writeConfigsMutation.isPending || directModeMutation.isPending}
+                onClick={() => { setDirectRestoreClient(null); setConfigWriteDialogOpen(true); }}
                 title={
                   !configWriteEnabled
                     ? configWriteReason + "可在弹窗里复制端点参数手动配置。"
@@ -6504,6 +6556,8 @@ export function AccountsScreen({
         )}
         {/* The dialog stays open on failure and shows this same sentence, so
             rendering it here too would duplicate it on screen. */}
+        {directModeMessage ? <p role="status" className="mx-4 mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-950">{directModeMessage}</p> : null}
+        {directModeError && !pendingDirectCredential ? <p role="alert" className="mx-4 mb-3 rounded-xl bg-red-50 px-3 py-2 text-[12px] text-red-700">{directModeError}</p> : null}
         {configWriteError && !configWriteDialogOpen ? (
           <div className="mx-4 mb-3 flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-[12px] font-semibold text-red-700">
             <p role="alert">{configWriteError}</p>
@@ -7294,6 +7348,23 @@ export function AccountsScreen({
                       icon: <Send aria-hidden="true" className="h-3.5 w-3.5" />,
                     });
                   }
+                  const directStatus = directModesQuery.data?.find((item) => item.credential_id === credential.id);
+                  if (directModeSupported && !credential.archived_at) {
+                    const active = directStatus?.status === "active";
+                    rowActions.push({
+                      key: "direct",
+                      ariaLabel: active ? `${credential.display_name} 直连中，恢复算力池` : `启用 ${credential.display_name} 的直连模式`,
+                      menuLabel: active ? "直连中 · 恢复算力池" : "启用直连模式",
+                      title: !configWriteEnabled ? configWriteReason : active ? "当前账号直连中；点击选择客户端并恢复算力池" : "仅将对应的 Codex / Claude 原生客户端切换到此账号直连",
+                      disabled: !configWriteEnabled || directModeMutation.isPending || writeConfigsMutation.isPending || directModesQuery.isPending || directModesQuery.isError,
+                      onClick: () => {
+                        if (active) { setDirectRestoreClient(directStatus.client_key); setConfigWriteError(null); setConfigWriteDialogOpen(true); }
+                        else requestDirectMode(credential);
+                      },
+                      inlineToneClass: active ? "border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100" : "border-stone-200 text-stone-700 hover:bg-stone-50",
+                      icon: <Link2 aria-hidden="true" className="h-3.5 w-3.5" />,
+                    });
+                  }
                   rowActions.push({
                     key: "edit",
                     ariaLabel: `编辑 ${credential.display_name}`,
@@ -7393,6 +7464,7 @@ export function AccountsScreen({
                             {`P${credential.route_priority}-`}
                           </button>
                           <span>{credential.display_name}</span>
+                          {directStatus ? <span className="ml-1 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">{directStatus.status === "active" ? "直连中" : "直连配置已变更"}</span> : null}
                         </p>
                         {baseUrlLink && (
                           <button
@@ -8684,13 +8756,24 @@ export function AccountsScreen({
         </div>
       )}
 
+      {pendingDirectCredential ? (
+        <DirectModeDialog
+          accountName={pendingDirectCredential.display_name}
+          clientName={pendingDirectCredential.platform === "codex" ? "Codex" : "Claude Code"}
+          loading={directModeMutation.isPending}
+          error={directModeError}
+          onClose={() => { if (!directModeMutation.isPending) setPendingDirectCredential(null); }}
+          onConfirm={() => directModeMutation.mutate(pendingDirectCredential.id)}
+        />
+      ) : null}
       {configWriteDialogOpen ? (
         <ConfigWriteTargetsDialog
           capabilityDisabledReason={configWriteEnabled ? undefined : configWriteReason}
           clients={configWriteClientsQuery.data ?? []}
           error={configWriteError}
           httpsError={routeProxyQuery.data?.https_error ?? null}
-          initialSelection={storedClientSelection}
+          initialSelection={directRestoreClient ? [directRestoreClient] : storedClientSelection}
+          directClientKeys={(directModesQuery.data ?? []).filter((item) => item.platform === activePlatform).map((item) => item.client_key)}
           loading={writeConfigsMutation.isPending}
           modelMode={routePoolQuery.data?.model_mode ?? "aggregate"}
           modelModeSaving={setModelModeMutation.isPending}
@@ -8700,6 +8783,7 @@ export function AccountsScreen({
           onClose={() => {
             if (!writeConfigsMutation.isPending) {
               setConfigWriteDialogOpen(false);
+              setDirectRestoreClient(null);
             }
           }}
           onModelModeChange={(mode) => setModelModeMutation.mutate(mode)}

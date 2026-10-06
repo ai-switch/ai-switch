@@ -1,4 +1,5 @@
 export const desktopOnlyCommands = [
+  "enable_client_direct_mode",
   "start_codex_oauth",
   "get_codex_oauth_status",
   "cancel_codex_oauth",

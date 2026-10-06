@@ -196,6 +196,7 @@ type ConfigWriteTargetsDialogProps = {
   clients: ConfigWriteClientStatus[];
   /** `null` means the user has never chosen, so only the native client is checked. */
   initialSelection: string[] | null;
+  directClientKeys?: string[];
   capabilityDisabledReason?: string;
   /** Pool endpoint for clients this dialog cannot write; `null` until it is read. */
   poolBaseUrl?: string | null;
@@ -224,6 +225,7 @@ export function ConfigWriteTargetsDialog({
   platformLabel,
   clients,
   initialSelection,
+  directClientKeys = [],
   capabilityDisabledReason,
   poolBaseUrl = null,
   poolHttpsBaseUrl = null,
@@ -558,6 +560,11 @@ export function ConfigWriteTargetsDialog({
                   </ul>
                 )}
 
+                {clients.some((client) => selected.includes(client.client_key) && directClientKeys.includes(client.client_key)) ? (
+                  <p role="note" className="rounded-md border border-amber-200 bg-amber-50 px-3.5 py-3 text-xs leading-5 text-amber-950">
+                    本次写入成功后将结束 {clients.filter((client) => selected.includes(client.client_key) && directClientKeys.includes(client.client_key)).map((client) => client.display_name).join("、")} 的直连模式，切回算力池；请重启该客户端。未勾选的客户端配置与认证保持不变。
+                  </p>
+                ) : null}
                 {restartClients.length > 0 ? (
                   <p className="rounded-md border border-amber-200 bg-amber-50 px-3.5 py-3 text-xs leading-5 text-amber-950">
                     写入后需重启 {restartNames} 才生效（它不监听配置文件变化）。

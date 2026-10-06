@@ -15,3 +15,5 @@ pub mod route_proxy_https;
 pub mod route_relay_balance;
 pub mod settings;
 pub mod target_app;
+
+pub mod direct_mode;

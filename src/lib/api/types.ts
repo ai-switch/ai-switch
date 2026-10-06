@@ -1462,3 +1462,14 @@ export interface CodexOAuthStatus {
   account: ImportedCodexAccount | null;
   error: ApiError | null;
 }
+
+/** 原生客户端直连的配置状态；不携带登录凭据或备份内容。 */
+export type DirectModeStatus = {
+  client_key: string;
+  credential_id: string;
+  platform: string;
+  credential_kind: string;
+  status: "active" | "changed" | "unavailable";
+  updated_at: string;
+  restart_required: boolean;
+};

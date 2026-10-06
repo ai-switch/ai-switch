@@ -62,3 +62,7 @@ pub mod usage_overview_service;
 pub mod usage_response_body_cleanup_service;
 pub mod usage_response_id_backfill_service;
 pub mod web_service;
+
+pub mod direct_mode_auth;
+
+pub mod direct_mode_service;
