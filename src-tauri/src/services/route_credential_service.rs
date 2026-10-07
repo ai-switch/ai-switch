@@ -141,6 +141,13 @@ impl RouteCredentialService {
         validate_required("api_key", &input.api_key)?;
         validate_required("base_url", &input.base_url)?;
         validate_interface_format(&input.interface_format)?;
+        crate::services::responses_plaintext_reasoning::validate(
+            input
+                .responses_plaintext_reasoning_compat
+                .as_ref()
+                .map(|s| json!(s))
+                .as_ref(),
+        )?;
         validate_model_mappings(&input.model_mappings_json)?;
         let fetched_models = parse_fetched_models_json(input.fetched_models_json.as_deref())?;
         let api_key_field =
@@ -175,6 +182,9 @@ impl RouteCredentialService {
                 .responses_encrypted_content_aggressive_strip
                 .unwrap_or(false),
         });
+        if let Some(mode) = input.responses_plaintext_reasoning_compat {
+            config[crate::services::responses_plaintext_reasoning::CONFIG_KEY] = json!(mode);
+        }
         // Omitted rather than written as `false`, so an account that never opts in
         // carries no trace of the feature in its config.
         if input.force_reasoning_content.unwrap_or(false) {
@@ -294,6 +304,11 @@ impl RouteCredentialService {
         validate_route_priority(input.route_priority)?;
         validate_max_concurrency(input.max_concurrency)?;
         validate_failure_policy_config(&input.config_json)?;
+        if let Ok(config) = serde_json::from_str::<Value>(&input.config_json) {
+            crate::services::responses_plaintext_reasoning::validate(
+                config.get(crate::services::responses_plaintext_reasoning::CONFIG_KEY),
+            )?;
+        }
         let mut input = input;
         // A client that was handed a masked payload instead of the real secret
         // must not be able to write the mask back: the paired phone loads the same
@@ -1737,6 +1752,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -1781,6 +1797,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -1828,6 +1845,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -1912,6 +1930,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: Some(true),
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -1998,6 +2017,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2050,6 +2070,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2100,6 +2121,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2151,6 +2173,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: Some(true),
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2199,6 +2222,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2321,6 +2345,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2373,6 +2398,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2477,6 +2503,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: Some(true),
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2517,6 +2544,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2557,6 +2585,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2597,6 +2626,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2731,6 +2761,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2774,6 +2805,7 @@ mod tests {
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2822,6 +2854,7 @@ mod tests {
                     preview_json: None,
                     batch_id: None,
                     responses_custom_tool_compat: None,
+                    responses_plaintext_reasoning_compat: None,
                     responses_encrypted_content_cleanup: None,
                     responses_encrypted_content_aggressive_strip: None,
                     force_reasoning_content: None,
@@ -2865,6 +2898,7 @@ mod tests {
                     preview_json: None,
                     batch_id: None,
                     responses_custom_tool_compat: None,
+                    responses_plaintext_reasoning_compat: None,
                     responses_encrypted_content_cleanup: None,
                     responses_encrypted_content_aggressive_strip: None,
                     force_reasoning_content: None,
@@ -2907,6 +2941,7 @@ mod tests {
                     preview_json: None,
                     batch_id: None,
                     responses_custom_tool_compat: None,
+                    responses_plaintext_reasoning_compat: None,
                     responses_encrypted_content_cleanup: None,
                     responses_encrypted_content_aggressive_strip: None,
                     force_reasoning_content: None,
@@ -3120,5 +3155,69 @@ mod tests {
         .await
         .expect("new row");
         assert_eq!(pending, "pending_pricing");
+    }
+}
+
+#[cfg(test)]
+mod plaintext_reasoning_setting_tests {
+    use super::*;
+    use crate::database::{create_memory_pool, run_migrations};
+
+    #[tokio::test]
+    async fn plaintext_reasoning_modes_round_trip_and_old_clients_remain_auto() {
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        for mode in [None, Some("on"), Some("off"), Some("auto")] {
+            let mut input = json!({"platform":"codex","display_name":"fixture","api_key":"sk-test","base_url":"https://anyrouter.top/v1","interface_format":"openai-responses","model_mappings_json":"[]"});
+            if let Some(mode) = mode {
+                input["responses_plaintext_reasoning_compat"] = json!(mode);
+            }
+            let row =
+                RouteCredentialService::create_api(&pool, serde_json::from_value(input).unwrap())
+                    .await
+                    .unwrap();
+            let config: Value = serde_json::from_str(&row.config_json).unwrap();
+            assert_eq!(
+                config
+                    .get("responses_plaintext_reasoning_compat")
+                    .and_then(Value::as_str),
+                mode
+            );
+        }
+        // 更新入口也必须拒绝非法值，且失败不能覆盖已保存设置。
+        let input = json!({"platform":"codex","display_name":"fixture","api_key":"sk-test","base_url":"https://anyrouter.top/v1","interface_format":"openai-responses","model_mappings_json":"[]","responses_plaintext_reasoning_compat":"off"});
+        let row = RouteCredentialService::create_api(&pool, serde_json::from_value(input).unwrap())
+            .await
+            .unwrap();
+        let mut update = json!({"display_name":row.display_name,"email":row.email,"status":row.status,"route_priority":row.route_priority,"max_concurrency":row.max_concurrency,"secret_payload_json":row.secret_payload_json,"config_json":r#"{"responses_plaintext_reasoning_compat":"on","keep":"yes"}"#,"preview_json":row.preview_json});
+        let changed = RouteCredentialService::update(
+            &pool,
+            row.id.clone(),
+            serde_json::from_value(update.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+        let stored: Value = serde_json::from_str(&changed.config_json).unwrap();
+        assert_eq!(stored["responses_plaintext_reasoning_compat"], "on");
+        update["config_json"] = json!(r#"{"responses_plaintext_reasoning_compat":true}"#);
+        assert!(RouteCredentialService::update(
+            &pool,
+            row.id.clone(),
+            serde_json::from_value(update).unwrap()
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            RouteCredentialRepository::get(&pool, &row.id)
+                .await
+                .unwrap()
+                .config_json,
+            changed.config_json
+        );
+        let input = json!({"platform":"codex","display_name":"fixture","api_key":"sk-test","base_url":"https://anyrouter.top/v1","interface_format":"openai-responses","model_mappings_json":"[]","responses_plaintext_reasoning_compat":"bogus"});
+        let input = serde_json::from_value(input).unwrap();
+        assert!(RouteCredentialService::create_api(&pool, input)
+            .await
+            .is_err());
     }
 }

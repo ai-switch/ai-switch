@@ -64,6 +64,8 @@ import { ConfigWriteTargetsDialog } from "../components/accounts/ConfigWriteTarg
 import { FormTabs, type FormTab } from "../components/accounts/FormTabs";
 import { RouteCredentialExportDialog } from "../components/accounts/RouteCredentialExportDialog";
 import { CopyRouteCredentialDialog } from "../components/accounts/CopyRouteCredentialDialog";
+import { ResponsesPlaintextReasoningOption } from "../components/accounts/ResponsesPlaintextReasoningOption";
+import { plaintextReasoningModeFromConfig, writePlaintextReasoningMode, type ResponsesPlaintextReasoningMode } from "../lib/responsesPlaintextReasoning";
 import { UsageOverviewPanel } from "../components/accounts/UsageOverviewPanel";
 import { QuickEditDialog } from "../components/accounts/QuickEditDialog";
 import { neighborsForDrop } from "../lib/accountReorder";
@@ -1638,12 +1640,14 @@ function apiConfigJsonWithFields(
   responsesEncryptedContentCleanup = false,
   responsesEncryptedContentAggressiveStrip = false,
   forceReasoningContent = false,
+  plaintextReasoningMode: ResponsesPlaintextReasoningMode = plaintextReasoningModeFromConfig(parseJsonObject(configJson)),
 ) {
   const config = parseJsonObject(configJson);
   config.base_url = baseUrl.trim();
   config.interface_format = interfaceFormat;
   config.model_mappings = mappings;
   config.responses_custom_tool_compat = responsesCustomToolCompat;
+  writePlaintextReasoningMode(config, plaintextReasoningMode);
   config.responses_encrypted_content_cleanup = responsesEncryptedContentCleanup;
   // Subordinate to the main switch: never persist an aggressive opt-in on its
   // own, so turning cleanup off cannot leave a live stripping flag behind.
@@ -3212,6 +3216,7 @@ export function AccountsScreen({
   const [apiResponsesCustomToolCompat, setApiResponsesCustomToolCompat] = useState(false);
   const [apiForceReasoningContent, setApiForceReasoningContent] = useState(false);
   const [apiResponsesEncryptedContentCleanup, setApiResponsesEncryptedContentCleanup] = useState(false);
+  const [apiPlaintextReasoningMode, setApiPlaintextReasoningMode] = useState<ResponsesPlaintextReasoningMode>("auto");
   const [apiResponsesEncryptedContentAggressiveStrip, setApiResponsesEncryptedContentAggressiveStrip] = useState(false);
   const [apiUserAgent, setApiUserAgent] = useState("");
   const [apiKeyField, setApiKeyField] = useState<AnthropicApiKeyField>(() =>
@@ -3260,6 +3265,7 @@ export function AccountsScreen({
   const [editResponsesCustomToolCompat, setEditResponsesCustomToolCompat] = useState(false);
   const [editForceReasoningContent, setEditForceReasoningContent] = useState(false);
   const [editResponsesEncryptedContentCleanup, setEditResponsesEncryptedContentCleanup] = useState(false);
+  const [editPlaintextReasoningMode, setEditPlaintextReasoningMode] = useState<ResponsesPlaintextReasoningMode>("auto");
   const [editResponsesEncryptedContentAggressiveStrip, setEditResponsesEncryptedContentAggressiveStrip] = useState(false);
   const [editInlineRemoteImages, setEditInlineRemoteImages] = useState(false);
   const [editTurnReminder, setEditTurnReminder] = useState(false);
@@ -3903,6 +3909,7 @@ export function AccountsScreen({
     setApiInterfaceFormat(nextInterfaceFormat);
     setApiResponsesCustomToolCompat(false);
     setApiForceReasoningContent(false);
+    setApiPlaintextReasoningMode("auto");
     setApiResponsesEncryptedContentCleanup(false);
     setApiResponsesEncryptedContentAggressiveStrip(false);
     setApiUserAgent("");
@@ -3963,6 +3970,7 @@ export function AccountsScreen({
       setEditApiKeyField(anthropicApiKeyFieldFromConfig(config, "ANTHROPIC_API_KEY"));
       setEditResponsesCustomToolCompat(responsesCustomToolCompatFromConfig(config));
       setEditForceReasoningContent(forceReasoningContentFromConfig(config));
+      setEditPlaintextReasoningMode(plaintextReasoningModeFromConfig(config));
       setEditResponsesEncryptedContentCleanup(config.responses_encrypted_content_cleanup === true);
       setEditResponsesEncryptedContentAggressiveStrip(
         config.responses_encrypted_content_aggressive_strip === true,
@@ -3982,6 +3990,7 @@ export function AccountsScreen({
       setEditApiKeyField("ANTHROPIC_API_KEY");
       setEditResponsesCustomToolCompat(false);
       setEditForceReasoningContent(false);
+      setEditPlaintextReasoningMode("auto");
       setEditResponsesEncryptedContentCleanup(false);
       setEditResponsesEncryptedContentAggressiveStrip(false);
       setEditInlineRemoteImages(false);
@@ -4463,6 +4472,7 @@ export function AccountsScreen({
           batch_id: batch?.id ?? null,
           responses_custom_tool_compat: apiResponsesCustomToolCompat,
           ...(apiForceReasoningContent ? { force_reasoning_content: true } : {}),
+          ...(apiPlaintextReasoningMode !== "auto" ? { responses_plaintext_reasoning_compat: apiPlaintextReasoningMode } : {}),
           ...(apiResponsesEncryptedContentCleanup ? { responses_encrypted_content_cleanup: true } : {}),
           ...(apiResponsesEncryptedContentCleanup && apiResponsesEncryptedContentAggressiveStrip
             ? { responses_encrypted_content_aggressive_strip: true }
@@ -5167,6 +5177,7 @@ export function AccountsScreen({
                 editResponsesEncryptedContentCleanup,
                 editResponsesEncryptedContentAggressiveStrip,
                 editForceReasoningContent,
+                editPlaintextReasoningMode,
               ),
             )
           : writeUserAgentToConfig(
@@ -9288,6 +9299,9 @@ export function AccountsScreen({
                       </label>
                     ) : null}
                     {shouldShowResponsesCustomToolCompatForFormat(activePlatform, apiInterfaceFormat) ? (
+                      <ResponsesPlaintextReasoningOption mode={apiPlaintextReasoningMode} baseUrl={apiBaseUrl} onChange={setApiPlaintextReasoningMode} />
+                    ) : null}
+                    {shouldShowResponsesCustomToolCompatForFormat(activePlatform, apiInterfaceFormat) ? (
                       <ResponsesEncryptedContentCleanupOption
                         aggressiveStrip={apiResponsesEncryptedContentAggressiveStrip}
                         checked={apiResponsesEncryptedContentCleanup}
@@ -10117,6 +10131,9 @@ export function AccountsScreen({
                         </span>
                       </span>
                     </label>
+                  ) : null}
+                  {shouldShowResponsesCustomToolCompatForFormat(activePlatform, editApiInterfaceFormat) ? (
+                    <ResponsesPlaintextReasoningOption mode={editPlaintextReasoningMode} baseUrl={editApiBaseUrl} onChange={setEditPlaintextReasoningMode} />
                   ) : null}
                   {shouldShowResponsesCustomToolCompatForFormat(activePlatform, editApiInterfaceFormat) ? (
                     <ResponsesEncryptedContentCleanupOption

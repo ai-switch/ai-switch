@@ -66,3 +66,5 @@ pub mod web_service;
 pub mod direct_mode_auth;
 
 pub mod direct_mode_service;
+
+pub mod responses_plaintext_reasoning;

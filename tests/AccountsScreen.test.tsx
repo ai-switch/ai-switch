@@ -4272,6 +4272,65 @@ describe("AccountsScreen", () => {
     );
   });
 
+  it("明文推理兼容自动匹配账号网站且手动关闭优先", async () => {
+    vi.mocked(listRouteCredentials).mockResolvedValue([{
+      ...credentialsFixture[1],config_json:JSON.stringify({base_url:"https://anyrouter.top/v1",interface_format:"openai-responses",model_mappings:[],unrelated:"keep"}),
+    }]);
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button",{name:"编辑 API Account"}));
+    await openFormTab("高级");
+    expect(screen.getByLabelText("Responses 明文推理兼容")).toHaveValue("auto");
+    expect(screen.getByText("自动：已开启，命中 anyrouter.top")).toBeInTheDocument();
+    expect(screen.getByLabelText("Responses 推理兼容清理")).not.toBeChecked();
+    await userEvent.selectOptions(screen.getByLabelText("Responses 明文推理兼容"),"off");
+    await userEvent.click(screen.getByRole("button",{name:"保存修改"}));
+    await waitFor(()=>expect(updateRouteCredential).toHaveBeenCalled());
+    const config=JSON.parse(vi.mocked(updateRouteCredential).mock.calls[0][1].config_json);
+    expect(config.responses_plaintext_reasoning_compat).toBe("off");
+    expect(config.responses_encrypted_content_cleanup).toBe(false);
+    expect(config.unrelated).toBe("keep");
+  });
+
+  it("明文推理兼容保留已有关闭配置并可恢复自动", async () => {
+    vi.mocked(listRouteCredentials).mockResolvedValue([{
+      ...credentialsFixture[1],config_json:JSON.stringify({base_url:"https://anyrouter.top/v1",interface_format:"openai-responses",model_mappings:[],responses_plaintext_reasoning_compat:"off"}),
+    }]);
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button",{name:"编辑 API Account"}));
+    await openFormTab("高级");
+    expect(screen.getByLabelText("Responses 明文推理兼容")).toHaveValue("off");
+    await userEvent.selectOptions(screen.getByLabelText("Responses 明文推理兼容"),"auto");
+    await userEvent.click(screen.getByRole("button",{name:"保存修改"}));
+    await waitFor(()=>expect(updateRouteCredential).toHaveBeenCalled());
+    const config=JSON.parse(vi.mocked(updateRouteCredential).mock.calls[0][1].config_json);
+    expect(config.responses_plaintext_reasoning_compat).toBeUndefined();
+  });
+
+  it("明文推理兼容可为其他网站强制开启，创建后重置且 Chat 不展示", async () => {
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button",{name:"新增账号"}));
+    await userEvent.click(screen.getByRole("button",{name:"API 账号"}));
+    await userEvent.type(screen.getByLabelText("API 账号名称"),"Plaintext API");
+    await userEvent.type(screen.getByLabelText("API Key"),"sk-fixture");
+    await userEvent.clear(screen.getByLabelText("Base URL"));
+    await userEvent.type(screen.getByLabelText("Base URL"),"https://other.example/v1");
+    await userEvent.selectOptions(screen.getByLabelText("接口格式"),"openai-responses");
+    await openFormTab("高级");
+    expect(screen.getByText("自动：未开启，网站未在兼容名单中")).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText("Responses 明文推理兼容"),"on");
+    await userEvent.click(screen.getByRole("button",{name:"保存账号"}));
+    await waitFor(()=>expect(createApiRouteCredential).toHaveBeenCalledWith(expect.objectContaining({responses_plaintext_reasoning_compat:"on"})));
+    await userEvent.click(await screen.findByRole("button",{name:"新增账号"}));
+    await userEvent.click(screen.getByRole("button",{name:"API 账号"}));
+    await userEvent.selectOptions(screen.getByLabelText("接口格式"),"openai-responses");
+    await openFormTab("高级");
+    expect(screen.getByLabelText("Responses 明文推理兼容")).toHaveValue("auto");
+    await openFormTab("基础");
+    await userEvent.selectOptions(screen.getByLabelText("接口格式"),"openai");
+    await openFormTab("高级");
+    expect(screen.queryByLabelText("Responses 明文推理兼容")).not.toBeInTheDocument();
+  });
+
   it("creates API account with Responses encrypted content cleanup enabled and resets it", async () => {
     renderScreen();
     await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));

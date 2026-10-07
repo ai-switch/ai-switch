@@ -4669,6 +4669,17 @@ fn build_api_upstream_request(
     // converted a Responses request into `messages` or `contents`, so a reminder
     // written any earlier would land in the wrong shape.
     let mut rewritten_body = rewritten_body;
+    // 目标账号专属的出站适配：切到 Chat/Anthropic/Gemini 不经过此分支，
+    // 客户端传入的历史字节从未修改，密文清理由下方独立开关控制。
+    if bridge_kind == Some(ProtocolBridgeKind::ResponsesToResponses)
+        && crate::services::responses_plaintext_reasoning::enabled(config)
+    {
+        if let Some(normalized) =
+            crate::services::responses_plaintext_reasoning::normalize(&rewritten_body)
+        {
+            rewritten_body = normalized;
+        }
+    }
     let mut reasoning_sanitized = false;
     if bridge_kind == Some(ProtocolBridgeKind::ResponsesToResponses)
         && responses_encrypted_content_cleanup_enabled(config)
@@ -12877,6 +12888,118 @@ mod tests {
             value.pointer("/model").and_then(Value::as_str),
             Some("gpt-5")
         );
+    }
+
+    #[test]
+    fn plaintext_reasoning_compat_is_scoped_to_responses_and_account_override() {
+        let request = json!({"model":"fixture","stream":true,"store":true,"input":[
+            {"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"opaque","content":[{"type":"reasoning_text","text":"Keep this reasoning"}]},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"Let me check."}]},
+            {"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},
+            {"type":"function_call_output","call_id":"call_1","output":"ok"},
+            {"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
+        ],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]});
+        let raw = serde_json::to_vec(&request).unwrap();
+        for (host, mode, converted) in [
+            ("anyrouter.top", None, true),
+            ("anyrouter.top", Some("off"), false),
+            ("another.example", None, false),
+            ("another.example", Some("on"), true),
+        ] {
+            let mut config = json!({"base_url":format!("https://{host}/v1"),"interface_format":"openai-responses","model_mappings":[]});
+            if let Some(mode) = mode {
+                config["responses_plaintext_reasoning_compat"] = json!(mode);
+            }
+            let account = api_credential_with_config("fixture", &config.to_string());
+            let (_, _, body) = build_upstream_request(
+                &account,
+                "codex",
+                "/v1/responses",
+                None,
+                HeaderMap::new(),
+                &raw,
+            )
+            .unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                value["input"][0].get("content").is_none(),
+                converted,
+                "{host} {mode:?}"
+            );
+            assert_eq!(value["input"][0]["encrypted_content"], "opaque");
+            assert_eq!(value["input"][2], request["input"][2]);
+            if converted {
+                assert_eq!(
+                    value["input"][0]["summary"][0]["text"],
+                    "Keep this reasoning"
+                );
+            }
+        }
+        // 切回 DeepSeek/GLM 的 Chat 接口，从原历史生成，不被 Responses 兼容规则污染。
+        let account=api_credential_with_config("chat",&json!({"base_url":"https://anyrouter.top/v1","interface_format":"openai","model_mappings":[],"responses_plaintext_reasoning_compat":"on"}).to_string());
+        let (_, _, body) = build_upstream_request(
+            &account,
+            "codex",
+            "/v1/responses",
+            None,
+            HeaderMap::new(),
+            &raw,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert!(value["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["reasoning_content"] == "Keep this reasoning"));
+        assert_eq!(serde_json::from_slice::<Value>(&raw).unwrap(), request);
+        for dialect in ["openai", "anthropic", "gemini"] {
+            let output = |mode: &str| {
+                let config = json!({"base_url":"https://anyrouter.top/v1","interface_format":dialect,"model_mappings":[],"responses_plaintext_reasoning_compat":mode});
+                let account = api_credential_with_config("switching-fixture", &config.to_string());
+                let (_, _, body) = build_upstream_request(
+                    &account,
+                    "codex",
+                    "/v1/responses",
+                    None,
+                    HeaderMap::new(),
+                    &raw,
+                )
+                .unwrap();
+                let mut value: Value = serde_json::from_slice(&body).unwrap();
+                if dialect == "anthropic" {
+                    // 现有身份适配器每次随机生成 session_id；只归一化这个随机值，
+                    // 其余正文、工具、推理载体及 metadata 字段必须完全一致。
+                    let mut identity: Value = serde_json::from_str(value["metadata"]["user_id"].as_str().unwrap()).unwrap();
+                    assert!(identity["session_id"].is_string());
+                    identity["session_id"] = json!("fixed-for-comparison");
+                    value["metadata"]["user_id"] = json!(identity.to_string());
+                }
+                value
+            };
+            assert_eq!(
+                output("on"),
+                output("off"),
+                "{dialect} 的出站请求不得受此开关影响"
+            );
+        }
+        // AnyRouter 阶段的请求副本即使被再送入 Chat，也能从摘要取回同样明文。
+        let normalized = crate::services::responses_plaintext_reasoning::normalize(&raw).unwrap();
+        let (_, _, body) = build_upstream_request(
+            &account,
+            "codex",
+            "/v1/responses",
+            None,
+            HeaderMap::new(),
+            &normalized,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert!(value["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["reasoning_content"] == "Keep this reasoning"));
     }
 
     #[test]

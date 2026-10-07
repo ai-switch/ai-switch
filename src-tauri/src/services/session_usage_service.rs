@@ -13,12 +13,11 @@
 //!   re-serialized into multiple files by resume and compaction, so rows must be
 //!   deduplicated by `message.id`. On a real machine this cut a 4020-row scan to
 //!   2008 unique messages — counting raw lines overstated cost by 93%.
-//! * **Codex CLI** (`~/.codex/sessions/**/*.jsonl`) — `token_count` events whose
-//!   `total_token_usage` is **cumulative for the session**, not per-turn. Only
-//!   the last event in a file may be counted. Summing them overstated one real
-//!   file by 350x (28.1B tokens against an actual 80.5M). A forked rollout also
-//!   opens with the parent's history replayed, which is the parent's spend and
-//!   must not be counted again.
+//! * **Codex CLI** (`~/.codex/sessions/**/*.jsonl`) — durable
+//!   `token_usage_record` entries provide the response id and per-request usage.
+//!   Legacy `token_count.total_token_usage` is cumulative, not per-request, so
+//!   only its deltas are counted when no authoritative record covers them.
+//!   Forked parent history is excluded, and duplicate records are deduplicated.
 
 use crate::services::model_pricing::{self, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -567,19 +566,14 @@ fn claude_token_usage(usage: &Value) -> TokenUsage {
     }
 }
 
-/// Parse one Codex CLI rollout into its per-turn billable entries.
+/// Parse one Codex rollout, preferring the explicit per-response usage record.
 ///
-/// `total_token_usage` accumulates over the session, so each turn is the
-/// difference from the previous event rather than the value itself. Summing the
-/// raw values overstated one real file by 350x (see the module header).
-///
-/// `last_token_usage` looks like it would serve directly, but on a real corpus
-/// only 12 of 58 comparable files had `Σ(last)` equal the final cumulative
-/// total — forked sessions re-report the parent's history. Diffing matched on
-/// 76 of 77.
-///
-/// A forked rollout replays that parent history at the head of the file, which
-/// [`replays_parent_history`] skips past.
+/// Native Responses output-item ids (`fc_…`, `rs_…`) are NOT response ids.
+/// `token_usage_record` supplies the authoritative id plus this request's usage;
+/// `thread_token_usage` is the exact cumulative checkpoint also emitted by the
+/// legacy `token_count` heartbeat. Reconcile those checkpoints, not timestamps,
+/// model spelling, or token similarity, so concurrent requests are never guessed.
+/// Legacy-only requests keep the original cumulative-delta parser.
 fn parse_codex_file(path: &Path) -> ParsedFile {
     let Some(lines) = read_lines(path) else {
         return ParsedFile::default();
@@ -588,33 +582,23 @@ fn parse_codex_file(path: &Path) -> ParsedFile {
     let mut model: Option<String> = None;
     let mut previous: Option<CodexCumulative> = None;
     let mut pending_response_id: Option<String> = None;
-    let mut entries = Vec::new();
-    // Set from `session_meta`, cleared at the first `turn_context`: see
-    // [`replays_parent_history`].
+    let mut entries: Vec<Option<UsageEntry>> = Vec::new();
+    let mut seen_record_ids = HashSet::new();
+    // Per-turn checkpoints: counters may restart at the same values in a later
+    // turn. A late explicit record can replace a legacy entry already read.
+    let mut record_checkpoints = HashSet::new();
+    let mut legacy_checkpoints: HashMap<CodexCumulative, usize> = HashMap::new();
     let mut replaying_parent = false;
 
     for (index, line) in lines.enumerate() {
-        // `session_meta` is always the first line, so the fork marker is read
-        // there rather than by testing every line for it.
         if index == 0 {
             replaying_parent = replays_parent_history(&line);
         }
-        // Cheap pre-filter: only `turn_context` (the model), `response_item`
-        // (the response id), and `token_count` events matter. The fourth test
-        // finds a `turn_context` that names no model, which would otherwise
-        // leave a replayed prefix open; it is only paid for while one is.
-        //
-        // `item_completed` is deliberately absent even though it looks like the
-        // place items moved to: it carries the same item under
-        // `payload.item`, and only the `response_item` copy holds
-        // `encrypted_content` where the upstream id now lives (291 rows against
-        // 0 on a real corpus). Reading it recovered no additional response id
-        // across 41 rollouts and 3518 billable turns, so adding it would only
-        // duplicate the parse.
         if !line.contains("token_count")
-            && !line.contains("\"model\"")
+            && !line.contains("token_usage_record")
+            && !line.contains("turn_context")
             && !line.contains("response_item")
-            && !(replaying_parent && line.contains("turn_context"))
+            && !line.contains("\"model\"")
         {
             continue;
         }
@@ -622,85 +606,163 @@ fn parse_codex_file(path: &Path) -> ParsedFile {
             continue;
         };
         let payload = entry.get("payload").unwrap_or(&Value::Null);
-
-        // This thread's first turn begins here, so the replay is over. The
-        // response id left pending by the last replayed item belongs to the
-        // parent's own entry — attaching it to a turn recorded below would have
-        // two entries claim one proxy row.
-        if replaying_parent && entry.get("type").and_then(Value::as_str) == Some("turn_context") {
+        let entry_type = entry.get("type").and_then(Value::as_str);
+        // Older rollouts may omit the envelope type. Keep that legacy model
+        // carrier supported without reading model names out of tool results.
+        if entry_type.is_none() {
+            if let Some(found) = payload
+                .get("model")
+                .and_then(Value::as_str)
+                .filter(|m| !m.trim().is_empty())
+            {
+                model = Some(found.to_string());
+            }
+        }
+        if entry_type == Some("turn_context") {
             replaying_parent = false;
             pending_response_id = None;
+            record_checkpoints.clear();
+            legacy_checkpoints.clear();
+            if let Some(found) = payload
+                .get("model")
+                .and_then(Value::as_str)
+                .filter(|m| !m.trim().is_empty())
+            {
+                model = Some(found.to_string());
+            }
+            continue;
         }
 
-        if let Some(found) = payload
-            .get("model")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
+        if entry_type == Some("token_usage_record") {
+            let Some(record) = CodexUsageRecord::parse(payload) else {
+                // Invalid/truncated or id-less new records must not swallow the
+                // legacy accounting event for that request.
+                continue;
+            };
+            if replaying_parent {
+                previous = Some(record.total);
+                continue;
+            }
+            if !seen_record_ids.insert(record.id.clone()) {
+                record_checkpoints.insert(record.total);
+                pending_response_id = None;
+                continue;
+            }
+            // Some writers flush the aggregate heartbeat before its individual
+            // records. Do not rewind a checkpoint already seen in this turn;
+            // otherwise the next legacy delta charges these records again.
+            let older_checkpoint = previous.is_some_and(|previous| {
+                record.total.delta_from(previous).is_none()
+                    && (legacy_checkpoints.contains_key(&previous)
+                        || record_checkpoints.contains(&previous))
+            });
+            let replaced = legacy_checkpoints.remove(&record.total);
+            if let Some(index) = replaced {
+                entries[index] = None;
+            }
+            if !older_checkpoint {
+                // Also advances the baseline when no token_count follows (e.g.
+                // the client exits while a tool is running). The next legacy
+                // request must not include this record's usage again.
+                previous = Some(record.total);
+            }
+            record_checkpoints.insert(record.total);
+            pending_response_id = None;
+            let entry_model = model.clone().unwrap_or_else(|| "unknown".to_string());
+            let timestamp_ms = entry_timestamp_ms(&entry);
+            entries.push(Some(UsageEntry {
+                provider: "codex",
+                dedup_key: codex_dedup_key(
+                    Some(&record.id),
+                    &entry_model,
+                    &record.usage,
+                    timestamp_ms,
+                ),
+                response_id: Some(record.id),
+                model: entry_model,
+                timestamp_ms,
+                usage: record.usage,
+            }));
+            continue;
+        }
+
+        if matches!(entry_type, None | Some("response_item")) {
+            if let Some(id) = codex_assistant_response_id(payload) {
+                pending_response_id = Some(id);
+            }
+            if entry_type.is_some() {
+                continue;
+            }
+        }
+        if !matches!(entry_type, None | Some("event_msg"))
+            || payload.get("type").and_then(Value::as_str) != Some("token_count")
         {
-            model = Some(found.to_string());
-        }
-
-        if let Some(id) = codex_assistant_response_id(payload) {
-            pending_response_id = Some(id);
-        }
-
-        if payload.get("type").and_then(Value::as_str) != Some("token_count") {
             continue;
         }
         let Some(total) = payload.pointer("/info/total_token_usage") else {
             continue;
         };
         let current = CodexCumulative::from_value(total);
-
+        // A skipped heartbeat must not leave its guessed output-item id pending
+        // for another request whose own output supplied no usable id.
+        let response_id = pending_response_id.take();
+        if record_checkpoints.contains(&current) {
+            continue;
+        }
         let delta = match previous {
-            // The same cumulative value is emitted 2-3 times in a row; only the
-            // first occurrence is a turn.
             Some(previous) if previous == current => continue,
             Some(previous) => current.delta_from(previous),
             None => Some(current.usage()),
         };
-        // A negative delta means the session counter reset (fork or resume), so
-        // the event starts a fresh running total instead of being diffed.
         let usage = delta.unwrap_or_else(|| current.usage());
         previous = Some(current);
-
-        // Advancing the running total is all a replayed event is good for: the
-        // parent's own rollout already counts this spend, and the prefix never
-        // states which model produced it.
         if replaying_parent {
             continue;
         }
 
-        // A rollout without a recorded model still represents real spend;
-        // attribute it to a placeholder so it appears as unpriced rather than
-        // vanishing from the totals.
         let entry_model = model.clone().unwrap_or_else(|| "unknown".to_string());
-        let response_id = pending_response_id.take();
         let timestamp_ms = entry_timestamp_ms(&entry);
-        entries.push(UsageEntry {
+        legacy_checkpoints.insert(current, entries.len());
+        entries.push(Some(UsageEntry {
             provider: "codex",
-            // Codex has no cross-file message id, but a resumed thread can replay
-            // an earlier turn's `token_count` into a second file (the fork case is
-            // already dropped above; a plain resume that spawns a new file is
-            // not). The upstream response id identifies one response exactly, so
-            // it doubles as the cross-file dedup key when present; when it is
-            // absent, an exact fingerprint stands in — a replay copies the same
-            // model, token counts and timestamp verbatim, while two genuinely
-            // distinct turns never share an exact-millisecond timestamp with
-            // identical tokens.
             dedup_key: codex_dedup_key(response_id.as_deref(), &entry_model, &usage, timestamp_ms),
             model: entry_model,
             response_id,
             timestamp_ms,
             usage,
-        });
+        }));
     }
-
-    ParsedFile { entries }
+    ParsedFile {
+        entries: entries.into_iter().flatten().collect(),
+    }
 }
 
-/// Cross-file dedup key for one Codex turn.
-///
+/// Both usage and the thread checkpoint are part of Codex's durable record.
+/// Only accept complete, nonnegative token accounting, never turn a malformed
+/// record into a zero-cost success that suppresses the valid legacy fallback.
+struct CodexUsageRecord {
+    id: String,
+    usage: TokenUsage,
+    total: CodexCumulative,
+}
+
+impl CodexUsageRecord {
+    fn parse(payload: &Value) -> Option<Self> {
+        let id = payload.get("response_id")?.as_str()?.trim();
+        if id.is_empty() {
+            return None;
+        }
+        let usage = CodexCumulative::checked(payload.get("usage")?)?;
+        let total = CodexCumulative::checked(payload.get("thread_token_usage")?)?;
+        total.delta_from(usage)?;
+        Some(Self {
+            id: id.to_string(),
+            usage: usage.usage(),
+            total,
+        })
+    }
+}
+
 /// A resumed thread can write the same `token_count` event into a second file.
 /// The upstream response id names one response exactly, so it is the key when
 /// present. Without it, a fingerprint of the model, every token counter and the
@@ -759,7 +821,7 @@ fn replays_parent_history(session_meta_line: &str) -> bool {
 }
 
 /// Cumulative token counts as Codex reports them, before cache adjustment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct CodexCumulative {
     input_tokens: i64,
     cached_input_tokens: i64,
@@ -768,6 +830,23 @@ struct CodexCumulative {
 }
 
 impl CodexCumulative {
+    fn checked(value: &Value) -> Option<Self> {
+        let value = value.as_object()?;
+        let count = |key: &str, required: bool| -> Option<i64> {
+            match value.get(key) {
+                None if !required => Some(0),
+                Some(number) => number.as_i64().filter(|n| *n >= 0),
+                _ => None,
+            }
+        };
+        Some(Self {
+            input_tokens: count("input_tokens", true)?,
+            output_tokens: count("output_tokens", true)?,
+            cached_input_tokens: count("cached_input_tokens", false)?,
+            cache_write_input_tokens: count("cache_write_input_tokens", false)?,
+        })
+    }
+
     fn from_value(total: &Value) -> Self {
         Self {
             input_tokens: json_i64(total.get("input_tokens")),
@@ -850,8 +929,9 @@ fn codex_assistant_response_id(payload: &Value) -> Option<String> {
             .strip_prefix("msg_"),
         _ => None,
     };
-    // The prefixed form wins when present: it is the item id the upstream itself
-    // minted, so it needs no shape test and cannot be a client-side uuid.
+    // Legacy fallback only: some bridges encode response ids this way, but
+    // native Responses item ids identify a different object. A durable
+    // token_usage_record always supersedes this guess in parse_codex_file.
     if let Some(id) = prefixed.filter(|id| !id.trim().is_empty()) {
         return Some(id.to_string());
     }
@@ -1819,3 +1899,7 @@ mod real_corpus {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "session_usage_service/codex_record_tests.rs"]
+mod codex_record_tests;

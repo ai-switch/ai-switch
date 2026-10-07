@@ -198,6 +198,9 @@ pub struct CreateApiRouteCredentialInput {
     pub batch_id: Option<String>,
     #[serde(default)]
     pub responses_custom_tool_compat: Option<bool>,
+    /// None/auto 跟随已验证的上游名单，off 优先于名单；仅影响出站明文推理。
+    #[serde(default)]
+    pub responses_plaintext_reasoning_compat: Option<String>,
     #[serde(default)]
     pub responses_encrypted_content_cleanup: Option<bool>,
     /// Sub-switch of `responses_encrypted_content_cleanup`: strip even

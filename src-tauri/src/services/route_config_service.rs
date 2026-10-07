@@ -1302,6 +1302,7 @@ command = "npx"
                 preview_json: None,
                 batch_id: None,
                 responses_custom_tool_compat: None,
+                responses_plaintext_reasoning_compat: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,

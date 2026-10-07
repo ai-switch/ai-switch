@@ -348,6 +348,7 @@ export type CreateApiRouteCredentialInput = {
   preview_json?: string | null;
   batch_id?: string | null;
   responses_custom_tool_compat?: boolean | null;
+  responses_plaintext_reasoning_compat?: "auto" | "on" | "off" | null;
   responses_encrypted_content_cleanup?: boolean | null;
   force_reasoning_content?: boolean | null;
   user_agent?: string | null;
