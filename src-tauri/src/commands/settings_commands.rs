@@ -20,6 +20,7 @@ pub async fn save_settings(
         &state.paths,
         &state.deeplink_protocols,
         &state.close_to_tray,
+        &state.route_proxy,
         settings,
     )
     .await

@@ -67,6 +67,7 @@ mod tests {
             config_write_clients_json: None,
             deepseek_harness_config_path: Some("/custom/dsh/settings.yaml".to_string()),
             notification_config_json: None,
+            route_proxy_request_body_limit_mib: 256,
             proxy_enabled: true,
             proxy_url: Some("http://127.0.0.1:7890".to_string()),
         };
@@ -91,6 +92,7 @@ mod tests {
             loaded.deepseek_harness_config_path.as_deref(),
             Some("/custom/dsh/settings.yaml")
         );
+        assert_eq!(loaded.route_proxy_request_body_limit_mib, 256);
         assert!(loaded.proxy_enabled);
         assert_eq!(
             loaded.proxy_url.as_deref(),

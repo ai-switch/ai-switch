@@ -546,6 +546,7 @@ mod tests {
             config_write_clients_json: None,
             deepseek_harness_config_path: None,
             notification_config_json: None,
+            route_proxy_request_body_limit_mib: 128,
             proxy_enabled: false,
             proxy_url: None,
         };

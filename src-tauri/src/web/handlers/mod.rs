@@ -548,6 +548,7 @@ pub async fn dispatch_command(
                     &state.paths,
                     &state.deeplink_protocols,
                     &state.close_to_tray,
+                    &state.route_proxy,
                     settings,
                 )
                 .await
@@ -1511,6 +1512,74 @@ mod tests {
                 event_broadcaster: Arc::new(WebEventBroadcaster::default()),
             }),
             _temp: temp,
+        }
+    }
+
+    #[tokio::test]
+    async fn request_body_limit_settings_round_trip_and_update_live_proxy() {
+        use crate::models::platform::PlatformId;
+        use crate::services::route_proxy_service::{build_proxy_state, proxy_handler};
+        use axum::{
+            body::Body,
+            extract::State,
+            http::{HeaderMap, Method, StatusCode},
+        };
+
+        let test = test_state().await;
+        let proxy = build_proxy_state(test.state.pool.clone(), &test.state.route_proxy)
+            .with_access_scope(PlatformId::Claude, Default::default());
+        let mut settings = dispatch_command(test.state.clone(), "get_settings", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(settings["route_proxy_request_body_limit_mib"], 128);
+        let mut payload =
+            br#"{"model":"claude-sonnet-4","messages":[{"role":"user","content":"hello"}]}"#.to_vec();
+        payload.resize(1024 * 1024 + 1, b' ');
+        for (limit, expected) in [
+            (1, StatusCode::PAYLOAD_TOO_LARGE),
+            (2, StatusCode::OK),
+            (0, StatusCode::OK),
+        ] {
+            settings["route_proxy_request_body_limit_mib"] = json!(limit);
+            let saved = dispatch_command(
+                test.state.clone(),
+                "save_settings",
+                json!({"settings": settings}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(saved["route_proxy_request_body_limit_mib"], limit);
+            let loaded = dispatch_command(test.state.clone(), "get_settings", json!({}))
+                .await
+                .unwrap();
+            assert_eq!(loaded["route_proxy_request_body_limit_mib"], limit);
+            // A stream without a Content-Length must obey the same live limit.
+            let body = Body::from_stream(futures_util::stream::iter(
+                payload
+                    .chunks(4096)
+                    .map(|chunk| Ok::<_, std::io::Error>(axum::body::Bytes::copy_from_slice(chunk)))
+                    .collect::<Vec<_>>(),
+            ));
+            let response = proxy_handler(
+                State(proxy.clone()),
+                Method::POST,
+                HeaderMap::new(),
+                "/v1/messages/count_tokens".parse().unwrap(),
+                body,
+            )
+            .await;
+            assert_eq!(response.status(), expected, "limit {limit} MiB");
+            if expected == StatusCode::PAYLOAD_TOO_LARGE {
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let error: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(error["error"]["code"], "route_proxy.request_body_too_large");
+                assert!(error["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("1 MiB"));
+            }
         }
     }
 

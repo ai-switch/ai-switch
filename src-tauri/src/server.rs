@@ -387,13 +387,18 @@ pub async fn run_from_env() -> Result<(), String> {
     crate::saas::config::apply_env_config(&pool)
         .await
         .map_err(|error| error.to_string())?;
+    let settings = crate::services::settings_service::SettingsService::load(&paths)
+        .await
+        .map_err(|error| error.to_string())?;
+    let route_proxy = RouteProxyRuntimeState::default();
+    route_proxy.set_request_body_limit_mib(settings.route_proxy_request_body_limit_mib);
     let state = Arc::new(AppState {
         paths,
         pool,
         config_writes: ConfigWriteRuntimeState::default(),
         deeplink_protocols: DeepLinkProtocolRuntime::default(),
         close_to_tray: crate::app_state::CloseToTrayRuntime::default(),
-        route_proxy: RouteProxyRuntimeState::default(),
+        route_proxy,
         saas: crate::saas::SaasRuntime::default(),
         web_service: WebServiceRuntimeState::default(),
         tailscale: TailscaleRuntimeState::default(),

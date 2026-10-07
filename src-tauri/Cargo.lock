@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ai-switch"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "argon2",
  "assert_fs",
@@ -32,6 +32,7 @@ dependencies = [
  "directories",
  "ed25519-dalek",
  "futures-util",
+ "http-body-util",
  "keyring",
  "libc",
  "portable-pty",

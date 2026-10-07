@@ -5,8 +5,6 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import {
   ArrowRight,
-  Archive,
-  ArchiveRestore,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -113,7 +111,6 @@ import {
   setRouteCredentialModelStatus,
   setRouteCredentialRecovery,
   createApiRouteCredential,
-  archiveRouteCredentials,
   deleteRouteCredential,
   deleteRoutePoolGroup,
   fetchRouteModels,
@@ -131,7 +128,6 @@ import {
   refreshRouteCredentialRelayBalance,
   refreshRouteCredentialsQuota,
   refreshRouteCredentialsRelayBalance,
-  restoreRouteCredentials,
   getSettings,
   routePoolTestModel,
   saveSettings,
@@ -5528,20 +5524,6 @@ export function AccountsScreen({
     },
   });
 
-  const archiveMutation = useMutation({
-    mutationFn: (ids: string[]) => archiveRouteCredentials(ids),
-    onSuccess: async () => {
-      setSelectedAccountIds(new Set());
-      await invalidateAccountData();
-    },
-  });
-  const restoreMutation = useMutation({
-    mutationFn: (ids: string[]) => restoreRouteCredentials(ids),
-    onSuccess: async () => {
-      setSelectedAccountIds(new Set());
-      await invalidateAccountData();
-    },
-  });
   const batchStatusMutation = useMutation({
     mutationFn: ({ ids, status }: { ids: string[]; status: AccountStatus }) =>
       setRouteCredentialStatuses(ids, status),
@@ -5566,28 +5548,6 @@ export function AccountsScreen({
 
   const clearAccountSelection = () => {
     setSelectedAccountIds(new Set());
-  };
-
-  const archiveSelectedAccounts = () => {
-    if (
-      selectedAccountIds.size === 0 ||
-      archiveMutation.isPending ||
-      restoreMutation.isPending
-    ) {
-      return;
-    }
-    archiveMutation.mutate(Array.from(selectedAccountIds));
-  };
-
-  const restoreSelectedAccounts = () => {
-    if (
-      selectedAccountIds.size === 0 ||
-      archiveMutation.isPending ||
-      restoreMutation.isPending
-    ) {
-      return;
-    }
-    restoreMutation.mutate(Array.from(selectedAccountIds));
   };
 
   const setSelectedAccountsStatus = () => {
@@ -7105,30 +7065,6 @@ export function AccountsScreen({
                       </option>
                     ))}
                   </select>
-                    <>
-                      <button
-                        aria-label="批量恢复账号"
-                        className="grid h-7 w-7 place-items-center border border-emerald-200 bg-white text-emerald-800 motion-control hover:bg-emerald-50 disabled:opacity-50"
-                        disabled={archiveMutation.isPending || restoreMutation.isPending}
-                        onClick={restoreSelectedAccounts}
-                        title="批量恢复账号"
-                        type="button"
-                      >
-                        <ArchiveRestore aria-hidden="true" className="h-3.5 w-3.5" />
-                        <span className="sr-only">批量恢复账号</span>
-                      </button>
-                      <button
-                        aria-label="批量归档账号"
-                        className="inline-flex h-7 items-center justify-center gap-1.5 border border-amber-200 bg-white px-2.5 text-[12px] font-semibold text-amber-800 motion-control hover:bg-amber-50 disabled:opacity-50"
-                        disabled={archiveMutation.isPending || restoreMutation.isPending}
-                        onClick={archiveSelectedAccounts}
-                        title="批量归档账号"
-                        type="button"
-                      >
-                        <Archive aria-hidden="true" className="h-3.5 w-3.5" />
-                        归档
-                      </button>
-                    </>
                   </>
                 <button
                   aria-label="批量删除账号"
@@ -8015,28 +7951,6 @@ export function AccountsScreen({
               </div>
             </div>
           )}
-          {/* role="alert" sits on the sentence, not the row: a screen reader
-              should announce what went wrong, not the × next to it. Dismissing
-              resets the mutation, which is the only way to clear an error
-              react-query owns. */}
-          {archiveMutation.error ? (
-            <div className="flex items-start justify-between gap-3 rounded-xl bg-red-50 px-3 py-2 text-[12px] font-semibold text-red-700">
-              <p role="alert">{formatApiError(archiveMutation.error, "归档账号失败。")}</p>
-              <DismissButton
-                ariaLabel="关闭归档账号错误"
-                onClick={() => archiveMutation.reset()}
-              />
-            </div>
-          ) : null}
-          {restoreMutation.error ? (
-            <div className="flex items-start justify-between gap-3 rounded-xl bg-red-50 px-3 py-2 text-[12px] font-semibold text-red-700">
-              <p role="alert">{formatApiError(restoreMutation.error, "恢复账号失败。")}</p>
-              <DismissButton
-                ariaLabel="关闭恢复账号错误"
-                onClick={() => restoreMutation.reset()}
-              />
-            </div>
-          ) : null}
           {/* A rejected reorder only snaps the row back, which reads as a dead
               drag handle. Say why instead. */}
           {reorderMutation.error ? (

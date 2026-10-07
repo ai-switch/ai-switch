@@ -289,6 +289,42 @@ describe("SettingsScreen", () => {
     expect(await screen.findByText("设置已保存。")).toBeInTheDocument();
   });
 
+  it("defaults the request body limit to 128 MiB and saves custom or unlimited values", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settingsFixture);
+    vi.mocked(saveSettings).mockImplementation(async (settings) => settings);
+    render(
+      <QueryClientProvider client={createQueryClient()}>
+        <I18nProvider initialLanguage="zh-CN"><SettingsScreen /></I18nProvider>
+      </QueryClientProvider>,
+    );
+    const input = await screen.findByRole("spinbutton", { name: "模型代理请求体上限（MiB）" });
+    expect(input).toHaveValue(128);
+    for (const limit of [256, 0]) {
+      await userEvent.clear(input);
+      await userEvent.type(input, String(limit));
+      await userEvent.tab();
+      await waitFor(() => expect(vi.mocked(saveSettings).mock.calls.at(-1)?.[0]).toEqual({
+        ...settingsFixture, route_proxy_request_body_limit_mib: limit,
+      }));
+      expect(input).toHaveValue(limit);
+    }
+  });
+
+  it.each(["", "-1", "1.5", "4294967296"])("rejects invalid request body limit %s without saving", async (value) => {
+    vi.mocked(getSettings).mockResolvedValue(settingsFixture);
+    render(
+      <QueryClientProvider client={createQueryClient()}>
+        <I18nProvider initialLanguage="zh-CN"><SettingsScreen /></I18nProvider>
+      </QueryClientProvider>,
+    );
+    const input = await screen.findByRole("spinbutton", { name: "模型代理请求体上限（MiB）" });
+    await userEvent.clear(input);
+    if (value) await userEvent.type(input, value);
+    await userEvent.tab();
+    expect(await screen.findByText("请输入有效的非负整数，0 表示不限。" )).toBeInTheDocument();
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
+
   it("validates and saves proxy settings", async () => {
     vi.mocked(getSettings).mockResolvedValue(settingsFixture);
     vi.mocked(saveSettings).mockImplementation(async (settings) => settings);

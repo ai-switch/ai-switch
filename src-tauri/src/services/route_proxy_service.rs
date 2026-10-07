@@ -12,6 +12,7 @@ use crate::models::route_credential_model::{
     FailureScope, RouteCredentialModelState, MODEL_STATUS_OK,
 };
 use crate::models::route_pool::RouteUsageBreakdown;
+use crate::models::settings::DEFAULT_ROUTE_PROXY_REQUEST_BODY_LIMIT_MIB;
 use crate::services::anthropic_thinking::strip_replayed_thinking_from_bytes;
 use crate::services::client_identity;
 use crate::services::codex_reasoning_cache::CodexReasoningCache;
@@ -71,6 +72,7 @@ use sqlx::{Row, SqlitePool};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -220,11 +222,25 @@ pub enum RouteProxyTransport {
     },
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RouteProxyRuntimeState {
     inner: Arc<Mutex<RouteProxyInner>>,
     activity: RouteCredentialActivityRegistry,
     live_log: RouteProxyLiveLog,
+    request_body_limit_mib: Arc<AtomicU32>,
+}
+
+impl Default for RouteProxyRuntimeState {
+    fn default() -> Self {
+        Self {
+            inner: Arc::default(),
+            activity: RouteCredentialActivityRegistry::default(),
+            live_log: RouteProxyLiveLog::default(),
+            request_body_limit_mib: Arc::new(AtomicU32::new(
+                DEFAULT_ROUTE_PROXY_REQUEST_BODY_LIMIT_MIB,
+            )),
+        }
+    }
 }
 
 /// A started listener together with the handle that stops it.
@@ -324,6 +340,8 @@ pub(crate) struct ProxyAppState {
     /// the call site so tests can drive a stalled upstream in milliseconds
     /// instead of waiting out the production ceiling.
     upstream_timeouts: OutboundTimeouts,
+    /// Shared with the runtime so saving settings affects existing listeners.
+    request_body_limit_mib: Arc<AtomicU32>,
 }
 
 #[derive(Clone)]
@@ -367,6 +385,10 @@ struct RouteProxyKeyCache {
 }
 
 impl RouteProxyRuntimeState {
+    pub fn set_request_body_limit_mib(&self, limit_mib: u32) {
+        self.request_body_limit_mib.store(limit_mib, Ordering::Relaxed);
+    }
+
     pub fn activity(&self) -> RouteCredentialActivityRegistry {
         self.activity.clone()
     }
@@ -425,6 +447,7 @@ pub(crate) fn build_proxy_state(
         live_log: runtime.live_log.clone(),
         codex_history: CodexReasoningCache::default(),
         upstream_timeouts: ProxyAppState::default_upstream_timeouts(),
+        request_body_limit_mib: runtime.request_body_limit_mib.clone(),
     }
 }
 
@@ -896,9 +919,23 @@ pub(crate) async fn forward_request(
         ));
     }
 
-    let body_bytes = axum::body::to_bytes(body, 32 * 1024 * 1024)
+    let limit_mib = state.request_body_limit_mib.load(Ordering::Relaxed);
+    let limit_bytes = if limit_mib == 0 {
+        usize::MAX
+    } else {
+        (limit_mib as usize).saturating_mul(1024 * 1024)
+    };
+    let body_bytes = axum::body::to_bytes(body, limit_bytes)
         .await
-        .map_err(|err| format!("Could not read proxy request body: {err}"))?;
+        .map_err(|err| {
+            if std::error::Error::source(&err)
+                .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
+            {
+                format!("route_proxy.request_body_too_large: Request body exceeds the configured limit of {limit_mib} MiB. Increase the model proxy request body limit in Settings, or set it to 0 for unlimited.")
+            } else {
+                format!("Could not read proxy request body: {err}")
+            }
+        })?;
 
     // Anthropic's token-counting endpoint, answered locally. No bridge can
     // convert it, and most third-party relays do not implement it — forwarding
@@ -3551,6 +3588,8 @@ fn json_error(status: StatusCode, message: &str) -> Response {
         "route_proxy.key_invalid"
     } else if platform_unresolved {
         "route_proxy.auth_required"
+    } else if message.contains("route_proxy.request_body_too_large") {
+        "route_proxy.request_body_too_large"
     } else if message.contains("No enabled route credentials in pool") {
         "route_pool.empty"
     } else if message.contains("route_pool.model_unmatched") {
@@ -3582,6 +3621,9 @@ fn json_error(status: StatusCode, message: &str) -> Response {
 }
 
 fn route_proxy_error_status(message: &str) -> StatusCode {
+    if message.contains("route_proxy.request_body_too_large") {
+        return StatusCode::PAYLOAD_TOO_LARGE;
+    }
     if message.contains("route_proxy.platform_unresolved")
         || message.contains("route_proxy.key_invalid")
     {
@@ -7730,7 +7772,7 @@ mod tests {
         uri: axum::http::Uri,
         body: Body,
     ) -> Response {
-        let body = axum::body::to_bytes(body, 32 * 1024 * 1024)
+        let body = axum::body::to_bytes(body, usize::MAX)
             .await
             .expect("upstream request body");
         let value = serde_json::from_slice::<Value>(&body).expect("upstream request json");
@@ -8886,6 +8928,43 @@ mod tests {
         );
 
         RouteProxyService::stop(&runtime).await.expect("stop proxy");
+    }
+
+    #[tokio::test]
+    async fn request_body_limit_default_forwards_more_than_32_mib() {
+        let (upstream, mut requests) = start_recording_chat_upstream().await;
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let id = create_proxy_api_credential_with_mappings(
+            &pool,
+            "large-request",
+            &upstream,
+            json!([{"from": "gpt-5", "to": "deepseek-chat"}]),
+        )
+        .await;
+        let runtime = RouteProxyRuntimeState::default();
+        let state =
+            build_proxy_state(pool, &runtime).with_access_scope(PlatformId::Codex, HashSet::from([id]));
+        let mut payload =
+            br#"{"model":"gpt-5","messages":[{"role":"user","content":"hello"}]}"#.to_vec();
+        payload.resize(33 * 1024 * 1024, b' ');
+        let response = proxy_handler(
+            AxumState(state),
+            Method::POST,
+            HeaderMap::new(),
+            "/v1/chat/completions".parse().unwrap(),
+            Body::from(payload),
+        )
+        .await;
+        let status = response.status();
+        let response_body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&response_body));
+        let captured = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(captured.body["messages"][0]["content"], "hello");
+        assert_eq!(captured.path, "/v1/chat/completions");
     }
 
     #[tokio::test]
@@ -14186,6 +14265,7 @@ data: [DONE]\n\n";
             live_log: RouteProxyLiveLog::default(),
             codex_history: CodexReasoningCache::default(),
             upstream_timeouts: ProxyAppState::default_upstream_timeouts(),
+            request_body_limit_mib: RouteProxyRuntimeState::default().request_body_limit_mib,
         };
 
         let mut headers = HeaderMap::new();
@@ -14220,6 +14300,7 @@ data: [DONE]\n\n";
             live_log: RouteProxyLiveLog::default(),
             codex_history: CodexReasoningCache::default(),
             upstream_timeouts: ProxyAppState::default_upstream_timeouts(),
+            request_body_limit_mib: RouteProxyRuntimeState::default().request_body_limit_mib,
         };
 
         let error = resolve_platform(&state, &HeaderMap::new(), None)
@@ -14249,6 +14330,7 @@ data: [DONE]\n\n";
             live_log: RouteProxyLiveLog::default(),
             codex_history: CodexReasoningCache::default(),
             upstream_timeouts: ProxyAppState::default_upstream_timeouts(),
+            request_body_limit_mib: RouteProxyRuntimeState::default().request_body_limit_mib,
         };
 
         let key = "sk-invalid";

@@ -4,7 +4,6 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  archiveRouteCredentials,
   startCodexOAuth,
   getCodexOAuthStatus,
   cancelCodexOAuth,
@@ -36,7 +35,6 @@ import {
   refreshRouteCredentialRelayBalance,
   refreshRouteCredentialsQuota,
   refreshRouteCredentialsRelayBalance,
-  restoreRouteCredentials,
   routePoolTestModel,
   saveSettings,
   setRouteCredentialRecovery,
@@ -90,7 +88,6 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 vi.mock("../src/lib/api/client", () => ({
-  archiveRouteCredentials: vi.fn(),
   startCodexOAuth: vi.fn(),
   getCodexOAuthStatus: vi.fn(),
   cancelCodexOAuth: vi.fn(),
@@ -121,7 +118,6 @@ vi.mock("../src/lib/api/client", () => ({
   refreshRouteCredentialRelayBalance: vi.fn(),
   refreshRouteCredentialsQuota: vi.fn(),
   refreshRouteCredentialsRelayBalance: vi.fn(),
-  restoreRouteCredentials: vi.fn(),
   routePoolTestModel: vi.fn(),
   getSettings: vi.fn(),
   saveSettings: vi.fn(),
@@ -586,7 +582,6 @@ describe("AccountsScreen", () => {
     vi.mocked(startCodexOAuth).mockReset();
     vi.mocked(getCodexOAuthStatus).mockReset();
     vi.mocked(cancelCodexOAuth).mockReset();
-    vi.mocked(archiveRouteCredentials).mockReset();
     vi.mocked(createBatch).mockReset();
     vi.mocked(copyRouteCredential).mockReset();
     vi.mocked(createApiRouteCredential).mockReset();
@@ -644,7 +639,6 @@ describe("AccountsScreen", () => {
     vi.mocked(reorderRouteCredentials).mockReset();
     vi.mocked(refreshRouteCredentialQuota).mockReset();
     vi.mocked(refreshRouteCredentialsQuota).mockReset();
-    vi.mocked(restoreRouteCredentials).mockReset();
     vi.mocked(routePoolTestModel).mockReset();
     vi.mocked(setRouteCredentialRecovery).mockReset();
     vi.mocked(setRouteCredentialModelStatus).mockReset();
@@ -769,7 +763,6 @@ describe("AccountsScreen", () => {
     vi.mocked(getSettings).mockResolvedValue(settingsFixture);
     vi.mocked(saveSettings).mockReset();
     vi.mocked(saveSettings).mockImplementation(async (settings) => settings);
-    vi.mocked(archiveRouteCredentials).mockResolvedValue(undefined);
     vi.mocked(refreshRouteCredentialQuota).mockResolvedValue({
       credential: credentialsFixture[0],
       updated: false,
@@ -777,7 +770,6 @@ describe("AccountsScreen", () => {
       message: null,
     });
     vi.mocked(refreshRouteCredentialsQuota).mockResolvedValue([]);
-    vi.mocked(restoreRouteCredentials).mockResolvedValue(undefined);
     poolStateByPlatform = new Map<string, string[]>([["codex", []]]);
     vi.mocked(getRoutePool).mockImplementation(async (platform, groupId) => {
       const selectedGroupId = groupId ?? `${platform}-default`;
@@ -2488,44 +2480,39 @@ describe("AccountsScreen", () => {
     expect(screen.getByText("已选 1 个账号")).toBeInTheDocument();
   });
 
-  it("archives selected active accounts in one batch", async () => {
-    renderScreen();
+  it.each(["in_pool", "out_of_pool", "archived"] as const)(
+    "uses group moves without archive or restore shortcuts in %s",
+    async (view) => {
+      if (view === "archived") {
+        vi.mocked(listRouteCredentials).mockResolvedValue([
+          { ...credentialsFixture[0], archived_at: "2026-08-05T00:00:00Z" },
+          credentialsFixture[1],
+        ]);
+      }
+      if (view !== "out_of_pool") {
+        poolStateByPlatform.set("codex", ["cred-official-1"]);
+      }
+      renderScreen("codex", view);
 
-    await userEvent.click(await screen.findByLabelText("选择 Team Account"));
-    expect(screen.getByLabelText("批量归档账号")).toBeInTheDocument();
-    await userEvent.click(screen.getByLabelText("批量归档账号"));
+      await userEvent.click(await screen.findByLabelText("选择 Team Account"));
+      expect(screen.getByText("已选 1 个账号")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "批量归档账号" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "批量恢复账号" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "批量删除账号" })).toBeInTheDocument();
 
-    await waitFor(() =>
-      expect(archiveRouteCredentials).toHaveBeenCalledWith(["cred-official-1"]),
-    );
-    expect(screen.queryByText("已选 1 个账号")).not.toBeInTheDocument();
-  });
+      const targetGroupId = view === "archived" ? "codex-out" : "codex-archived";
+      await userEvent.selectOptions(screen.getByRole("combobox", { name: "移动到分组" }), targetGroupId);
 
-  it("restores selected archived accounts without pool actions", async () => {
-    vi.mocked(listRouteCredentials).mockResolvedValue([
-      { ...credentialsFixture[0], archived_at: "2026-08-05T00:00:00Z" },
-      credentialsFixture[1],
-    ]);
-    poolStateByPlatform.set("codex", ["cred-official-1"]);
-    renderScreen("codex", "archived");
-
-    expect(await screen.findByText("Team Account")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(listRouteCredentialPage).toHaveBeenLastCalledWith(
-        expect.objectContaining({ pool_scope: "archived" }),
-      ),
-    );
-    await userEvent.click(screen.getByLabelText("选择 Team Account"));
-    expect(screen.getByLabelText("批量恢复账号")).toBeInTheDocument();
-    expect(screen.queryByLabelText("批量加入算力池")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("批量移出算力池")).not.toBeInTheDocument();
-
-    await userEvent.click(screen.getByLabelText("批量恢复账号"));
-    await waitFor(() =>
-      expect(restoreRouteCredentials).toHaveBeenCalledWith(["cred-official-1"]),
-    );
-    expect(screen.queryByText("已选 1 个账号")).not.toBeInTheDocument();
-  });
+      await waitFor(() =>
+        expect(moveRoutePoolGroupMembers).toHaveBeenCalledWith({
+          platform: "codex",
+          group_id: targetGroupId,
+          account_ids: ["cred-official-1"],
+        }),
+      );
+      expect(screen.queryByText("已选 1 个账号")).not.toBeInTheDocument();
+    },
+  );
 
   it("shows a centered empty state for archived accounts", async () => {
     vi.mocked(listRouteCredentials).mockResolvedValue([]);

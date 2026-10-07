@@ -326,7 +326,9 @@ pub fn run() {
     // Apply the user's proxy before any HTTP client is built, so reqwest picks
     // it up for the process's lifetime. A disabled setting leaves externally
     // set proxy env vars untouched.
+    let route_proxy = RouteProxyRuntimeState::default();
     if let Some(settings) = &startup_settings {
+        route_proxy.set_request_body_limit_mib(settings.route_proxy_request_body_limit_mib);
         services::proxy_service::apply_startup(settings);
     }
     let mut builder = tauri::Builder::default();
@@ -389,7 +391,7 @@ pub fn run() {
             config_writes: ConfigWriteRuntimeState::default(),
             deeplink_protocols: DeepLinkProtocolRuntime::default(),
             close_to_tray,
-            route_proxy: RouteProxyRuntimeState::default(),
+            route_proxy,
             saas: crate::saas::SaasRuntime::default(),
             web_service: WebServiceRuntimeState::default(),
             tailscale: TailscaleRuntimeState::default(),

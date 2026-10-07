@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_ROUTE_PROXY_REQUEST_BODY_LIMIT_MIB: u32 = 128;
+
+fn default_route_proxy_request_body_limit_mib() -> u32 {
+    DEFAULT_ROUTE_PROXY_REQUEST_BODY_LIMIT_MIB
+}
+
 fn default_true() -> bool {
     true
 }
@@ -50,6 +56,9 @@ pub struct AppSettings {
     /// `proxy_enabled` is on, e.g. `http://127.0.0.1:7890`.
     #[serde(default)]
     pub proxy_url: Option<String>,
+    /// Maximum inbound model request size in MiB; 0 disables this local limit.
+    #[serde(default = "default_route_proxy_request_body_limit_mib")]
+    pub route_proxy_request_body_limit_mib: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,6 +79,7 @@ pub struct AppSettingsView {
     pub notification_config_json: Option<String>,
     pub proxy_enabled: bool,
     pub proxy_url: Option<String>,
+    pub route_proxy_request_body_limit_mib: u32,
 }
 
 impl AppSettingsView {
@@ -91,6 +101,7 @@ impl AppSettingsView {
             notification_config_json: settings.notification_config_json,
             proxy_enabled: settings.proxy_enabled,
             proxy_url: settings.proxy_url,
+            route_proxy_request_body_limit_mib: settings.route_proxy_request_body_limit_mib,
         }
     }
 }
@@ -113,6 +124,7 @@ impl AppSettings {
             notification_config_json: None,
             proxy_enabled: false,
             proxy_url: None,
+            route_proxy_request_body_limit_mib: DEFAULT_ROUTE_PROXY_REQUEST_BODY_LIMIT_MIB,
         }
     }
 }
@@ -133,6 +145,15 @@ mod tests {
             "ccswitch_deeplink_compat_enabled": false
         }"#;
         let settings: AppSettings = serde_json::from_str(json).expect("parse legacy settings");
+        let view = super::AppSettingsView::from_settings(settings.clone(), false);
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap()["route_proxy_request_body_limit_mib"],
+            128,
+        );
+        assert_eq!(
+            serde_json::to_value(&view).unwrap()["route_proxy_request_body_limit_mib"],
+            128,
+        );
         assert!(settings.close_to_tray);
         assert!(!settings.image_generation_enabled);
         assert!(!settings.proxy_enabled);

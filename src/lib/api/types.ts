@@ -1174,6 +1174,8 @@ export type AppSettings = {
    * e.g. `http://127.0.0.1:7890`.
    */
   proxy_url?: string | null;
+  /** Model proxy request body limit in MiB. Defaults to 128; 0 disables the limit. */
+  route_proxy_request_body_limit_mib?: number;
 };
 
 export type AppSettingsView = AppSettings & {

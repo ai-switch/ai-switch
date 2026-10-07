@@ -138,6 +138,8 @@ export function SettingsScreen({
   const [proxyEnabledDraft, setProxyEnabledDraft] = useState<boolean | null>(null);
   const [proxyUrlDraft, setProxyUrlDraft] = useState<string | null>(null);
   const [proxyError, setProxyError] = useState<string | null>(null);
+  const [requestBodyLimitDraft, setRequestBodyLimitDraft] = useState<string | null>(null);
+  const [requestBodyLimitError, setRequestBodyLimitError] = useState(false);
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getSettings });
   const saveMutation = useMutation({
     mutationFn: saveSettings,
@@ -186,6 +188,25 @@ export function SettingsScreen({
       proxy_enabled: nextEnabled,
       proxy_url: nextUrl.trim() || null,
     });
+  };
+
+  const requestBodyLimit = settings.route_proxy_request_body_limit_mib ?? 128;
+  const saveRequestBodyLimit = () => {
+    const draft = requestBodyLimitDraft ?? String(requestBodyLimit);
+    const value = Number(draft);
+    // Match the backend's u32 MiB representation, without imposing another
+    // product-specific ceiling on configurable request sizes.
+    if (!draft.trim() || !Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+      setRequestBodyLimitError(true);
+      return;
+    }
+    setRequestBodyLimitError(false);
+    if (value !== requestBodyLimit) {
+      saveMutation.mutate(
+        { ...settings, route_proxy_request_body_limit_mib: value },
+        { onSuccess: () => setRequestBodyLimitDraft(null) },
+      );
+    }
   };
 
   const handleProxyEnabledChange = (next: boolean) => {
@@ -288,6 +309,33 @@ export function SettingsScreen({
           </motion.div>
         )}
       </MotionPresence>
+
+      <div className="space-y-3 rounded-2xl border border-stone-200 bg-white/82 p-4 shadow-sm">
+        <h2 className="text-[15px] font-semibold text-stone-950">{t("settings.requestBodyLimit.title")}</h2>
+        <label className="flex max-w-sm flex-col gap-1.5 text-[12px] font-semibold text-stone-600">
+          <span>{t("settings.requestBodyLimit.label")}</span>
+          <input
+            aria-label={t("settings.requestBodyLimit.label")}
+            aria-invalid={requestBodyLimitError}
+            aria-describedby="request-body-limit-hint"
+            className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-[13px] font-medium text-stone-900 shadow-sm outline-none motion-control focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+            disabled={saveMutation.isPending}
+            min={0}
+            step={1}
+            type="number"
+            value={requestBodyLimitDraft ?? requestBodyLimit}
+            onChange={(event) => {
+              setRequestBodyLimitDraft(event.target.value);
+              setRequestBodyLimitError(false);
+            }}
+            onBlur={saveRequestBodyLimit}
+          />
+        </label>
+        <p id="request-body-limit-hint" className="text-[12px] text-stone-500">{t("settings.requestBodyLimit.hint")}</p>
+        {requestBodyLimitError && (
+          <p role="alert" className="text-[12px] font-medium text-red-700">{t("settings.requestBodyLimit.invalid")}</p>
+        )}
+      </div>
 
       <div className="space-y-3 rounded-2xl border border-stone-200 bg-white/82 p-4 shadow-sm">
         <h2 className="text-[15px] font-semibold text-stone-950">{t("settings.proxy.title")}</h2>
