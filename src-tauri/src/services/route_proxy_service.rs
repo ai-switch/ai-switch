@@ -1160,7 +1160,10 @@ pub(crate) async fn forward_request(
         state.model_match_mode,
         baseline_models.as_deref(),
     );
-    let candidates = if let Some(capability) = requested_image_capability(&path) {
+    // 图像 / 视频都按能力收窄候选（视频 = G-P2c 的 `/v1/video/generations`）
+    let requested_capability =
+        requested_image_capability(&path).or_else(|| requested_video_capability(&path));
+    let candidates = if let Some(capability) = requested_capability {
         filter_candidates_for_capability_with_mode(
             &platform,
             candidates,
@@ -5733,6 +5736,20 @@ fn requested_image_capability(path: &str) -> Option<&'static str> {
         "/images/edits" | "/v1/images/edits" => Some("image.edit"),
         _ => None,
     }
+}
+
+/// 视频生成能力（G-P2c）。提交与状态查询都归 `video.generate`。
+/// 状态查询路径形如 `/v1/video/generations/{task_id}`，故按前缀判断。
+fn requested_video_capability(path: &str) -> Option<&'static str> {
+    let normalized = path.trim().trim_end_matches('/');
+    if normalized == "/video/generations"
+        || normalized == "/v1/video/generations"
+        || normalized.starts_with("/video/generations/")
+        || normalized.starts_with("/v1/video/generations/")
+    {
+        return Some("video.generate");
+    }
+    None
 }
 
 fn filter_candidates_for_capability(

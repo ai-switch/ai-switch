@@ -18,6 +18,7 @@ mod services;
 mod session_manager;
 mod skills;
 mod terminal_manager;
+mod videogen;
 mod web;
 
 #[cfg(feature = "desktop")]
