@@ -51,6 +51,7 @@ pub mod route_proxy_stream;
 pub mod route_quota_service;
 pub mod route_recovery_service;
 pub mod route_relay_balance_service;
+pub mod route_stream_continuation;
 pub mod session_usage_service;
 pub mod settings_service;
 pub mod tailscale_service;
