@@ -108,19 +108,30 @@ impl ResponsesResumeRewriter {
     /// Task 1 实测：客户端是从流式的 `output_item.*` 记录会话历史的，这里
     /// `output` 留空也不丢内容，所以不必重建整个 output 数组。
     pub fn finish(&mut self, usage: &RouteUsageBreakdown) -> String {
-        let value = json!({
-            "type": "response.completed",
-            "sequence_number": self.next_sequence_number,
-            "response": {
-                "id": self.response_id,
-                "object": "response",
-                "status": "completed",
-                "output": [],
-                "usage": usage_to_responses_json(usage),
-            }
-        });
-        format!("data: {value}\n\n")
+        synthesized_completion_block(&self.response_id, self.next_sequence_number, usage)
     }
+}
+
+/// 合成一条 `response.completed`。
+///
+/// 两处共用：续写全部结束时的收尾，以及「内容完整、只缺收尾事件」时的补齐。
+pub fn synthesized_completion_block(
+    response_id: &str,
+    sequence_number: u64,
+    usage: &RouteUsageBreakdown,
+) -> String {
+    let value = json!({
+        "type": "response.completed",
+        "sequence_number": sequence_number,
+        "response": {
+            "id": response_id,
+            "object": "response",
+            "status": "completed",
+            "output": [],
+            "usage": usage_to_responses_json(usage),
+        }
+    });
+    format!("data: {value}\n\n")
 }
 
 /// 透传的块要自己带 `\n\n`：调用方是从 framer 里拿的、已经把终止符剥掉。

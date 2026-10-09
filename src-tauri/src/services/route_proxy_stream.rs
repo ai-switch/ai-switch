@@ -385,6 +385,21 @@ impl StreamObserver {
         &self.continuation
     }
 
+    /// 有数据帧、但从未见过终止标记 —— 「只缺收尾」与「断流」都以它为前提。
+    pub fn ended_without_terminal_event(&self) -> bool {
+        self.saw_data_frame && !self.saw_terminal_marker
+    }
+
+    /// 网关替上游补上了收尾事件：之后的判定按「正常结束」走。
+    pub fn mark_completed(&mut self) {
+        self.saw_terminal_marker = true;
+    }
+
+    /// 当前累计的用量，用于合成收尾事件。
+    pub fn usage_snapshot(&self) -> RouteUsageBreakdown {
+        self.usage.clone()
+    }
+
     fn absorb_frame(&mut self, payload: &str) {
         self.saw_data_frame = true;
         let Ok(value) = serde_json::from_str::<Value>(payload) else {

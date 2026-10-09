@@ -3108,6 +3108,32 @@ struct StreamCompletion {
 }
 
 impl StreamCompletion {
+    /// 内容已经完整、只差收尾事件：所有 item 都已 done，且上游没给终止标记。
+    fn can_synthesize_completion(&self) -> bool {
+        let state = self.observer.continuation();
+        state.response_id.is_some()
+            && state.open_item.is_none()
+            && !state.completed_items.is_empty()
+            && self.observer.ended_without_terminal_event()
+    }
+
+    /// 补一条 `response.completed` 并把这次请求按成功结账。
+    ///
+    /// 返回要发给客户端的那段字节；`finish()` 之后仍照常记账、写日志——
+    /// 只是标记成正常结束，不再记 `semantic_response_transient`。
+    async fn finish_with_synthesized_completion(mut self) -> axum::body::Bytes {
+        let state = self.observer.continuation().clone();
+        let usage = self.observer.usage_snapshot();
+        let block = crate::services::route_stream_continuation::synthesized_completion_block(
+            state.response_id.as_deref().unwrap_or_default(),
+            state.last_sequence_number + 1,
+            &usage,
+        );
+        self.observer.mark_completed();
+        self.finish().await;
+        axum::body::Bytes::from(block)
+    }
+
     /// Persist usage, log the request, and update account health.
     ///
     /// Runs whether the stream ended on its own or the client hung up, so a
@@ -3488,6 +3514,17 @@ fn observed_upstream_stream(
                         }
                         if let Some(tail) = tail {
                             return Some((Ok(tail), (stream, guard, transform)));
+                        }
+                        // 内容已经完整、只缺收尾事件：补一条 response.completed，
+                        // 按成功结账，不记断流、不报错。
+                        if guard
+                            .completion
+                            .as_ref()
+                            .is_some_and(StreamCompletion::can_synthesize_completion)
+                        {
+                            let completion = guard.completion.take().expect("checked above");
+                            let bytes = completion.finish_with_synthesized_completion().await;
+                            return Some((Ok(bytes), (stream, guard, transform)));
                         }
                         if let Some(completion) = guard.completion.take() {
                             completion.finish().await;
@@ -17413,5 +17450,73 @@ data: [DONE]\n\n";
             TRANSPORT_TIMEOUTS,
         );
         assert_eq!(message.matches("timed out").count(), 1, "{message}");
+    }
+    /// 上游把内容发全了、就是没发 `response.completed`：今天这会被判成断流、
+    /// 记一次失败、整轮报废。补齐收尾后应当直接成功。
+    #[tokio::test]
+    async fn missing_terminal_event_is_completed_instead_of_reported_as_disconnect() {
+        use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
+        use crate::database::{create_memory_pool, run_migrations};
+
+        const BODY: &str = "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r1\"}}\n\n\
+            data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"m1\",\"type\":\"message\"}}\n\n\
+            data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"m1\",\"delta\":\"完整回答\"}\n\n\
+            data: {\"type\":\"response.output_item.done\",\"sequence_number\":3,\"output_index\":0,\"item\":{\"id\":\"m1\",\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"完整回答\"}]}}\n\n";
+
+        let (upstream, _calls) = start_scripted_sse_upstream(vec![vec![BODY]]).await;
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let credential_id = create_proxy_api_credential_with_config(
+            &pool,
+            "content-complete-no-terminal",
+            &upstream,
+            json!({"interface_format": "openai-responses"}),
+        )
+        .await;
+        RoutePoolRepository::replace_members(&pool, "codex", std::slice::from_ref(&credential_id))
+            .await
+            .expect("pool members");
+        let route_key =
+            RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-test")
+                .await
+                .expect("route key");
+        let runtime = RouteProxyRuntimeState::default();
+        let proxy = RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+            .await
+            .expect("start proxy");
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/v1/responses",
+                proxy.base_url.as_deref().expect("base url")
+            ))
+            .bearer_auth(route_key)
+            .json(&json!({
+                "model": "gpt-6-astra",
+                "stream": true,
+                "input": [{"type":"message","role":"user",
+                           "content":[{"type":"input_text","text":"hi"}]}]
+            }))
+            .send()
+            .await
+            .expect("proxy response");
+        let status = response.status();
+        let body = response.text().await.expect("body");
+
+        assert!(status.is_success(), "status={status} body={body}");
+        assert!(
+            body.contains("\"type\":\"response.completed\""),
+            "补齐的收尾事件没到客户端: {body}"
+        );
+        let credential = RouteCredentialRepository::get(&pool, &credential_id)
+            .await
+            .expect("credential");
+        assert_eq!(
+            credential.transient_failure_count, 0,
+            "补齐收尾不应记账: {:?}",
+            credential.last_failure_message
+        );
+
+        RouteProxyService::stop(&runtime).await.expect("stop proxy");
     }
 }
