@@ -3528,7 +3528,7 @@ describe("AccountsScreen", () => {
 
     expect(screen.getByLabelText("Base URL")).toHaveValue("https://agentrouter.org/v1");
     expect(screen.queryByRole("status", { name: "Base URL 自动调整提示" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("接口格式")).toHaveValue("openai");
+    expect(screen.getByLabelText("接口格式")).toHaveValue("openai-responses");
     expect(screen.getByLabelText("API 账号名称")).toHaveValue("AgentRouter");
     expect(screen.getByLabelText("请求模型 1")).toHaveValue("gpt-6-astra");
     expect(screen.getByLabelText("上游模型 1")).toHaveValue("gpt-6-astra");
@@ -3614,7 +3614,10 @@ describe("AccountsScreen", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("creates an AgentRouter account from a preset and an api key alone", async () => {
+  it("creates an AgentRouter account from a preset on the Responses API", async () => {
+    // The preset itself ships the Responses dialect, so saving must not ask
+    // anything: there is no Chat Completions combination to warn about.
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     renderScreen();
 
     await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
@@ -3632,12 +3635,88 @@ describe("AccountsScreen", () => {
           display_name: "AgentRouter",
           api_key: "sk-agentrouter",
           base_url: "https://agentrouter.org/v1",
-          interface_format: "openai",
+          interface_format: "openai-responses",
           model_mappings_json:
             "[{\"from\":\"gpt-6-astra\",\"to\":\"gpt-6-astra\"},{\"from\":\"gpt-5.6-sol\",\"to\":\"gpt-5.6-sol\"},{\"from\":\"glm-5.3\",\"to\":\"glm-5.3\"},{\"from\":\"deepseek-v4-flash\",\"to\":\"deepseek-v4-flash\"}]",
         }),
       ),
     );
+    expect(confirmSpy).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("switches an AgentRouter gpt-6 account to Responses when saved on Chat Completions", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderScreen();
+
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.selectOptions(
+      screen.getByLabelText("创建 账号预设"),
+      "agentrouter-primary",
+    );
+    // The user overrides the preset back to Chat Completions, which is exactly
+    // the combination that 400s once a client sends function tools.
+    await userEvent.selectOptions(screen.getByLabelText("接口格式"), "openai");
+    await userEvent.type(screen.getByLabelText("API Key"), "sk-agentrouter");
+    await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
+
+    await waitFor(() =>
+      expect(createApiRouteCredential).toHaveBeenCalledWith(
+        expect.objectContaining({ interface_format: "openai-responses" }),
+      ),
+    );
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("gpt-6-astra"));
+    confirmSpy.mockRestore();
+  });
+
+  it("keeps Chat Completions when the AgentRouter gpt-6 prompt is declined", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderScreen();
+
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.selectOptions(
+      screen.getByLabelText("创建 账号预设"),
+      "agentrouter-primary",
+    );
+    await userEvent.selectOptions(screen.getByLabelText("接口格式"), "openai");
+    await userEvent.type(screen.getByLabelText("API Key"), "sk-agentrouter");
+    await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
+
+    await waitFor(() =>
+      expect(createApiRouteCredential).toHaveBeenCalledWith(
+        expect.objectContaining({ interface_format: "openai" }),
+      ),
+    );
+    expect(confirmSpy).toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("switches an AgentRouter gpt-6 account to Responses when editing", async () => {
+    const api = {
+      ...credentialsFixture[1],
+      platform: "codex" as const,
+      display_name: "AgentRouter Chat API",
+      config_json: JSON.stringify({
+        base_url: "https://agentrouter.org/v1",
+        interface_format: "openai",
+        model_mappings: [{ from: "gpt-6-astra", to: "gpt-6-astra" }],
+      }),
+    };
+    vi.mocked(listRouteCredentials).mockResolvedValue([api]);
+    vi.mocked(updateRouteCredential).mockResolvedValue(api);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderScreen();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "编辑 AgentRouter Chat API" }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
+    const config = JSON.parse(vi.mocked(updateRouteCredential).mock.calls[0][1].config_json);
+    expect(config.interface_format).toBe("openai-responses");
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("gpt-6-astra"));
+    confirmSpy.mockRestore();
   });
 
   it("hides the preset select on platforms without presets", async () => {

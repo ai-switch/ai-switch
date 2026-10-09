@@ -30,7 +30,7 @@ describe("accountPresets", () => {
     expect(preset.label).toBe("AgentRouter (agentrouter.org)");
     expect(preset.defaultName).toBe("AgentRouter");
     expect(preset.baseUrl).toBe("https://agentrouter.org/v1");
-    expect(preset.interfaceFormat).toBe("openai");
+    expect(preset.interfaceFormat).toBe("openai-responses");
     expect(preset.modelMappings).toEqual([
       { from: "gpt-6-astra", to: "gpt-6-astra" },
       { from: "gpt-5.6-sol", to: "gpt-5.6-sol" },
@@ -45,7 +45,7 @@ describe("accountPresets", () => {
     expect(preset.label).toBe("AgentRouter (ps.air-outer.com)");
     expect(preset.defaultName).toBe("AgentRouter 备用");
     expect(preset.baseUrl).toBe("https://ps.air-outer.com/v1");
-    expect(preset.interfaceFormat).toBe("openai");
+    expect(preset.interfaceFormat).toBe("openai-responses");
     expect(preset.modelMappings).toEqual([
       { from: "gpt-6-astra", to: "gpt-6-astra" },
       { from: "gpt-5.6-sol", to: "gpt-5.6-sol" },

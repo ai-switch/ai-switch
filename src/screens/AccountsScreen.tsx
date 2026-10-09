@@ -207,6 +207,10 @@ import {
   USER_AGENT_PRESETS,
   writeUserAgentToConfig,
 } from "../lib/accountUserAgent";
+import {
+  agentRouterGpt6NeedsResponses,
+  agentRouterGpt6ResponsesMessage,
+} from "../lib/agentRouterGpt6";
 import { getTransport, isDesktop, isTauriRuntime } from "../lib/transport";
 import { fetchRouteProxyModels } from "../lib/routeProxyModels";
 import { openExternal } from "../lib/openExternal";
@@ -865,6 +869,31 @@ function apiKeyFieldForPayload(
   apiKeyField: AnthropicApiKeyField,
 ) {
   return isAnthropicInterfaceFormat(interfaceFormat) ? apiKeyField : undefined;
+}
+
+/**
+ * AgentRouter's gpt-6 line only answers on the Responses API, so an account
+ * saved onto Chat Completions 400s as soon as a client sends function tools
+ * ("Function tools with reasoning_effort are not supported"). Ask once at save
+ * time and let the user take the switch; Chat Completions stays selectable
+ * because a tool-free client still works there.
+ */
+function resolveAgentRouterInterfaceFormat(
+  baseUrl: string,
+  interfaceFormat: InterfaceFormat,
+  modelMappings: ModelMapping[],
+  applySwitch: (next: InterfaceFormat) => void,
+): InterfaceFormat {
+  const warning = agentRouterGpt6NeedsResponses({
+    baseUrl,
+    interfaceFormat,
+    modelMappings,
+  });
+  if (!warning || !window.confirm(agentRouterGpt6ResponsesMessage(warning))) {
+    return interfaceFormat;
+  }
+  applySwitch("openai-responses");
+  return "openai-responses";
 }
 
 function anthropicApiKeyFieldDescription(value: AnthropicApiKeyField) {
@@ -4442,6 +4471,12 @@ export function AccountsScreen({
         throw new Error(normalizedMappings.error);
       }
       setApiMappingsError(null);
+      const createInterfaceFormat = resolveAgentRouterInterfaceFormat(
+        apiBaseUrl,
+        apiInterfaceFormat,
+        normalizedMappings.mappings,
+        setApiInterfaceFormat,
+      );
       const batch =
         apiKeys.length > 1
           ? await createBatch({
@@ -4451,7 +4486,7 @@ export function AccountsScreen({
             })
           : null;
       const imported = [];
-      const selectedApiKeyField = apiKeyFieldForPayload(apiInterfaceFormat, apiKeyField);
+      const selectedApiKeyField = apiKeyFieldForPayload(createInterfaceFormat, apiKeyField);
       // Only meaningful for the new-api dialect, and only when actually typed: the
       // other providers have nowhere to send it.
       const panelAccount =
@@ -4470,7 +4505,7 @@ export function AccountsScreen({
           display_name: apiKeys.length > 1 ? `${apiName.trim()} ${index + 1}` : apiName.trim(),
           api_key: key,
           base_url: apiBaseUrl,
-          interface_format: apiInterfaceFormat,
+          interface_format: createInterfaceFormat,
           model_mappings_json: JSON.stringify(normalizedMappings.mappings),
           fetched_models_json: JSON.stringify(apiFetchedModels),
           preview_json: apiPreviewJson.trim() || null,
@@ -5166,13 +5201,22 @@ export function AccountsScreen({
         editingCredential.kind === "api"
           ? apiSecretJsonWithKey(editSecretJson, editApiKey, editRelayBalancePanelAccount)
           : editSecretJson.trim() || "{}";
+      const editInterfaceFormat =
+        editingCredential.kind === "api"
+          ? resolveAgentRouterInterfaceFormat(
+              editApiBaseUrl,
+              editApiInterfaceFormat,
+              normalizedMappings.mappings,
+              setEditApiInterfaceFormat,
+            )
+          : editApiInterfaceFormat;
       const baseConfig =
         editingCredential.kind === "api"
           ? parseJsonObject(
               apiConfigJsonWithFields(
                 editConfigJson.trim() || "{}",
                 editApiBaseUrl,
-                editApiInterfaceFormat,
+                editInterfaceFormat,
                 normalizedMappings.mappings,
                 editApiKeyField,
                 editResponsesCustomToolCompat,

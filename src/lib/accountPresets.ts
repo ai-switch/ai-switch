@@ -22,6 +22,11 @@ export type AccountPreset = {
  *
  * The request model doubles as the upstream model here, so the list is also
  * what the proxy will accept for an account created from these presets.
+ *
+ * The line ships as `openai-responses` rather than Chat Completions: its gpt-6
+ * answers only on /v1/responses, and a gpt-6 request that reaches
+ * /v1/chat/completions is rejected with "Function tools with reasoning_effort
+ * are not supported" as soon as the client sends tools.
  */
 const AGENTROUTER_CODEX_MODELS = [
   "gpt-6-astra",
@@ -55,7 +60,7 @@ export const ACCOUNT_PRESETS: AccountPreset[] = [
     provider: "AgentRouter",
     defaultName: "AgentRouter",
     baseUrl: "https://agentrouter.org/v1",
-    interfaceFormat: "openai",
+    interfaceFormat: "openai-responses",
     modelMappings: passthroughMappings(AGENTROUTER_CODEX_MODELS),
   },
   {
@@ -65,7 +70,7 @@ export const ACCOUNT_PRESETS: AccountPreset[] = [
     provider: "AgentRouter",
     defaultName: "AgentRouter 备用",
     baseUrl: "https://ps.air-outer.com/v1",
-    interfaceFormat: "openai",
+    interfaceFormat: "openai-responses",
     modelMappings: passthroughMappings(AGENTROUTER_CODEX_MODELS),
   },
   {
