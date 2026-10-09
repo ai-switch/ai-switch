@@ -1177,6 +1177,8 @@ export type AppSettings = {
   proxy_url?: string | null;
   /** Model proxy request body limit in MiB. Defaults to 128; 0 disables the limit. */
   route_proxy_request_body_limit_mib?: number;
+  /** 流式断流时网关自动续写的最大轮次。默认 10；0 关闭续写。 */
+  route_proxy_stream_continue_max?: number;
 };
 
 export type AppSettingsView = AppSettings & {

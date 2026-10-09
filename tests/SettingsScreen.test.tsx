@@ -310,6 +310,42 @@ describe("SettingsScreen", () => {
     }
   });
 
+  it("defaults stream continuation to 10 attempts and saves custom or disabled values", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settingsFixture);
+    vi.mocked(saveSettings).mockImplementation(async (settings) => settings);
+    render(
+      <QueryClientProvider client={createQueryClient()}>
+        <I18nProvider initialLanguage="zh-CN"><SettingsScreen /></I18nProvider>
+      </QueryClientProvider>,
+    );
+    const input = await screen.findByRole("spinbutton", { name: "流式断流自动续写次数" });
+    expect(input).toHaveValue(10);
+    for (const value of [3, 0]) {
+      await userEvent.clear(input);
+      await userEvent.type(input, String(value));
+      await userEvent.tab();
+      await waitFor(() => expect(vi.mocked(saveSettings).mock.calls.at(-1)?.[0]).toEqual({
+        ...settingsFixture, route_proxy_stream_continue_max: value,
+      }));
+      expect(input).toHaveValue(value);
+    }
+  });
+
+  it.each(["", "-1", "1.5", "4294967296"])("rejects invalid stream continuation %s without saving", async (value) => {
+    vi.mocked(getSettings).mockResolvedValue(settingsFixture);
+    render(
+      <QueryClientProvider client={createQueryClient()}>
+        <I18nProvider initialLanguage="zh-CN"><SettingsScreen /></I18nProvider>
+      </QueryClientProvider>,
+    );
+    const input = await screen.findByRole("spinbutton", { name: "流式断流自动续写次数" });
+    await userEvent.clear(input);
+    if (value) await userEvent.type(input, value);
+    await userEvent.tab();
+    expect(await screen.findByText("请输入有效的非负整数，0 表示关闭续写。")).toBeInTheDocument();
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
+
   it.each(["", "-1", "1.5", "4294967296"])("rejects invalid request body limit %s without saving", async (value) => {
     vi.mocked(getSettings).mockResolvedValue(settingsFixture);
     render(

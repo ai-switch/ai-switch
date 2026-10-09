@@ -13,7 +13,10 @@ pub const CONTINUE_INSTRUCTION: &str = "Continue exactly where the previous assi
 ///
 /// 只动 `input` 与 `stream`，其余字段（model / tools / reasoning / store …）
 /// 原样保留——这是「质量与手动继续一致」的前提：续写用的就是同一个请求。
-pub fn build_continuation_body(original_body: &[u8], partial_text: &str) -> Result<Vec<u8>, String> {
+pub fn build_continuation_body(
+    original_body: &[u8],
+    partial_text: &str,
+) -> Result<Vec<u8>, String> {
     let mut value: Value = serde_json::from_slice(original_body)
         .map_err(|error| format!("original request body is not JSON: {error}"))?;
     let object = value

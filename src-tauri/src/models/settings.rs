@@ -6,6 +6,13 @@ fn default_route_proxy_request_body_limit_mib() -> u32 {
     DEFAULT_ROUTE_PROXY_REQUEST_BODY_LIMIT_MIB
 }
 
+/// 流式上游中途断掉时，网关自动续写的最大轮次；0 表示关闭（spec 第 9 节）。
+pub const DEFAULT_ROUTE_PROXY_STREAM_CONTINUE_MAX: u32 = 10;
+
+fn default_route_proxy_stream_continue_max() -> u32 {
+    DEFAULT_ROUTE_PROXY_STREAM_CONTINUE_MAX
+}
+
 fn default_true() -> bool {
     true
 }
@@ -59,6 +66,9 @@ pub struct AppSettings {
     /// Maximum inbound model request size in MiB; 0 disables this local limit.
     #[serde(default = "default_route_proxy_request_body_limit_mib")]
     pub route_proxy_request_body_limit_mib: u32,
+    /// 流式断流自动续写次数；0 关闭续写。
+    #[serde(default = "default_route_proxy_stream_continue_max")]
+    pub route_proxy_stream_continue_max: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -80,6 +90,7 @@ pub struct AppSettingsView {
     pub proxy_enabled: bool,
     pub proxy_url: Option<String>,
     pub route_proxy_request_body_limit_mib: u32,
+    pub route_proxy_stream_continue_max: u32,
 }
 
 impl AppSettingsView {
@@ -102,6 +113,7 @@ impl AppSettingsView {
             proxy_enabled: settings.proxy_enabled,
             proxy_url: settings.proxy_url,
             route_proxy_request_body_limit_mib: settings.route_proxy_request_body_limit_mib,
+            route_proxy_stream_continue_max: settings.route_proxy_stream_continue_max,
         }
     }
 }
@@ -125,6 +137,7 @@ impl AppSettings {
             proxy_enabled: false,
             proxy_url: None,
             route_proxy_request_body_limit_mib: DEFAULT_ROUTE_PROXY_REQUEST_BODY_LIMIT_MIB,
+            route_proxy_stream_continue_max: DEFAULT_ROUTE_PROXY_STREAM_CONTINUE_MAX,
         }
     }
 }

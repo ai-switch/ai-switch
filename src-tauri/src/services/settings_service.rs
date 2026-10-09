@@ -36,6 +36,20 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
+    async fn stream_continue_max_defaults_to_ten_and_round_trips() {
+        let dir = tempdir().expect("tempdir");
+        let paths = AppPaths::from_data_dir(dir.path().to_path_buf());
+
+        let mut settings = SettingsService::load(&paths).await.expect("settings");
+        assert_eq!(settings.route_proxy_stream_continue_max, 10);
+
+        settings.route_proxy_stream_continue_max = 0;
+        SettingsService::save(&paths, &settings).await.expect("save");
+        let loaded = SettingsService::load(&paths).await.expect("load");
+        assert_eq!(loaded.route_proxy_stream_continue_max, 0);
+    }
+
+    #[tokio::test]
     async fn load_creates_default_settings_when_file_is_missing() {
         let dir = tempdir().expect("tempdir");
         let paths = AppPaths::from_data_dir(dir.path().to_path_buf());
@@ -68,6 +82,7 @@ mod tests {
             deepseek_harness_config_path: Some("/custom/dsh/settings.yaml".to_string()),
             notification_config_json: None,
             route_proxy_request_body_limit_mib: 256,
+            route_proxy_stream_continue_max: 10,
             proxy_enabled: true,
             proxy_url: Some("http://127.0.0.1:7890".to_string()),
         };
