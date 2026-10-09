@@ -215,6 +215,10 @@ SSE 是已提交的单向流：字节一旦转发给客户端就无法回滚重�
 1. 续写请求必须沿用原请求的 reasoning 配置，且预算要覆盖 reasoning 消耗——glm-5.3 那次就是被思考吃光预算后没吐出正文；
 2. 探针请求会落在真实账号上并留下记录：本次为 `gpt-5.6-sol` 的"渠道无可用"多记了几次模型级失败，并在 AgentRouterL 记了一次 quota 失败。**正式实现不得产生这类副作用**（续写失败应记在该请求自己的账上，而不是拿探针打真实池子）。
 
+- 客户端接受度（2026-10-09）：**通过**，客户端 codex exec 0.150.1；退出码 0；无 `stream disconnected before completion` / `Incomplete response returned`；tokens used 3。
+  会话 rollout 证实：两段分别记为两条 assistant message（`msg_1` / `msg_2`），该轮正常 `task_complete`；终端里「第二段打印两次」只是 exec 在流式输出后再回显一次 final message，不是协议问题。
+  **实现备忘**：客户端是从流式的 `output_item.*` 事件记录会话历史的，合成收尾的 `response.completed` 里 `response.output` 留空也不丢内容——重写器不必重建完整 output 数组。
+
 ## 13. 测试计划
 
 - **脚本化上游**（复用 `start_scripted_sse_upstream`）造三类场景：

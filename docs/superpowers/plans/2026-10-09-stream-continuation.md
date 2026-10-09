@@ -387,6 +387,10 @@ impl ResponsesResumeRewriter {
 `usage_breakdown_to_json` 用 `route_proxy_service::usage_breakdown_from_value` 的反向映射补齐；
 若已有等价 helper 就复用（实现时先 grep `usage` 序列化）。
 
+**实现备忘（Task 1 实测，见 spec 12 节）**：客户端是从流式的 `output_item.*` 事件记录会话历史的，
+`response.completed` 的 `response.output` 留空也不丢内容。所以 `finish()` 合成的收尾事件只要带
+`id` / `status` / `usage` 即可，不必重建完整 output 数组。
+
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && CARGO_TARGET_DIR=target-codex cargo test --lib route_stream_continuation`
