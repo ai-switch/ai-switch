@@ -763,7 +763,25 @@ Task 7 的文本续写主路径与 Chat 桥路径都已落地并提交，几处�
 
 ---
 
-### Task 8: 工具调用延迟提交与不可恢复边界
+### Task 8 实现笔记（2026-10-09，已完成）
+
+- `pub fn is_holdback_item(kind: OpenItemKind) -> bool`（`FunctionCall` / `Reasoning`）已落地。
+- 延迟提交做在 **`ResponsesResumeRewriter`** 里：`output_item.added` 命中的是这两类 item 时
+  开始暂存（`held_item` + `held_blocks`），同一 item 的后续块继续攒着，等到
+  `output_item.done` 按到达顺序一次性吐出。上游提前结束 / 换下一轮续写时调
+  `discard_held()` 整条丢弃，模型重发一条完整的（spec 第 8.1/8.2 节）。
+- 暂存期间冒出别的 item，会先把这份「永远收不了尾」的暂存丢掉再处理新块，避免把两轮
+  同一 id 的块拼到一起。
+- **不可恢复边界**：`StreamContinuationState.open_item` 增加 `encrypted: bool`
+  （`output_item.added` 的 `item.encrypted_content` 非空时置真），`plan_continuation`
+  在「断在加密 reasoning 中间」时返回 `None`，放弃续写走今天的报错路径（spec 第 8.3 节）。
+- 说明：延迟提交目前只覆盖**续写流**（重写器所在的那条）。原上游的 Responses 透传仍是
+  逐块转发——它的半截工具调用会先到客户端，随后续写轮重发的完整调用是第二个 item。
+  要让原上游也延迟提交，得给透传路径加一层按 item 的暂存，属于后续可选项。
+
+---
+
+### Task 9: 记账、日志与文档收尾
 
 **Files:**
 - Modify: `src-tauri/src/services/route_stream_continuation.rs`

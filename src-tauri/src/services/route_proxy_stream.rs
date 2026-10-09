@@ -285,6 +285,9 @@ pub struct OpenItem {
     pub id: String,
     pub kind: OpenItemKind,
     pub output_index: u64,
+    /// 该 reasoning item 带着加密内容：密文断在半截就无法重建，续写只能放弃
+    /// （spec 第 8.3 节）。
+    pub encrypted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -523,6 +526,10 @@ impl StreamObserver {
                     .and_then(Value::as_str)
                     .and_then(open_item_kind);
                 if let (Some(id), Some(kind)) = (id, kind) {
+                    let encrypted = item
+                        .and_then(|item| item.get("encrypted_content"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|content| !content.is_empty());
                     self.continuation.open_item = Some(OpenItem {
                         id: id.to_string(),
                         kind,
@@ -530,6 +537,7 @@ impl StreamObserver {
                             .get("output_index")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
+                        encrypted,
                     });
                 }
             }

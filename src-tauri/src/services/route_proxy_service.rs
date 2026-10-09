@@ -3623,9 +3623,11 @@ impl StreamPump {
                 transform.drop_pending_record();
                 StreamStage::Primary(Some(transform))
             }
-            // 多轮续写沿用同一个重写器与游标。
+            // 多轮续写沿用同一个重写器与游标；但上一轮没等到
+            // `output_item.done` 的半截工具调用要丢掉，让模型重发一条完整的。
             StreamStage::Resume(mut resume) => {
                 let _ = resume.framer.finish_block();
+                resume.rewriter.discard_held();
                 StreamStage::Resume(resume)
             }
             _ => StreamStage::Resume(ResumeStage {
@@ -18084,6 +18086,97 @@ data: [DONE]\n\n";
             "断流要给原账号记一次失败: {:?}",
             credential.last_failure_message
         );
+
+        RouteProxyService::stop(&runtime).await.expect("stop proxy");
+    }
+
+    /// 断点落在工具调用参数中间：半截调用客户端从未见过，整条丢弃，再打一轮
+    /// 续写让模型重发一条完整的（spec 第 8.1/8.2 节）。顺带覆盖多轮续写：
+    /// 重写器跨轮沿用，序号接得上，客户端仍只看到一条 `response.created`。
+    #[tokio::test]
+    async fn a_cut_inside_a_tool_call_drops_it_and_the_next_round_reissues() {
+        use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
+        use crate::database::{create_memory_pool, run_migrations};
+
+        const FIRST: &str = "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r1\"}}\n\n\
+            data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"m1\",\"type\":\"message\"}}\n\n\
+            data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"m1\",\"delta\":\"先看文件。\"}\n\n";
+        // 续写第一轮：模型去调工具，参数写到一半上游就断了。
+        const CUT_CALL: &str = "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r2\"}}\n\n\
+            data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"name\":\"read\",\"arguments\":\"\"}}\n\n\
+            data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":2,\"item_id\":\"fc_1\",\"delta\":\"{\\\"path\\\":\"}\n\n";
+        // 续写第二轮：重发一次完整的调用，再收尾。
+        const FINISH: &str = "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r3\"}}\n\n\
+            data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"fc_2\",\"type\":\"function_call\",\"name\":\"read\",\"arguments\":\"\"}}\n\n\
+            data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":2,\"item_id\":\"fc_2\",\"delta\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}\n\n\
+            data: {\"type\":\"response.output_item.done\",\"sequence_number\":3,\"output_index\":0,\"item\":{\"id\":\"fc_2\",\"type\":\"function_call\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}\n\n\
+            data: {\"type\":\"response.completed\",\"sequence_number\":4,\"response\":{\"id\":\"r3\",\"status\":\"completed\"}}\n\n";
+
+        let (upstream, calls) = start_scripted_sse_upstream(vec![
+            vec![FIRST],
+            vec![CUT_CALL],
+            vec![FINISH],
+        ])
+        .await;
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let first = create_proxy_api_credential_with_config(
+            &pool,
+            "first",
+            &upstream,
+            json!({"interface_format": "openai-responses"}),
+        )
+        .await;
+        let second = create_proxy_api_credential_with_config(
+            &pool,
+            "second",
+            &upstream,
+            json!({"interface_format": "openai-responses"}),
+        )
+        .await;
+        RoutePoolRepository::replace_members(&pool, "codex", &[first, second])
+            .await
+            .expect("pool members");
+        let route_key =
+            RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-test")
+                .await
+                .expect("route key");
+        let runtime = RouteProxyRuntimeState::default();
+        let proxy = RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+            .await
+            .expect("start proxy");
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/v1/responses",
+                proxy.base_url.as_deref().expect("base url")
+            ))
+            .bearer_auth(route_key)
+            .json(&json!({
+                "model": "gpt-6-astra",
+                "stream": true,
+                "input": [{"type":"message","role":"user",
+                           "content":[{"type":"input_text","text":"读一下 a.txt"}]}]
+            }))
+            .send()
+            .await
+            .expect("proxy response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.expect("body");
+
+        assert!(
+            !body.contains("fc_1"),
+            "半截工具调用绝不能到客户端: {body}"
+        );
+        assert!(body.contains("fc_2"), "重发的完整调用应当放行: {body}");
+        assert!(body.contains("a.txt"), "完整参数应当放行: {body}");
+        assert_eq!(
+            body.matches("\"type\":\"response.created\"").count(),
+            1,
+            "多轮续写也只能有一条 response.created: {body}"
+        );
+        assert!(body.contains("\"type\":\"response.completed\""), "{body}");
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "应当续写两轮");
 
         RouteProxyService::stop(&runtime).await.expect("stop proxy");
     }

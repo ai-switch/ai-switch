@@ -5,7 +5,7 @@
 use serde_json::{json, Value};
 
 use crate::models::route_pool::RouteUsageBreakdown;
-use crate::services::route_proxy_stream::StreamContinuationState;
+use crate::services::route_proxy_stream::{OpenItem, OpenItemKind, StreamContinuationState};
 
 /// 与「用户手动继续」等价的那句指令（spec 第 6 节）。
 pub const CONTINUE_INSTRUCTION: &str = "Continue exactly where the previous assistant message stopped. Do not repeat anything already written, do not add a preamble, and do not restate the question.";
@@ -69,6 +69,14 @@ pub fn plan_continuation(
     if state.text_truncated {
         return None;
     }
+    // 断在加密 reasoning 中间：密文无法重建，放弃续写走今天的报错路径。
+    if state
+        .open_item
+        .as_ref()
+        .is_some_and(|item| item.kind == OpenItemKind::Reasoning && item.encrypted)
+    {
+        return None;
+    }
     let response_id = state.response_id.clone()?;
     if state.partial_text.is_empty() {
         return None;
@@ -82,6 +90,14 @@ pub fn plan_continuation(
     })
 }
 
+/// 需要「收到 `output_item.done` 才转发」的 item 类型（spec 第 8.1 节）。
+///
+/// 工具调用的参数是流式 JSON，断在中间会得到语法都不完整的调用，而客户端一旦
+/// 看到完整 item 就会真的去执行它；reasoning 同理，半截密文/摘要没有意义。
+pub fn is_holdback_item(kind: OpenItemKind) -> bool {
+    matches!(kind, OpenItemKind::FunctionCall | OpenItemKind::Reasoning)
+}
+
 /// 把续写流重写成「原 response 的后续」（spec 第 7 节）。
 ///
 /// 只负责上游是 Responses 协议的情形：丢掉续写流自己的 `response.created`
@@ -90,6 +106,10 @@ pub struct ResponsesResumeRewriter {
     response_id: String,
     next_sequence_number: u64,
     next_output_index: u64,
+    /// 正在暂存的工具调用/reasoning item id（spec 第 8.1 节）。
+    held_item: Option<String>,
+    /// 暂存区块，按到达顺序排好；`output_item.done` 时一次性吐出。
+    held_blocks: Vec<String>,
 }
 
 impl ResponsesResumeRewriter {
@@ -98,7 +118,18 @@ impl ResponsesResumeRewriter {
             response_id,
             next_sequence_number,
             next_output_index,
+            held_item: None,
+            held_blocks: Vec::new(),
         }
+    }
+
+    /// 丢掉没等到 `output_item.done` 的暂存 item。
+    ///
+    /// 续写流又断了、要开下一轮时调用：半截工具调用客户端从未见过，整条丢弃，
+    /// 让模型重新发一次完整的（spec 第 8.2 节）。
+    pub fn discard_held(&mut self) {
+        self.held_item = None;
+        self.held_blocks.clear();
     }
 
     /// `Ok(None)` 表示这一块不再转发。
@@ -126,9 +157,42 @@ impl ResponsesResumeRewriter {
             "response.created" | "response.in_progress" | "response.completed" => return Ok(None),
             _ => {}
         }
+        // 暂存中的 item：它的后续块先攒着，等 `output_item.done` 一起放。
+        if let Some(held) = self.held_item.clone() {
+            if json_item_id(&value).as_deref() == Some(held.as_str()) {
+                let rendered = self.render(value, &event)?;
+                if event == "response.output_item.done" {
+                    self.held_item = None;
+                    let mut output: String = self.held_blocks.drain(..).collect();
+                    output.push_str(&rendered);
+                    return Ok(Some(output));
+                }
+                self.held_blocks.push(rendered);
+                return Ok(None);
+            }
+            // 不是暂存 item 的块：暂存的东西永远不会收尾了，丢掉它继续。
+            self.discard_held();
+        }
+
+        // 新的工具调用 / reasoning item：开始暂存，先不转发。
+        if event == "response.output_item.added"
+            && json_item_kind(&value).is_some_and(is_holdback_item)
+        {
+            let item_id = json_item_id(&value);
+            let rendered = self.render(value, &event)?;
+            self.held_item = item_id;
+            self.held_blocks.push(rendered);
+            return Ok(None);
+        }
+
+        Ok(Some(self.render(value, &event)?))
+    }
+
+    /// 给一块事件重写序号与 `output_index`，渲染成完整的 SSE 记录。
+    fn render(&mut self, mut value: Value, event: &str) -> Result<String, String> {
         value["sequence_number"] = Value::from(self.next_sequence_number);
         self.next_sequence_number += 1;
-        match event.as_str() {
+        match event {
             // 只有新出现的 item 才占一个新位置；`done` 与后续的 delta 都属于
             // 同一个 item，必须复用 `added` 分配的那个 `output_index`。
             "response.output_item.added" => {
@@ -142,7 +206,7 @@ impl ResponsesResumeRewriter {
             }
         }
         let text = serde_json::to_string(&value).map_err(|error| error.to_string())?;
-        Ok(Some(format!("data: {text}\n\n")))
+        Ok(format!("data: {text}\n\n"))
     }
 
     /// 续写全部结束后由网关合成的收尾事件。
@@ -151,6 +215,25 @@ impl ResponsesResumeRewriter {
     /// `output` 留空也不丢内容，所以不必重建整个 output 数组。
     pub fn finish(&mut self, usage: &RouteUsageBreakdown) -> String {
         synthesized_completion_block(&self.response_id, self.next_sequence_number, usage)
+    }
+}
+
+/// 从事件里取 item id：增量事件放 `item_id`，`output_item.*` 放 `item.id`。
+fn json_item_id(value: &Value) -> Option<String> {
+    value
+        .get("item_id")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/item/id").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// 从 `output_item.added/done` 的 `item.type` 取 item 类型。
+fn json_item_kind(value: &Value) -> Option<OpenItemKind> {
+    match value.pointer("/item/type").and_then(Value::as_str) {
+        Some("function_call") | Some("custom_tool_call") => Some(OpenItemKind::FunctionCall),
+        Some("reasoning") => Some(OpenItemKind::Reasoning),
+        Some("message") => Some(OpenItemKind::Message),
+        _ => None,
     }
 }
 
@@ -256,6 +339,50 @@ mod tests {
     }
 
     #[test]
+    fn function_call_arguments_are_held_back_until_done() {
+        let mut rewriter = ResponsesResumeRewriter::new("resp_1".into(), 0, 0);
+        let added = r#"data: {"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"fc_1","type":"function_call","name":"lookup"}}"#;
+        assert_eq!(rewriter.rewrite_block(added).unwrap(), None, "参数没收完前不得转发");
+        let delta = r#"data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"a\":"}"#;
+        assert_eq!(rewriter.rewrite_block(delta).unwrap(), None);
+        let done = r#"data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"id":"fc_1","type":"function_call","arguments":"{}"}}"#;
+        let flushed = rewriter
+            .rewrite_block(done)
+            .unwrap()
+            .expect("done 应当把整条调用一起放出来");
+        assert!(flushed.contains("fc_1"));
+        assert!(flushed.contains("response.output_item.added"));
+        assert!(flushed.contains("response.output_item.done"));
+        assert_eq!(flushed.matches("data: ").count(), 3, "added+delta+done 一起放");
+    }
+
+    #[test]
+    fn a_cut_inside_function_call_drops_the_item_instead_of_forwarding_it() {
+        let mut rewriter = ResponsesResumeRewriter::new("resp_1".into(), 0, 0);
+        let added = r#"data: {"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"fc_1","type":"function_call","name":"lookup"}}"#;
+        assert_eq!(rewriter.rewrite_block(added).unwrap(), None);
+        let delta = r#"data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"a\":"}"#;
+        assert_eq!(rewriter.rewrite_block(delta).unwrap(), None);
+        // 上游提前结束：整条丢弃，重新请求。
+        rewriter.discard_held();
+        let next_round = r#"data: {"type":"response.output_text.delta","item_id":"m2","delta":"接着写"}"#;
+        let out = rewriter.rewrite_block(next_round).unwrap().expect("block");
+        assert!(!out.contains("fc_1"), "半截调用不能到客户端");
+        assert!(out.contains("接着写"));
+    }
+
+    #[test]
+    fn a_new_item_abandons_a_held_call_that_will_never_finish() {
+        let mut rewriter = ResponsesResumeRewriter::new("resp_1".into(), 0, 0);
+        let added = r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call"}}"#;
+        assert_eq!(rewriter.rewrite_block(added).unwrap(), None);
+        let text = r#"data: {"type":"response.output_item.added","output_index":1,"item":{"id":"m1","type":"message"}}"#;
+        let out = rewriter.rewrite_block(text).unwrap().expect("block");
+        assert!(!out.contains("fc_1"), "永远收不了尾的暂存要丢掉");
+        assert!(out.contains("m1"));
+    }
+
+    #[test]
     fn plan_continuation_carries_the_seam_cursor_and_the_half_written_text() {
         let body = br#"{"model":"gpt-6-astra","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#;
         let state = StreamContinuationState {
@@ -273,6 +400,38 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&plan.body).unwrap();
         let input = value["input"].as_array().unwrap();
         assert_eq!(input.last().unwrap()["content"][0]["text"], CONTINUE_INSTRUCTION);
+    }
+
+    #[test]
+    fn a_cut_inside_encrypted_reasoning_abandons_continuation() {
+        let body = br#"{"model":"m","input":[]}"#;
+        let encrypted = StreamContinuationState {
+            response_id: Some("resp_1".into()),
+            partial_text: "已经写了一点".into(),
+            open_item: Some(OpenItem {
+                id: "rs_1".into(),
+                kind: OpenItemKind::Reasoning,
+                output_index: 1,
+                encrypted: true,
+            }),
+            ..StreamContinuationState::default()
+        };
+        assert!(
+            plan_continuation(body, &encrypted).is_none(),
+            "加密 reasoning 断在半截，密文无法重建，必须放弃续写"
+        );
+
+        // 不带密文的 reasoning 只是普通 item，可以照常续写。
+        let plain = StreamContinuationState {
+            open_item: Some(OpenItem {
+                id: "rs_2".into(),
+                kind: OpenItemKind::Reasoning,
+                output_index: 1,
+                encrypted: false,
+            }),
+            ..encrypted.clone()
+        };
+        assert!(plan_continuation(body, &plain).is_some());
     }
 
     #[test]
