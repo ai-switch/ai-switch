@@ -140,8 +140,6 @@ export function SettingsScreen({
   const [proxyError, setProxyError] = useState<string | null>(null);
   const [requestBodyLimitDraft, setRequestBodyLimitDraft] = useState<string | null>(null);
   const [requestBodyLimitError, setRequestBodyLimitError] = useState(false);
-  const [streamContinueDraft, setStreamContinueDraft] = useState<string | null>(null);
-  const [streamContinueError, setStreamContinueError] = useState(false);
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getSettings });
   const saveMutation = useMutation({
     mutationFn: saveSettings,
@@ -207,23 +205,6 @@ export function SettingsScreen({
       saveMutation.mutate(
         { ...settings, route_proxy_request_body_limit_mib: value },
         { onSuccess: () => setRequestBodyLimitDraft(null) },
-      );
-    }
-  };
-
-  const streamContinueMax = settings.route_proxy_stream_continue_max ?? 10;
-  const saveStreamContinueMax = () => {
-    const draft = streamContinueDraft ?? String(streamContinueMax);
-    const value = Number(draft);
-    if (!draft.trim() || !Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
-      setStreamContinueError(true);
-      return;
-    }
-    setStreamContinueError(false);
-    if (value !== streamContinueMax) {
-      saveMutation.mutate(
-        { ...settings, route_proxy_stream_continue_max: value },
-        { onSuccess: () => setStreamContinueDraft(null) },
       );
     }
   };
@@ -353,29 +334,6 @@ export function SettingsScreen({
         <p id="request-body-limit-hint" className="text-[12px] text-stone-500">{t("settings.requestBodyLimit.hint")}</p>
         {requestBodyLimitError && (
           <p role="alert" className="text-[12px] font-medium text-red-700">{t("settings.requestBodyLimit.invalid")}</p>
-        )}
-        <label className="flex max-w-sm flex-col gap-1.5 text-[12px] font-semibold text-stone-600">
-          <span>{t("settings.streamContinueMax.label")}</span>
-          <input
-            aria-label={t("settings.streamContinueMax.label")}
-            aria-invalid={streamContinueError}
-            aria-describedby="stream-continue-hint"
-            className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-[13px] font-medium text-stone-900 shadow-sm outline-none motion-control focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-            disabled={saveMutation.isPending}
-            min={0}
-            step={1}
-            type="number"
-            value={streamContinueDraft ?? streamContinueMax}
-            onChange={(event) => {
-              setStreamContinueDraft(event.target.value);
-              setStreamContinueError(false);
-            }}
-            onBlur={saveStreamContinueMax}
-          />
-        </label>
-        <p id="stream-continue-hint" className="text-[12px] text-stone-500">{t("settings.streamContinueMax.hint")}</p>
-        {streamContinueError && (
-          <p role="alert" className="text-[12px] font-medium text-red-700">{t("settings.streamContinueMax.invalid")}</p>
         )}
       </div>
 
