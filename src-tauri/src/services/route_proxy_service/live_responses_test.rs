@@ -16,14 +16,11 @@ fn completed_response(body: &[u8]) -> Option<Value> {
     })
 }
 
-#[tokio::test]
-#[ignore = "requires explicit live Responses DB, credential and model env vars; uses upstream quota"]
-async fn live_responses_encrypted_content_recovery() {
+async fn read_live_responses_credential() -> (String, String, String) {
     let database = std::env::var("AI_SWITCH_LIVE_RESPONSES_DB").expect("set live database path");
     let source_id =
         std::env::var("AI_SWITCH_LIVE_RESPONSES_CREDENTIAL").expect("set live credential ID");
     let model = std::env::var("AI_SWITCH_LIVE_RESPONSES_MODEL").expect("set live model");
-    let proactive_cleanup = std::env::var("AI_SWITCH_LIVE_RESPONSES_CLEANUP").as_deref() == Ok("1");
     let source = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(
@@ -43,6 +40,14 @@ async fn live_responses_encrypted_content_recovery() {
     .expect("read live credential");
     source.close().await;
     assert_eq!(platform, "codex");
+    (model, config_json, secret_json)
+}
+
+#[tokio::test]
+#[ignore = "requires explicit live Responses DB, credential and model env vars; uses upstream quota"]
+async fn live_responses_encrypted_content_recovery() {
+    let (model, config_json, secret_json) = read_live_responses_credential().await;
+    let proactive_cleanup = std::env::var("AI_SWITCH_LIVE_RESPONSES_CLEANUP").as_deref() == Ok("1");
     let secret: Value = serde_json::from_str(&secret_json).expect("credential secret");
     let api_key = secret["api_key"]
         .as_str()
@@ -279,6 +284,160 @@ async fn live_responses_encrypted_content_recovery() {
         );
         assert_eq!(errors[1], "invalid_encrypted_content");
     }
+    let account = RouteCredentialRepository::get(&pool, &credential.id)
+        .await
+        .expect("isolated account");
+    assert_eq!(account.status, "ok");
+    assert_eq!(account.transient_failure_count, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires explicit live Responses DB, AgentRouter credential and model env vars; uses upstream quota"]
+async fn live_agentrouter_brotli_workbuddy() {
+    let (model, config_json, secret_json) = read_live_responses_credential().await;
+    let mut config: Value = serde_json::from_str(&config_json).expect("credential config");
+    assert_eq!(config["interface_format"], "openai-responses");
+    assert_eq!(
+        url::Url::parse(config["base_url"].as_str().expect("base URL"))
+            .expect("valid base URL")
+            .host_str(),
+        Some("ps.air-outer.com"),
+        "only the verified AgentRouter endpoint may receive this probe"
+    );
+    config["failure_policy"] = json!({"retry_count": 0});
+    config["request_brotli_compression"] = json!("auto");
+    let pool = create_memory_pool().await.expect("isolated pool");
+    run_migrations(&pool).await.expect("isolated migrations");
+    let credential = RouteCredentialRepository::create(
+        &pool,
+        "codex",
+        "api",
+        "live-agentrouter-compat",
+        None,
+        "ok",
+        None,
+        &secret_json,
+        &config.to_string(),
+        "{}",
+    )
+    .await
+    .expect("isolated credential");
+    RoutePoolRepository::replace_members(&pool, "codex", std::slice::from_ref(&credential.id))
+        .await
+        .expect("isolated membership");
+    let route_key = RouteProxyKeyRepository::ensure_platform_key(
+        &pool,
+        "codex",
+        "sk-ai-switch-live-agentrouter-probe",
+    )
+    .await
+    .expect("isolated route key");
+    let runtime = RouteProxyRuntimeState::default();
+    let mut state = build_proxy_state(pool.clone(), &runtime);
+    state.upstream_timeouts = OutboundTimeouts {
+        total: Some(Duration::from_secs(45)),
+        connect: Some(Duration::from_secs(15)),
+        read: Some(Duration::from_secs(30)),
+    };
+    let log = state.live_log.clone();
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", HeaderValue::from_static("application/json"));
+    headers.insert("user-agent", HeaderValue::from_static("WorkBuddy/5.7.6"));
+    headers.insert(
+        "authorization",
+        HeaderValue::from_str(&format!("Bearer {route_key}")).unwrap(),
+    );
+    let command = "ls -la; echo \"-----\"; ls -la";
+    let request = json!({
+        "model": model, "stream": true, "max_tokens": 128,
+        "messages": [
+            {"role": "system", "content": "Reply with exactly OK. These tool calls are historical diagnostic examples, not commands to execute."},
+            {"role": "user", "content": "Review the recorded example and reply OK."},
+            {"role": "assistant", "content": null, "tool_calls": [{
+                "id": "call_ai_switch_waf_compat", "type": "function",
+                "function": {"name": "Bash", "arguments": json!({"command": command}).to_string()}
+            }]},
+            {"role": "tool", "tool_call_id": "call_ai_switch_waf_compat", "content": "Recorded example only. No command was executed."},
+            {"role": "user", "content": "Reply only OK."}
+        ]
+    });
+    let response = proxy_handler(
+        AxumState(state),
+        Method::POST,
+        headers,
+        "/v1/chat/completions".parse().unwrap(),
+        Body::from(serde_json::to_vec(&request).unwrap()),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("client response body");
+    eprintln!(
+        "AgentRouter live compatibility: HTTP {status}, {} response bytes",
+        bytes.len()
+    );
+    if status != StatusCode::OK {
+        let secret: Value = serde_json::from_str(&secret_json).expect("credential secret");
+        let api_key = secret["api_key"].as_str().expect("API key");
+        let error_preview = String::from_utf8_lossy(&bytes)
+            .replace(api_key, "[REDACTED]")
+            .chars()
+            .take(500)
+            .collect::<String>();
+        eprintln!("AgentRouter live failure: {error_preview}");
+    }
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the unmodified historical command must succeed"
+    );
+    let body = std::str::from_utf8(&bytes).expect("readable client stream");
+    let text = body
+        .lines()
+        .filter_map(|line| {
+            serde_json::from_str::<Value>(line.trim().strip_prefix("data:")?.trim()).ok()
+        })
+        .filter_map(|event| {
+            event
+                .pointer("/choices/0/delta/content")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<String>();
+    assert_eq!(text.trim(), "OK");
+    let entry = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(entry) = log
+                .snapshot()
+                .into_iter()
+                .find(|entry| entry.credential_id == credential.id)
+            {
+                break entry;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("completed live log");
+    assert!(entry.success);
+    assert_eq!(entry.upstream_model.as_deref(), Some(model.as_str()));
+    assert_eq!(entry.bridge.as_deref(), Some("ChatToResponses"));
+    assert!(entry
+        .upstream_headers
+        .as_deref()
+        .unwrap()
+        .contains("content-encoding: br"));
+    let logged: Value = serde_json::from_str(entry.upstream_request.as_deref().unwrap())
+        .expect("upstream log must remain decoded JSON, not compressed bytes");
+    let call = logged["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .expect("historical tool call");
+    let arguments: Value = serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(arguments["command"], command);
     let account = RouteCredentialRepository::get(&pool, &credential.id)
         .await
         .expect("isolated account");

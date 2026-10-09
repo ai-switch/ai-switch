@@ -4318,6 +4318,89 @@ describe("AccountsScreen", () => {
     expect(screen.queryByLabelText("Responses 明文推理兼容")).not.toBeInTheDocument();
   });
 
+  it("creates API accounts with manual Brotli request compression and resets the mode", async () => {
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "API 账号" }));
+    await userEvent.type(screen.getByLabelText("API 账号名称"), "Brotli API");
+    await userEvent.type(screen.getByLabelText("API Key"), "sk-brotli-fixture");
+    await userEvent.clear(screen.getByLabelText("Base URL"));
+    await userEvent.type(screen.getByLabelText("Base URL"), "https://custom.example/v1");
+    await openFormTab("高级");
+    const compression = screen.getByRole("combobox", { name: /Brotli/ });
+    expect(compression).toHaveValue("auto");
+    await userEvent.selectOptions(compression, "on");
+    await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
+    await waitFor(() => expect(createApiRouteCredential).toHaveBeenCalledWith(
+      expect.objectContaining({ request_brotli_compression: "on" }),
+    ));
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "API 账号" }));
+    await openFormTab("高级");
+    expect(screen.getByRole("combobox", { name: /Brotli/ })).toHaveValue("auto");
+  });
+
+  it("loads and disables Brotli request compression even for a whitelisted account", async () => {
+    vi.mocked(listRouteCredentials).mockResolvedValue([{
+      ...credentialsFixture[1],
+      config_json: JSON.stringify({
+        base_url: "https://ps.air-outer.com/v1", interface_format: "openai-responses",
+        model_mappings: [], request_brotli_compression: "on", unrelated: "keep",
+      }),
+    }]);
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 API Account" }));
+    await openFormTab("高级");
+    const compression = screen.getByRole("combobox", { name: /Brotli/ });
+    expect(compression).toHaveValue("on");
+    await userEvent.selectOptions(compression, "off");
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
+    const config = JSON.parse(vi.mocked(updateRouteCredential).mock.calls[0][1].config_json);
+    expect(config.request_brotli_compression).toBe("off");
+    expect(config.unrelated).toBe("keep");
+  });
+
+  it("restores automatic Brotli request compression by clearing the explicit override", async () => {
+    vi.mocked(listRouteCredentials).mockResolvedValue([{
+      ...credentialsFixture[1],
+      config_json: JSON.stringify({
+        base_url: "https://ps.air-outer.com/v1", interface_format: "anthropic",
+        model_mappings: [], request_brotli_compression: "off", unrelated: "keep",
+      }),
+    }]);
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 API Account" }));
+    await openFormTab("高级");
+    const compression = screen.getByRole("combobox", { name: /Brotli/ });
+    expect(compression).toHaveValue("off");
+    await userEvent.selectOptions(compression, "auto");
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
+    const config = JSON.parse(vi.mocked(updateRouteCredential).mock.calls[0][1].config_json);
+    expect(config.request_brotli_compression).toBeUndefined();
+    expect(config.unrelated).toBe("keep");
+  });
+
+  it("keeps legacy API accounts on automatic Brotli request compression", async () => {
+    vi.mocked(listRouteCredentials).mockResolvedValue([{
+      ...credentialsFixture[1],
+      config_json: JSON.stringify({
+        base_url: "https://ps.air-outer.com/v1", interface_format: "openai",
+        model_mappings: [], unrelated: "keep",
+      }),
+    }]);
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 API Account" }));
+    await openFormTab("高级");
+    expect(screen.getByRole("combobox", { name: /Brotli/ })).toHaveValue("auto");
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
+    const config = JSON.parse(vi.mocked(updateRouteCredential).mock.calls[0][1].config_json);
+    expect(config.request_brotli_compression).toBeUndefined();
+    expect(config.unrelated).toBe("keep");
+  });
+
   it("creates API account with Responses encrypted content cleanup enabled and resets it", async () => {
     renderScreen();
     await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));

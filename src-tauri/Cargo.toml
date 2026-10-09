@@ -1,6 +1,6 @@
 [package]
 name = "ai-switch"
-version = "0.12.2"
+version = "0.13.0"
 description = "AI provider and official account switcher"
 authors = ["xyito"]
 edition = "2021"

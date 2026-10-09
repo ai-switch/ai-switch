@@ -1,6 +1,6 @@
-//! brotli for the three places this app has to shrink a lot of JSON text:
+//! Brotli for JSON storage and lossless request transport:
 //! rotated live-log segments, the diagnostics export, and the per-request
-//! response preview stored in `usage_events`.
+//! response preview stored in `usage_events`, plus verified upstream requests.
 //!
 //! The dependency is already in the build graph — `tauri-utils` pulls `brotli`
 //! in, so declaring it directly compiles nothing new — and it earns its place

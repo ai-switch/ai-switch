@@ -148,6 +148,13 @@ impl RouteCredentialService {
                 .map(|s| json!(s))
                 .as_ref(),
         )?;
+        crate::services::request_compression::validate(
+            input
+                .request_brotli_compression
+                .as_ref()
+                .map(|mode| json!(mode))
+                .as_ref(),
+        )?;
         validate_model_mappings(&input.model_mappings_json)?;
         let fetched_models = parse_fetched_models_json(input.fetched_models_json.as_deref())?;
         let api_key_field =
@@ -184,6 +191,9 @@ impl RouteCredentialService {
         });
         if let Some(mode) = input.responses_plaintext_reasoning_compat {
             config[crate::services::responses_plaintext_reasoning::CONFIG_KEY] = json!(mode);
+        }
+        if let Some(mode) = input.request_brotli_compression {
+            config[crate::services::request_compression::CONFIG_KEY] = json!(mode);
         }
         // Omitted rather than written as `false`, so an account that never opts in
         // carries no trace of the feature in its config.
@@ -307,6 +317,9 @@ impl RouteCredentialService {
         if let Ok(config) = serde_json::from_str::<Value>(&input.config_json) {
             crate::services::responses_plaintext_reasoning::validate(
                 config.get(crate::services::responses_plaintext_reasoning::CONFIG_KEY),
+            )?;
+            crate::services::request_compression::validate(
+                config.get(crate::services::request_compression::CONFIG_KEY),
             )?;
         }
         let mut input = input;
@@ -1753,6 +1766,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -1798,6 +1812,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -1846,6 +1861,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -1931,6 +1947,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: Some(true),
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2018,6 +2035,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2071,6 +2089,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2122,6 +2141,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2174,6 +2194,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: Some(true),
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2223,6 +2244,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2346,6 +2368,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2399,6 +2422,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2504,6 +2528,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: Some(true),
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2545,6 +2570,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2586,6 +2612,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2627,6 +2654,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2762,6 +2790,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2806,6 +2835,7 @@ mod tests {
                 batch_id: None,
                 responses_custom_tool_compat: None,
                 responses_plaintext_reasoning_compat: None,
+                request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
@@ -2855,6 +2885,7 @@ mod tests {
                     batch_id: None,
                     responses_custom_tool_compat: None,
                     responses_plaintext_reasoning_compat: None,
+                    request_brotli_compression: None,
                     responses_encrypted_content_cleanup: None,
                     responses_encrypted_content_aggressive_strip: None,
                     force_reasoning_content: None,
@@ -2899,6 +2930,7 @@ mod tests {
                     batch_id: None,
                     responses_custom_tool_compat: None,
                     responses_plaintext_reasoning_compat: None,
+                    request_brotli_compression: None,
                     responses_encrypted_content_cleanup: None,
                     responses_encrypted_content_aggressive_strip: None,
                     force_reasoning_content: None,
@@ -2942,6 +2974,7 @@ mod tests {
                     batch_id: None,
                     responses_custom_tool_compat: None,
                     responses_plaintext_reasoning_compat: None,
+                    request_brotli_compression: None,
                     responses_encrypted_content_cleanup: None,
                     responses_encrypted_content_aggressive_strip: None,
                     force_reasoning_content: None,
@@ -3219,5 +3252,93 @@ mod plaintext_reasoning_setting_tests {
         assert!(RouteCredentialService::create_api(&pool, input)
             .await
             .is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod request_compression_setting_tests {
+    use super::*;
+    use crate::database::{create_memory_pool, run_migrations};
+
+    fn input(mode: Option<&str>) -> Value {
+        let mut input = json!({"platform":"codex","display_name":"Brotli fixture","api_key":"sk-test","base_url":"https://ps.air-outer.com/v1","interface_format":"openai-responses","model_mappings_json":"[]"});
+        if let Some(mode) = mode {
+            input["request_brotli_compression"] = json!(mode);
+        }
+        input
+    }
+
+    #[tokio::test]
+    async fn request_compression_modes_survive_creation_and_legacy_clients_stay_auto() {
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        for mode in [None, Some("on"), Some("off"), Some("auto")] {
+            let row = RouteCredentialService::create_api(
+                &pool,
+                serde_json::from_value(input(mode)).unwrap(),
+            )
+            .await
+            .unwrap();
+            let config: Value = serde_json::from_str(&row.config_json).unwrap();
+            assert_eq!(
+                config
+                    .get("request_brotli_compression")
+                    .and_then(Value::as_str),
+                mode
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn request_compression_invalid_creation_is_rejected_before_persistence() {
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let result = RouteCredentialService::create_api(
+            &pool,
+            serde_json::from_value(input(Some("invalid"))).unwrap(),
+        )
+        .await;
+        assert!(result.is_err());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM route_credentials")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn request_compression_invalid_update_preserves_the_saved_mode() {
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let row = RouteCredentialService::create_api(
+            &pool,
+            serde_json::from_value(input(Some("off"))).unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut update = json!({"display_name":row.display_name,"email":row.email,"status":row.status,"route_priority":row.route_priority,"max_concurrency":row.max_concurrency,"secret_payload_json":row.secret_payload_json,"config_json":r#"{"request_brotli_compression":"on","keep":"yes"}"#,"preview_json":row.preview_json});
+        let changed = RouteCredentialService::update(
+            &pool,
+            row.id.clone(),
+            serde_json::from_value(update.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+        update["config_json"] = json!(r#"{"request_brotli_compression":true}"#);
+        assert!(RouteCredentialService::update(
+            &pool,
+            row.id.clone(),
+            serde_json::from_value(update).unwrap()
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            RouteCredentialRepository::get(&pool, &row.id)
+                .await
+                .unwrap()
+                .config_json,
+            changed.config_json
+        );
     }
 }

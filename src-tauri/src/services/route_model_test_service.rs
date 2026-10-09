@@ -280,12 +280,15 @@ impl RouteModelTestService {
             }
         };
 
+        let compression_config: Value = serde_json::from_str(&credential.config_json)
+            .unwrap_or(Value::Null);
         let send_result = send_model_test_request(
             client,
             &target_url,
             upstream_request.headers,
             upstream_request.body,
             failure_policy,
+            &compression_config,
         )
         .await;
         let duration_ms = elapsed_ms(start);
@@ -1374,12 +1377,21 @@ async fn load_account_credential(
 async fn send_model_test_request(
     client: reqwest::Client,
     target_url: &str,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     body: Vec<u8>,
     failure_policy: RouteCredentialFailurePolicy,
+    compression_config: &Value,
 ) -> Result<(u16, bool, Vec<u8>), String> {
-    let headers = map_to_reqwest_headers(&headers);
+    // Determine stream semantics before the body becomes compressed bytes.
     let streaming_request = request_body_requests_stream(&body);
+    let body = crate::services::request_compression::encode_request_body(
+        target_url,
+        &mut headers,
+        &body,
+        compression_config,
+    )
+    .unwrap_or(body);
+    let headers = map_to_reqwest_headers(&headers);
     for attempt in 0..=failure_policy.retry_count {
         let upstream = match client
             .post(target_url)
@@ -2976,6 +2988,50 @@ mod tests {
             truncate_response_body(&body).len(),
             MODEL_TEST_RESPONSE_LIMIT
         );
+    }
+
+    #[tokio::test]
+    async fn request_compression_setting_is_used_by_model_connectivity_tests() {
+        for mode in ["on", "off", "auto"] {
+            let mut peer =
+                crate::services::request_compression::test_support::start_brotli_peer().await;
+            let pool = create_memory_pool().await.unwrap();
+            run_migrations(&pool).await.unwrap();
+            let id = create_api_credential_with_config(
+                &pool,
+                &peer.base_url,
+                json!({"request_brotli_compression":mode,"failure_policy":{"retry_count":0}}),
+            )
+            .await;
+            let outcome = RouteModelTestService::test_model(
+                &pool,
+                RoutePoolModelTestRequest {
+                    platform: "codex".into(),
+                    account_id: Some(id),
+                    model: None,
+                    interface_format: None,
+                    test_tool_call: false,
+                },
+            )
+            .await
+            .unwrap();
+            let decoded_preview: Value =
+                serde_json::from_str(&outcome.request_body_json).expect("readable probe preview");
+            assert_eq!(decoded_preview["model"], "up-gpt");
+            if mode == "on" {
+                assert!(outcome.success, "{outcome:?}");
+                assert_eq!(outcome.response_status, Some(200));
+                assert_eq!(outcome.response_text.as_deref(), Some("ai-switch-ok"));
+                let captured = tokio::time::timeout(Duration::from_secs(5), peer.requests.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(captured["model"], "up-gpt");
+            } else {
+                assert!(!outcome.success);
+                assert_eq!(outcome.response_status, Some(415));
+            }
+        }
     }
 
     #[tokio::test]

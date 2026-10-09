@@ -62,6 +62,8 @@ import { ConfigWriteTargetsDialog } from "../components/accounts/ConfigWriteTarg
 import { FormTabs, type FormTab } from "../components/accounts/FormTabs";
 import { RouteCredentialExportDialog } from "../components/accounts/RouteCredentialExportDialog";
 import { CopyRouteCredentialDialog } from "../components/accounts/CopyRouteCredentialDialog";
+import { RequestCompressionOption } from "../components/accounts/RequestCompressionOption";
+import { requestCompressionModeFromConfig, writeRequestCompressionMode, type RequestCompressionMode } from "../lib/requestCompression";
 import { ResponsesPlaintextReasoningOption } from "../components/accounts/ResponsesPlaintextReasoningOption";
 import { plaintextReasoningModeFromConfig, writePlaintextReasoningMode, type ResponsesPlaintextReasoningMode } from "../lib/responsesPlaintextReasoning";
 import { UsageOverviewPanel } from "../components/accounts/UsageOverviewPanel";
@@ -1637,6 +1639,7 @@ function apiConfigJsonWithFields(
   responsesEncryptedContentAggressiveStrip = false,
   forceReasoningContent = false,
   plaintextReasoningMode: ResponsesPlaintextReasoningMode = plaintextReasoningModeFromConfig(parseJsonObject(configJson)),
+  requestCompressionMode: RequestCompressionMode = requestCompressionModeFromConfig(parseJsonObject(configJson)),
 ) {
   const config = parseJsonObject(configJson);
   config.base_url = baseUrl.trim();
@@ -1644,6 +1647,7 @@ function apiConfigJsonWithFields(
   config.model_mappings = mappings;
   config.responses_custom_tool_compat = responsesCustomToolCompat;
   writePlaintextReasoningMode(config, plaintextReasoningMode);
+  writeRequestCompressionMode(config, requestCompressionMode);
   config.responses_encrypted_content_cleanup = responsesEncryptedContentCleanup;
   // Subordinate to the main switch: never persist an aggressive opt-in on its
   // own, so turning cleanup off cannot leave a live stripping flag behind.
@@ -3213,6 +3217,7 @@ export function AccountsScreen({
   const [apiForceReasoningContent, setApiForceReasoningContent] = useState(false);
   const [apiResponsesEncryptedContentCleanup, setApiResponsesEncryptedContentCleanup] = useState(false);
   const [apiPlaintextReasoningMode, setApiPlaintextReasoningMode] = useState<ResponsesPlaintextReasoningMode>("auto");
+  const [apiRequestCompressionMode, setApiRequestCompressionMode] = useState<RequestCompressionMode>("auto");
   const [apiResponsesEncryptedContentAggressiveStrip, setApiResponsesEncryptedContentAggressiveStrip] = useState(false);
   const [apiUserAgent, setApiUserAgent] = useState("");
   const [apiKeyField, setApiKeyField] = useState<AnthropicApiKeyField>(() =>
@@ -3262,6 +3267,7 @@ export function AccountsScreen({
   const [editForceReasoningContent, setEditForceReasoningContent] = useState(false);
   const [editResponsesEncryptedContentCleanup, setEditResponsesEncryptedContentCleanup] = useState(false);
   const [editPlaintextReasoningMode, setEditPlaintextReasoningMode] = useState<ResponsesPlaintextReasoningMode>("auto");
+  const [editRequestCompressionMode, setEditRequestCompressionMode] = useState<RequestCompressionMode>("auto");
   const [editResponsesEncryptedContentAggressiveStrip, setEditResponsesEncryptedContentAggressiveStrip] = useState(false);
   const [editInlineRemoteImages, setEditInlineRemoteImages] = useState(false);
   const [editTurnReminder, setEditTurnReminder] = useState(false);
@@ -3906,6 +3912,7 @@ export function AccountsScreen({
     setApiResponsesCustomToolCompat(false);
     setApiForceReasoningContent(false);
     setApiPlaintextReasoningMode("auto");
+    setApiRequestCompressionMode("auto");
     setApiResponsesEncryptedContentCleanup(false);
     setApiResponsesEncryptedContentAggressiveStrip(false);
     setApiUserAgent("");
@@ -3967,6 +3974,7 @@ export function AccountsScreen({
       setEditResponsesCustomToolCompat(responsesCustomToolCompatFromConfig(config));
       setEditForceReasoningContent(forceReasoningContentFromConfig(config));
       setEditPlaintextReasoningMode(plaintextReasoningModeFromConfig(config));
+      setEditRequestCompressionMode(requestCompressionModeFromConfig(config));
       setEditResponsesEncryptedContentCleanup(config.responses_encrypted_content_cleanup === true);
       setEditResponsesEncryptedContentAggressiveStrip(
         config.responses_encrypted_content_aggressive_strip === true,
@@ -3987,6 +3995,7 @@ export function AccountsScreen({
       setEditResponsesCustomToolCompat(false);
       setEditForceReasoningContent(false);
       setEditPlaintextReasoningMode("auto");
+      setEditRequestCompressionMode("auto");
       setEditResponsesEncryptedContentCleanup(false);
       setEditResponsesEncryptedContentAggressiveStrip(false);
       setEditInlineRemoteImages(false);
@@ -4469,6 +4478,7 @@ export function AccountsScreen({
           responses_custom_tool_compat: apiResponsesCustomToolCompat,
           ...(apiForceReasoningContent ? { force_reasoning_content: true } : {}),
           ...(apiPlaintextReasoningMode !== "auto" ? { responses_plaintext_reasoning_compat: apiPlaintextReasoningMode } : {}),
+          ...(apiRequestCompressionMode !== "auto" ? { request_brotli_compression: apiRequestCompressionMode } : {}),
           ...(apiResponsesEncryptedContentCleanup ? { responses_encrypted_content_cleanup: true } : {}),
           ...(apiResponsesEncryptedContentCleanup && apiResponsesEncryptedContentAggressiveStrip
             ? { responses_encrypted_content_aggressive_strip: true }
@@ -5174,6 +5184,7 @@ export function AccountsScreen({
                 editResponsesEncryptedContentAggressiveStrip,
                 editForceReasoningContent,
                 editPlaintextReasoningMode,
+                editRequestCompressionMode,
               ),
             )
           : writeUserAgentToConfig(
@@ -9185,6 +9196,7 @@ export function AccountsScreen({
                       onChange={setApiUserAgent}
                       value={apiUserAgent}
                     />
+                    <RequestCompressionOption mode={apiRequestCompressionMode} baseUrl={apiBaseUrl} onChange={setApiRequestCompressionMode} />
                     <RelayBalanceFields
                       allowCustom={false}
                       fieldClass={fieldClass}
@@ -10029,6 +10041,7 @@ export function AccountsScreen({
               ) : null}
               {editTab === "advanced" && editingCredential.kind === "api" ? (
                 <>
+                  <RequestCompressionOption mode={editRequestCompressionMode} baseUrl={editApiBaseUrl} onChange={setEditRequestCompressionMode} />
                   {shouldShowResponsesCustomToolCompatForFormat(activePlatform, editApiInterfaceFormat) ? (
                     <label className="flex items-start gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12px] font-medium text-stone-700">
                       <input

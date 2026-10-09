@@ -23,6 +23,7 @@ use crate::services::official_agent_identity_service::{
     resolve_agent_identity_headers, CODEX_CHATGPT_BACKEND_BASE_URL,
 };
 use crate::services::platform_capability_service::PlatformCapabilityService;
+use crate::services::request_compression;
 use crate::services::response_failure_service::{
     detect_response_failed, is_cross_resource_item_failure, is_encrypted_content_failure,
     is_insufficient_permissions_failure, is_missing_reasoning_failure, is_quota_exhaustion_failure,
@@ -1172,7 +1173,7 @@ pub(crate) async fn forward_request(
         );
         let BuiltUpstreamRequest {
             target_url,
-            headers: request_headers,
+            headers: mut request_headers,
             body: outbound_body,
             bridge_kind,
             tool_namespaces,
@@ -1260,8 +1261,17 @@ pub(crate) async fn forward_request(
                 outbound_body = forced;
             }
         }
+        // Diagnostics and model accounting keep decoded JSON. Only the wire
+        // body and its transport headers receive provider-specific encoding.
         let upstream_request_bytes = outbound_body.clone();
         let upstream_model = requested_model_from_body(&outbound_body);
+        let outbound_body = request_compression::encode_request_body(
+            &target_url,
+            &mut request_headers,
+            &outbound_body,
+            &parse_json_object(&credential.config_json, "config").unwrap_or(Value::Null),
+        )
+        .unwrap_or(outbound_body);
         let upstream = client
             .request(request_method.clone(), &target_url)
             .headers(map_to_reqwest_headers(&request_headers))
@@ -8475,6 +8485,63 @@ mod tests {
             }
         });
         (format!("http://{address}/v1"), calls)
+    }
+
+    #[tokio::test]
+    async fn request_compression_manual_on_reaches_the_proxy_upstream() {
+        let mut peer = crate::services::request_compression::test_support::start_brotli_peer().await;
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let id = create_proxy_api_credential_with_config(&pool, "Brotli fixture", &peer.base_url,
+            json!({"request_brotli_compression":"on","failure_policy":{"retry_count":0},"model_mappings":[{"from":"gpt-5","to":"up-gpt"}]})).await;
+        RoutePoolRepository::replace_members(&pool, "codex", std::slice::from_ref(&id))
+            .await
+            .unwrap();
+        let key =
+            RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-local-brotli-fixture")
+                .await
+                .unwrap();
+        let runtime = RouteProxyRuntimeState::default();
+        let state = build_proxy_state(pool, &runtime);
+        let log = state.live_log.clone();
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {key}")).unwrap(),
+        );
+        let response = proxy_handler(
+            AxumState(state),
+            Method::POST,
+            headers,
+            "/v1/chat/completions".parse().unwrap(),
+            Body::from(
+                json!({"model":"gpt-5","messages":[{"role":"user","content":"hello"}]}).to_string(),
+            ),
+        )
+        .await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let captured = tokio::time::timeout(Duration::from_secs(5), peer.requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(captured["model"], "up-gpt");
+        assert_eq!(captured["messages"][0]["content"], "hello");
+        let entries = log.snapshot();
+        let entry = entries.last().expect("proxy log");
+        assert!(entry.success);
+        assert_eq!(entry.upstream_model.as_deref(), Some("up-gpt"));
+        serde_json::from_str::<Value>(entry.upstream_request.as_deref().unwrap())
+            .expect("decoded request log");
     }
 
     async fn create_proxy_api_credential(pool: &SqlitePool, name: &str, base_url: &str) -> String {

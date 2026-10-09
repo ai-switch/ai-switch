@@ -201,6 +201,9 @@ pub struct CreateApiRouteCredentialInput {
     /// None/auto 跟随已验证的上游名单，off 优先于名单；仅影响出站明文推理。
     #[serde(default)]
     pub responses_plaintext_reasoning_compat: Option<String>,
+    /// None/auto follows the verified site list; explicit off overrides it.
+    #[serde(default)]
+    pub request_brotli_compression: Option<String>,
     #[serde(default)]
     pub responses_encrypted_content_cleanup: Option<bool>,
     /// Sub-switch of `responses_encrypted_content_cleanup`: strip even

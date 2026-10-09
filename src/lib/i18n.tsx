@@ -7,6 +7,16 @@ const STORAGE_KEY = "ai-switch.language";
 const defaultLanguage: Language = "en";
 
 const en = {
+  "accounts.brotliCompression.label": "Brotli request compression",
+  "accounts.brotliCompression.auto": "Auto (default)",
+  "accounts.brotliCompression.on": "On",
+  "accounts.brotliCompression.off": "Off",
+  "accounts.brotliCompression.autoMatched": "Auto: {host} is allowlisted for verified model endpoints.",
+  "accounts.brotliCompression.autoUnmatched": "Auto: disabled; this site is not allowlisted.",
+  "accounts.brotliCompression.manualOn": "Manually enabled; the upstream must support Brotli.",
+  "accounts.brotliCompression.manualOff": "Manually disabled; this overrides the automatic allowlist.",
+  "accounts.brotliCompression.hint": "Compresses only outbound model JSON requests, without changing commands, context or token counts. Auto applies to verified allowlisted endpoints. Enable manually only if the upstream supports Brotli. Non-JSON or already encoded requests are unchanged. Direct mode bypasses this setting.",
+
   "layout.brandBadge": "Command center",
   "layout.brandSubtitle": "Model switching, target tooling, and automation in one shell.",
   "layout.language": "Language",
@@ -881,6 +891,16 @@ const en = {
 } as const;
 
 const zh = {
+  "accounts.brotliCompression.label": "Brotli 请求压缩",
+  "accounts.brotliCompression.auto": "自动（默认）",
+  "accounts.brotliCompression.on": "开启",
+  "accounts.brotliCompression.off": "关闭",
+  "accounts.brotliCompression.autoMatched": "自动：{host} 在白名单中，对已验证的模型接口启用。",
+  "accounts.brotliCompression.autoUnmatched": "自动：未开启，当前网站不在白名单中。",
+  "accounts.brotliCompression.manualOn": "已手动开启；上游必须支持 Brotli。",
+  "accounts.brotliCompression.manualOff": "已手动关闭（优先于自动白名单）。",
+  "accounts.brotliCompression.hint": "仅压缩发往模型上游的 JSON 请求，不改命令、上下文或 Token 数。自动仅对白名单中已验证的接口启用；手动开启前请确认上游支持 Brotli。非 JSON 或已编码请求保持原样，直连模式不生效。",
+
   "layout.brandBadge": "指挥中心",
   "layout.brandSubtitle": "模型切换、目标工具和自动化都放在一个壳里。",
   "layout.language": "语言",
