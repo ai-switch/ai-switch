@@ -190,6 +190,8 @@ pub struct StreamOutcome {
     /// from start to finish means the upstream really did not reason — see
     /// [`StreamObserver::reasoning_deltas`].
     pub reasoning_deltas: usize,
+    /// 续写所需的 item / 正文状态（spec 第 5 节）。
+    pub continuation: StreamContinuationState,
 }
 
 /// `Some(text)` unless the text is absent or empty — a reasoning delta that
@@ -247,6 +249,47 @@ fn reasoning_text_in_frame(value: &Value) -> Option<&str> {
     None
 }
 
+/// 最多保留多少正文用于续写；超过就放弃续写（spec 第 5 节）。
+const PARTIAL_TEXT_LIMIT: usize = 1024 * 1024;
+
+/// 续写所需的、从流式事件里攒出来的状态。
+///
+/// 只覆盖上游是 Responses 协议的情形：上游是 Chat 时，客户端看到的 Responses
+/// 事件由 `ChatStreamBridge` 自己合成，状态在它那边维护。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StreamContinuationState {
+    pub response_id: Option<String>,
+    pub last_sequence_number: u64,
+    pub completed_items: Vec<String>,
+    pub open_item: Option<OpenItem>,
+    pub partial_text: String,
+    /// 正文超过 [`PARTIAL_TEXT_LIMIT`]：续写不再可行，只能按断流处理。
+    pub text_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenItem {
+    pub id: String,
+    pub kind: OpenItemKind,
+    pub output_index: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenItemKind {
+    Message,
+    FunctionCall,
+    Reasoning,
+}
+
+fn open_item_kind(kind: &str) -> Option<OpenItemKind> {
+    match kind {
+        "message" => Some(OpenItemKind::Message),
+        "function_call" | "custom_tool_call" => Some(OpenItemKind::FunctionCall),
+        "reasoning" => Some(OpenItemKind::Reasoning),
+        _ => None,
+    }
+}
+
 /// Accumulates the facts a finished request needs, one chunk at a time.
 ///
 /// Everything it keeps is bounded: a usage struct, an optional model name, a
@@ -278,6 +321,8 @@ pub struct StreamObserver {
     /// boundary is still found.
     marker_carry: String,
     streaming_request: bool,
+    /// 续写用状态；非 Responses 事件不会写它。
+    continuation: StreamContinuationState,
 }
 
 impl StreamObserver {
@@ -294,6 +339,7 @@ impl StreamObserver {
             reasoning_deltas: 0,
             marker_carry: String::new(),
             streaming_request,
+            continuation: StreamContinuationState::default(),
         }
     }
 
@@ -325,12 +371,18 @@ impl StreamObserver {
                 && self.saw_data_frame
                 && !self.saw_terminal_marker,
             reasoning_deltas: self.reasoning_deltas,
+            continuation: self.continuation,
         }
     }
 
     /// The leading bytes of the response, for the live log's stage preview.
     pub fn preview(&self) -> &[u8] {
         &self.preview
+    }
+
+    /// 续写所需的状态快照。
+    pub fn continuation(&self) -> &StreamContinuationState {
+        &self.continuation
     }
 
     fn absorb_frame(&mut self, payload: &str) {
@@ -349,6 +401,72 @@ impl StreamObserver {
             ));
         if self.response_model.is_none() {
             self.response_model = super::route_proxy_service::response_model_from_value(&value);
+        }
+        self.observe_continuation_event(&value);
+    }
+
+    /// 把 Responses 事件折进续写状态；其它协议的帧原样忽略。
+    fn observe_continuation_event(&mut self, value: &Value) {
+        let Some(event) = value.get("type").and_then(Value::as_str) else {
+            return;
+        };
+        if let Some(sequence_number) = value.get("sequence_number").and_then(Value::as_u64) {
+            self.continuation.last_sequence_number = sequence_number;
+        }
+        match event {
+            "response.created" => {
+                if let Some(id) = value
+                    .get("response")
+                    .and_then(|response| response.get("id"))
+                    .and_then(Value::as_str)
+                {
+                    self.continuation.response_id = Some(id.to_string());
+                }
+            }
+            "response.output_item.added" => {
+                let item = value.get("item");
+                let id = item.and_then(|item| item.get("id")).and_then(Value::as_str);
+                let kind = item
+                    .and_then(|item| item.get("type"))
+                    .and_then(Value::as_str)
+                    .and_then(open_item_kind);
+                if let (Some(id), Some(kind)) = (id, kind) {
+                    self.continuation.open_item = Some(OpenItem {
+                        id: id.to_string(),
+                        kind,
+                        output_index: value
+                            .get("output_index")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                    });
+                }
+            }
+            "response.output_text.delta" => {
+                if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                    let remaining =
+                        PARTIAL_TEXT_LIMIT.saturating_sub(self.continuation.partial_text.len());
+                    if delta.len() > remaining {
+                        self.continuation.text_truncated = true;
+                    }
+                    // 只按 UTF-8 边界截，别把多字节字符劈开。
+                    let mut end = remaining.min(delta.len());
+                    while end > 0 && !delta.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    self.continuation.partial_text.push_str(&delta[..end]);
+                }
+            }
+            "response.output_item.done" => {
+                if let Some(id) = value
+                    .get("item")
+                    .and_then(|item| item.get("id"))
+                    .and_then(Value::as_str)
+                {
+                    self.continuation.completed_items.push(id.to_string());
+                }
+                self.continuation.open_item = None;
+            }
+            _ => {}
         }
     }
 
@@ -574,5 +692,50 @@ data: {"type":"response.output_text.delta","delta":"answer"}
         );
         let outcome = observer.finish();
         assert_eq!(outcome.reasoning_deltas, 0);
+    }
+    #[test]
+    fn observer_collects_continuation_state() {
+        let mut observer = StreamObserver::new(4096, true);
+        for frame in [
+            r#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_1"}}"#,
+            r#"{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"msg_1","type":"message"}}"#,
+            r#"{"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_1","delta":"你好，"}"#,
+            r#"{"type":"response.output_text.delta","sequence_number":3,"item_id":"msg_1","delta":"世界"}"#,
+        ] {
+            observer.observe(format!("data: {frame}\n\n").as_bytes());
+        }
+        let state = observer.continuation();
+        assert_eq!(state.response_id.as_deref(), Some("resp_1"));
+        assert_eq!(state.last_sequence_number, 3);
+        assert_eq!(state.partial_text, "你好，世界");
+        assert_eq!(
+            state.open_item.as_ref().map(|item| item.id.as_str()),
+            Some("msg_1")
+        );
+        assert_eq!(
+            state.open_item.as_ref().map(|item| item.kind),
+            Some(OpenItemKind::Message)
+        );
+        assert!(state.completed_items.is_empty());
+    }
+
+    #[test]
+    fn observer_stops_appending_past_the_partial_text_limit() {
+        let mut observer = StreamObserver::new(4096, true);
+        let big = "x".repeat(PARTIAL_TEXT_LIMIT + 10);
+        observer.observe(
+            format!(
+                "data: {{\"type\":\"response.created\",\"sequence_number\":0,\"response\":{{\"id\":\"r\"}}}}\n\n\
+                 data: {{\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{{\"id\":\"m\",\"type\":\"message\"}}}}\n\n\
+                 data: {{\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"m\",\"delta\":\"{big}\"}}\n\n\
+                 data: {{\"type\":\"response.output_item.done\",\"sequence_number\":3,\"output_index\":0,\"item\":{{\"id\":\"m\",\"type\":\"message\"}}}}\n\n"
+            )
+            .as_bytes(),
+        );
+        let state = observer.continuation();
+        assert!(state.text_truncated);
+        assert!(state.partial_text.len() <= PARTIAL_TEXT_LIMIT);
+        assert_eq!(state.completed_items, vec!["m".to_string()]);
+        assert!(state.open_item.is_none());
     }
 }
