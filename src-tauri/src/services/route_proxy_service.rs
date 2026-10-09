@@ -30,6 +30,7 @@ use crate::services::request_compression;
 use crate::services::response_failure_service::{
     detect_response_failed, is_cross_resource_item_failure, is_encrypted_content_failure,
     is_insufficient_permissions_failure, is_missing_reasoning_failure, is_quota_exhaustion_failure,
+    is_new_api_user_quota_failure,
     is_text_only_chat_content_failure, is_thinking_signature_failure,
     stream_disconnected_before_completion, STREAM_DISCONNECTED_FAILURE_MESSAGE,
 };
@@ -1529,6 +1530,9 @@ pub(crate) async fn forward_request(
                             // the observer judge how the stream ends.
                             break None;
                         }
+                        if let Some(failure) = detect_response_failed(&primed).filter(is_new_api_user_quota_failure) {
+                            break Some((format!("{}: {}", credential.display_name, failure.message), None));
+                        }
                         if !sse_payload_started(&primed) {
                             continue;
                         }
@@ -1585,6 +1589,7 @@ pub(crate) async fn forward_request(
                         client_request: &body_bytes,
                         upstream_request: &upstream_request_bytes,
                         upstream_headers: &request_headers,
+                        response_body: (!primed.is_empty()).then_some(primed.as_slice()),
                     },
                     !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
                         && credential_retry_count < failure_policy.retry_count as usize,
@@ -1630,6 +1635,7 @@ pub(crate) async fn forward_request(
                 // the bytes behind it were never retained. See
                 // `LIVE_LOG_RAW_PREVIEW_LIMIT`.
                 observer: StreamObserver::new(LIVE_LOG_RAW_PREVIEW_LIMIT, streaming_request),
+                quota_failure_recorded: false,
                 client_headers: outbound_headers.clone(),
                 upstream_query: upstream_query.clone(),
                 // Held until the stream ends so the account's concurrency slot
@@ -2039,7 +2045,13 @@ pub(crate) async fn forward_request(
         }
 
         if quota_failure || quota_exhausted {
-            if let Some(failure) = semantic_failure.as_ref() {
+            if let Some(failure) = semantic_failure.as_ref().filter(|failure| is_new_api_user_quota_failure(failure)) {
+                record_new_api_user_quota_failure(state, &platform, &credential,
+                    Some(status.as_u16()), &failure.message, Some(&response_bytes)).await;
+                if !quota_failover_allowed(state, &platform).await {
+                    return proxy_upstream_response(status, upstream_headers, response_bytes.to_vec());
+                }
+            } else if let Some(failure) = semantic_failure.as_ref() {
                 let _ = RouteCredentialRepository::record_semantic_failure_with_status(
                     pool,
                     &credential.id,
@@ -2055,10 +2067,8 @@ pub(crate) async fn forward_request(
             } else {
                 mark_route_credential_error(&state.activity, &platform, pool, &credential.id).await;
             }
-            retry_errors.push(format!(
-                "{}: upstream quota exhausted",
-                credential.display_name
-            ));
+            retry_errors.push(format!("{}: {}", credential.display_name,
+                semantic_failure.as_ref().map(|failure| failure.message.as_str()).unwrap_or("upstream quota exhausted")));
             continue;
         }
         // A key that is missing a scope is refused for every model on it, and no
@@ -3004,6 +3014,7 @@ struct StreamPrimeContext<'a> {
     client_request: &'a [u8],
     upstream_request: &'a [u8],
     upstream_headers: &'a HeaderMap,
+    response_body: Option<&'a [u8]>,
 }
 
 /// Record a failure that happened before any byte reached the client.
@@ -3042,7 +3053,7 @@ async fn handle_stream_prime_failure(
         Some(error_message),
         context.requested_model,
         context.upstream_model,
-        None,
+        context.response_body,
     );
     let _ = insert_route_credential_request_event(
         state,
@@ -3070,10 +3081,31 @@ async fn handle_stream_prime_failure(
         context.bridge_name,
         Some(context.client_request),
         Some(context.upstream_request),
-        None,
-        None,
+        context.response_body,
+        context.response_body,
         None,
     );
+    if let Some(failure) = context
+        .response_body
+        .and_then(detect_response_failed)
+        .filter(is_new_api_user_quota_failure)
+    {
+        record_new_api_user_quota_failure(
+            state,
+            platform,
+            credential,
+            Some(context.status.as_u16()),
+            &failure.message,
+            context.response_body,
+        )
+        .await;
+        retry_queue.retain(|(index, _)| *index != credential_index);
+        if !quota_failover_allowed(state, platform).await {
+            retry_queue.clear();
+        }
+        retry_errors.push(error_message.to_string());
+        return;
+    }
     if retry_same_credential {
         match retry_delay {
             Some(delay) => tokio::time::sleep(delay).await,
@@ -3121,6 +3153,8 @@ struct StreamCompletion {
     upstream_request: Vec<u8>,
     upstream_headers: HeaderMap,
     observer: StreamObserver,
+    /// 强额度错误已单独记录，结账时不能再用普通断流覆盖其原因或清回正常。
+    quota_failure_recorded: bool,
     /// 客户端原始请求头。聚合模式换账号续写时，用它重新构造上游请求。
     client_headers: HeaderMap,
     /// 原请求的 query（如 `beta=true`）；重建续写 URL 需要。
@@ -3180,6 +3214,7 @@ impl StreamCompletion {
             upstream_request,
             upstream_headers,
             observer,
+            quota_failure_recorded,
             client_headers: _client_headers,
             upstream_query: _upstream_query,
             _activity_lease,
@@ -3246,6 +3281,10 @@ impl StreamCompletion {
             // statement about the upstream rather than a gap in the log.
             Some(outcome.reasoning_deltas),
         );
+
+        if quota_failure_recorded {
+            return;
+        }
 
         if truncated {
             // The bytes are already with the client, so this cannot become a
@@ -3551,6 +3590,9 @@ struct StreamPump {
         Box<dyn futures_util::Stream<Item = reqwest::Result<axum::body::Bytes>> + Send>,
     >,
     guard: StreamCompletionGuard,
+    current_credential: SelectedCredential,
+    current_status: u16,
+    quota_error_handled: bool,
     stage: StreamStage,
     /// 已经用掉的续写轮次。
     rounds: u32,
@@ -3565,6 +3607,63 @@ struct StreamPump {
 }
 
 impl StreamPump {
+    /// 已下发内容的流不重放；收到明确额度错误即标记实际账号，并停止继续读取上游。
+    async fn record_observed_quota_failure(&mut self) {
+        if self.quota_error_handled {
+            return;
+        }
+        let Some(completion) = self.guard.completion.as_mut() else {
+            return;
+        };
+        let Some(failure) = completion.observer.new_api_user_quota_failure().cloned() else {
+            return;
+        };
+        let body = json!({"error":{"message":failure.message,"type":failure.error_type,"code":failure.code}}).to_string();
+        record_new_api_user_quota_failure(
+            &completion.state,
+            &completion.platform,
+            &self.current_credential,
+            Some(self.current_status),
+            &failure.message,
+            Some(body.as_bytes()),
+        )
+        .await;
+        if self.current_credential.id == completion.credential.id {
+            completion.quota_failure_recorded = true;
+        }
+        self.quota_error_handled = true;
+        self.stream = Box::pin(futures_util::stream::empty());
+    }
+
+    async fn reject_quota_candidate(
+        &mut self,
+        state: &ProxyAppState,
+        platform: &str,
+        credential: &SelectedCredential,
+        status: u16,
+        body: &[u8],
+    ) -> bool {
+        let Some(failure) = detect_response_failed(body).filter(is_new_api_user_quota_failure)
+        else {
+            return false;
+        };
+        record_new_api_user_quota_failure(
+            state,
+            platform,
+            credential,
+            Some(status),
+            &failure.message,
+            Some(body),
+        )
+        .await;
+        if let Some(completion) = self.guard.completion.as_mut() {
+            if completion.credential.id == credential.id {
+                completion.quota_failure_recorded = true;
+            }
+        }
+        quota_failover_allowed(state, platform).await
+    }
+
     /// 刚结束的内层流是不是「正常收尾」（见到了终止标记）。
     ///
     /// 正常收尾就该结束整条响应；只有「没看到终止标记」才值得续写。原上游的
@@ -3683,79 +3782,139 @@ impl StreamPump {
             return false;
         };
 
-        let Some(credential) = pick_continuation_credential(&state, &platform, &current_id).await
-        else {
-            return false;
-        };
-        let built = match build_upstream_request_internal(
-            &credential,
-            &platform,
-            &path,
-            query.as_deref(),
-            headers,
-            &plan.body,
-            Some(&state.codex_history),
-            TurnReminderMode::Apply,
-            state.model_match_mode,
-        ) {
-            Ok(built) => built,
-            Err(error) => {
-                eprintln!("[route-continuation] 重建上游请求失败: {error}");
+        let mut rejected = HashSet::new();
+        let (credential, status, stream, resume_bridge, resume_custom_tools) = 'candidates: loop {
+            let Some(credential) =
+                pick_continuation_credential(&state, &platform, &current_id, &rejected).await
+            else {
+                return false;
+            };
+            let built = match build_upstream_request_internal(
+                &credential,
+                &platform,
+                &path,
+                query.as_deref(),
+                headers.clone(),
+                &plan.body,
+                Some(&state.codex_history),
+                TurnReminderMode::Apply,
+                state.model_match_mode,
+            ) {
+                Ok(built) => built,
+                Err(error) => {
+                    eprintln!("[route-continuation] 重建上游请求失败: {error}");
+                    return false;
+                }
+            };
+            let expected_bridge = match &self.stage {
+                StreamStage::Primary(Some(transform)) if transform.is_chat_bridge() => {
+                    Some(ProtocolBridgeKind::ResponsesToChat)
+                }
+                _ => Some(ProtocolBridgeKind::ResponsesToResponses),
+            };
+            if built.bridge_kind != expected_bridge || credential.kind != "api" {
                 return false;
             }
-        };
-        let expected_bridge = match &self.stage {
-            StreamStage::Primary(Some(transform)) if transform.is_chat_bridge() => {
-                Some(ProtocolBridgeKind::ResponsesToChat)
-            }
-            _ => Some(ProtocolBridgeKind::ResponsesToResponses),
-        };
-        if built.bridge_kind != expected_bridge || credential.kind != "api" {
-            return false;
-        }
-        let client = match build_outbound_http_client_with_timeouts(state.upstream_timeouts) {
-            Ok(client) => client,
-            Err(error) => {
-                eprintln!("[route-continuation] 构造 HTTP 客户端失败: {error}");
+            let client = match build_outbound_http_client_with_timeouts(state.upstream_timeouts) {
+                Ok(client) => client,
+                Err(error) => {
+                    eprintln!("[route-continuation] 构造 HTTP 客户端失败: {error}");
+                    return false;
+                }
+            };
+            let resume_bridge = IncrementalResponseBridge::new(
+                ProtocolBridgeKind::ResponsesToResponses,
+                &built.tool_namespaces,
+            )
+            .expect("native Responses bridge");
+            let resume_custom_tools = match &self.stage {
+                StreamStage::Primary(Some(transform)) => transform.custom_tool_names.clone(),
+                StreamStage::Resume(resume) => resume.custom_tool_names.clone(),
+                _ => HashSet::new(),
+            };
+            // 与原请求同一条编码路径，别让压缩设置上的差异暴露出来。
+            let mut request_headers = built.headers;
+            let outbound_body = request_compression::encode_request_body(
+                &built.target_url,
+                &mut request_headers,
+                &built.body,
+                &parse_json_object(&credential.config_json, "config").unwrap_or(Value::Null),
+            )
+            .unwrap_or(built.body);
+            let response = match client
+                .post(&built.target_url)
+                .headers(map_to_reqwest_headers(&request_headers))
+                .body(outbound_body)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    eprintln!("[route-continuation] 续写请求发送失败: {error}");
+                    return false;
+                }
+            };
+            let status = response.status().as_u16();
+            if !response.status().is_success() {
+                let body = response.bytes().await.unwrap_or_default();
+                rejected.insert(credential.id.clone());
+                if self
+                    .reject_quota_candidate(&state, &platform, &credential, status, &body)
+                    .await
+                {
+                    continue 'candidates;
+                }
                 return false;
             }
-        };
-        let resume_bridge = IncrementalResponseBridge::new(
-            ProtocolBridgeKind::ResponsesToResponses,
-            &built.tool_namespaces,
-        )
-        .expect("native Responses bridge");
-        let resume_custom_tools = match &self.stage {
-            StreamStage::Primary(Some(transform)) => transform.custom_tool_names.clone(),
-            StreamStage::Resume(resume) => resume.custom_tool_names.clone(),
-            _ => HashSet::new(),
-        };
-        // 与原请求同一条编码路径，别让压缩设置上的差异暴露出来。
-        let mut request_headers = built.headers;
-        let outbound_body = request_compression::encode_request_body(
-            &built.target_url,
-            &mut request_headers,
-            &built.body,
-            &parse_json_object(&credential.config_json, "config").unwrap_or(Value::Null),
-        )
-        .unwrap_or(built.body);
-        let response = match client
-            .post(&built.target_url)
-            .headers(map_to_reqwest_headers(&request_headers))
-            .body(outbound_body)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                eprintln!("[route-continuation] 续写请求发送失败: {error}");
-                return false;
+            // 续写同样要检查首帧：new-api 可能用 HTTP 200 JSON 或 SSE error 返回余额不足。
+            let mut rest = Box::pin(response.bytes_stream());
+            let mut prefix = Vec::new();
+            loop {
+                match futures_util::StreamExt::next(&mut rest).await {
+                    Some(Ok(chunk)) => {
+                        prefix.extend_from_slice(&chunk);
+                        if detect_response_failed(&prefix)
+                            .as_ref()
+                            .is_some_and(is_new_api_user_quota_failure)
+                        {
+                            rejected.insert(credential.id.clone());
+                            if self
+                                .reject_quota_candidate(
+                                    &state,
+                                    &platform,
+                                    &credential,
+                                    status,
+                                    &prefix,
+                                )
+                                .await
+                            {
+                                continue 'candidates;
+                            }
+                            return false;
+                        }
+                        if sse_payload_started(&prefix)
+                            || prefix.len() >= STREAM_PRIME_HOLDBACK_LIMIT
+                        {
+                            break;
+                        }
+                    }
+                    _ => return false,
+                }
             }
+            let stream: std::pin::Pin<
+                Box<dyn futures_util::Stream<Item = reqwest::Result<axum::body::Bytes>> + Send>,
+            > = Box::pin(futures_util::StreamExt::chain(
+                futures_util::stream::once(async move { Ok(axum::body::Bytes::from(prefix)) }),
+                rest,
+            ));
+            break (
+                credential,
+                status,
+                stream,
+                resume_bridge,
+                resume_custom_tools,
+            );
         };
-        if !response.status().is_success() {
-            eprintln!("[route-continuation] 续写上游返回 {}", response.status());
-            return false;
-        }
         eprintln!(
             "[route-continuation] round={} credential={} response_id={:?}",
             self.rounds + 1,
@@ -3833,7 +3992,10 @@ impl StreamPump {
                 })
             }
         };
-        self.stream = Box::pin(response.bytes_stream());
+        self.stream = stream;
+        self.current_credential = credential;
+        self.current_status = status;
+        self.quota_error_handled = false;
         self.upstream_ended = false;
         self.upstream_error = None;
         self.rounds += 1;
@@ -3858,6 +4020,9 @@ fn observed_upstream_stream(
     ));
     let pump = StreamPump {
         stream: replayed,
+        current_credential: completion.credential.clone(),
+        current_status: completion.status.as_u16(),
+        quota_error_handled: false,
         guard: StreamCompletionGuard {
             completion: Some(completion),
         },
@@ -3899,6 +4064,7 @@ fn observed_upstream_stream(
                             completion.observer.observe(&chunk);
                         }
                     }
+                    pump.record_observed_quota_failure().await;
                     let mut failure = None;
                     let converted = match &mut pump.stage {
                         // A response that is not bridged is forwarded verbatim.
@@ -3959,7 +4125,9 @@ fn observed_upstream_stream(
                             .and_then(Result::err)
                             .map(|error| format!("upstream stream failed: {error}"));
                         pump.upstream_ended = true;
-                        match pump.finish_current_records() {
+                        let finished = pump.finish_current_records();
+                        pump.record_observed_quota_failure().await;
+                        match finished {
                             Ok(output) if !output.is_empty() => {
                                 return Some((Ok(axum::body::Bytes::from(output)), pump))
                             }
@@ -4073,6 +4241,7 @@ async fn pick_continuation_credential(
     state: &ProxyAppState,
     platform: &str,
     current_id: &str,
+    rejected: &HashSet<String>,
 ) -> Option<SelectedCredential> {
     let mode = RoutePoolRepository::model_mode(&state.pool, platform)
         .await
@@ -4081,7 +4250,7 @@ async fn pick_continuation_credential(
     let candidates = load_request_candidates(state, platform).await.ok()?;
     let candidates = partition_by_cooldown(candidates, &HashMap::new(), Utc::now())
         .into_iter()
-        .filter(|credential| credential.kind == "api");
+        .filter(|credential| credential.kind == "api" && !rejected.contains(&credential.id));
     match mode {
         PoolModelMode::Precise => candidates
             .into_iter()
@@ -4257,6 +4426,37 @@ async fn mark_route_credential_revoked(
         .is_ok()
     {
         activity.notify_status_change(platform, credential_id);
+    }
+}
+
+async fn quota_failover_allowed(state: &ProxyAppState, platform: &str) -> bool {
+    matches!(
+        RoutePoolRepository::model_mode(&state.pool, platform).await,
+        Ok(PoolModelMode::Aggregate)
+    )
+}
+
+async fn record_new_api_user_quota_failure(
+    state: &ProxyAppState,
+    platform: &str,
+    credential: &SelectedCredential,
+    status: Option<u16>,
+    message: &str,
+    body: Option<&[u8]>,
+) {
+    if RouteCredentialRepository::record_quota_exhaustion_failure(
+        &state.pool,
+        &credential.id,
+        status,
+        message,
+        body,
+    )
+    .await
+    .is_ok()
+    {
+        state
+            .activity
+            .notify_status_change(platform, &credential.id);
     }
 }
 
@@ -7948,6 +8148,10 @@ mod tests {
 
     mod continuation_safety {
         include!("route_proxy_service/continuation_safety_tests.rs");
+    }
+
+    mod quota_errors {
+        include!("route_proxy_service/quota_error_tests.rs");
     }
 
     // The pre-mode signatures: these assertions are about the aggregated list.

@@ -27,6 +27,18 @@ const NEW_API_ERROR_TYPE: &str = "new_api_error";
 /// How those gateways open the message once the account's balance is spent.
 const NEW_API_INSUFFICIENT_BALANCE_PREFIX: &str = "用户额度不足";
 
+/// new-api 自己返回的账号额度耗尽码。必须同时匹配 type/code，不能仅凭英文消息误伤其它错误。
+pub(crate) fn is_new_api_user_quota_failure(failure: &SemanticResponseFailure) -> bool {
+    failure
+        .error_type
+        .as_deref()
+        .is_some_and(|kind| kind.trim().eq_ignore_ascii_case(NEW_API_ERROR_TYPE))
+        && failure
+            .code
+            .as_deref()
+            .is_some_and(|code| code.trim().eq_ignore_ascii_case("insufficient_user_quota"))
+}
+
 /// Returns whether a new-api gateway is reporting a spent account balance.
 ///
 /// These bodies carry no `error.code` at all — only `error.type` — so the
@@ -50,7 +62,7 @@ fn is_new_api_insufficient_balance(failure: &SemanticResponseFailure) -> bool {
 /// These errors should mark the account as abnormal immediately instead of
 /// spending the configured retry budget.
 pub fn is_quota_exhaustion_failure(failure: &SemanticResponseFailure) -> bool {
-    if is_new_api_insufficient_balance(failure) {
+    if is_new_api_user_quota_failure(failure) || is_new_api_insufficient_balance(failure) {
         return true;
     }
 
@@ -300,7 +312,7 @@ pub const STREAM_DISCONNECTED_FAILURE_MESSAGE: &str =
 
 pub fn detect_response_failed(body: &[u8]) -> Option<SemanticResponseFailure> {
     if let Ok(value) = serde_json::from_slice::<Value>(body) {
-        if let Some(failure) = detect_value(&value) {
+        if let Some(failure) = detect_response_failed_value(&value) {
             return Some(failure);
         }
     }
@@ -313,7 +325,7 @@ pub fn detect_response_failed(body: &[u8]) -> Option<SemanticResponseFailure> {
             continue;
         }
         if let Ok(value) = serde_json::from_str::<Value>(data) {
-            if let Some(failure) = detect_value(&value) {
+            if let Some(failure) = detect_response_failed_value(&value) {
                 return Some(failure);
             }
         }
@@ -342,7 +354,7 @@ pub fn detect_response_failed(body: &[u8]) -> Option<SemanticResponseFailure> {
     None
 }
 
-fn detect_value(value: &Value) -> Option<SemanticResponseFailure> {
+pub(crate) fn detect_response_failed_value(value: &Value) -> Option<SemanticResponseFailure> {
     let failed = value.get("type").and_then(Value::as_str) == Some("response.failed")
         || value.pointer("/response/status").and_then(Value::as_str) == Some("failed")
         || value.pointer("/status").and_then(Value::as_str) == Some("failed");
@@ -510,6 +522,35 @@ data: {"type":"response.failed","error":{"message":"down"}}
         )
         .expect("plain text stream error");
         assert_eq!(failure.message, STREAM_DISCONNECTED_FAILURE_MESSAGE);
+    }
+
+    #[test]
+    fn new_api_insufficient_user_quota_code_is_definitive_without_message_matching() {
+        for body in [
+            r#"{"error":{"message":"user quota is not enough (request id: test)","type":"new_api_error","param":"","code":"insufficient_user_quota"}}"#,
+            r#"{"error":{"message":"localized message","type":"new_api_error","code":"insufficient_user_quota"}}"#,
+            r#"{"type":"response.failed","response":{"error":{"message":"quota","type":"new_api_error","code":"insufficient_user_quota"}}}"#,
+        ] {
+            let failure = detect_response_failed(body.as_bytes()).unwrap();
+            assert!(
+                is_quota_exhaustion_failure(&failure),
+                "must be account quota: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn insufficient_user_quota_code_does_not_match_another_error_family() {
+        for body in [
+            r#"{"error":{"message":"user quota is not enough","type":"invalid_request_error","code":"insufficient_user_quota"}}"#,
+            r#"{"error":{"message":"user quota is not enough","type":"new_api_error","code":"channel_not_available"}}"#,
+        ] {
+            let failure = detect_response_failed(body.as_bytes()).unwrap();
+            assert!(
+                !is_quota_exhaustion_failure(&failure),
+                "must not broaden matching: {body}"
+            );
+        }
     }
 
     #[test]

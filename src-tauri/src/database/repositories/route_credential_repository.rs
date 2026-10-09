@@ -1918,11 +1918,52 @@ impl RouteCredentialRepository {
         message: &str,
         response_body: Option<&[u8]>,
     ) -> Result<(), AppError> {
+        let error_status_enabled = Self::error_status_enabled(pool, id).await?;
+        Self::record_semantic_failure_internal(
+            pool,
+            id,
+            response_status,
+            error_threshold,
+            message,
+            response_body,
+            error_status_enabled,
+        )
+        .await
+    }
+
+    /// 确定的账号额度耗尽不是普通失败阈值：立即异常，但不覆盖用户暂停/撤销状态。
+    pub async fn record_quota_exhaustion_failure(
+        pool: &SqlitePool,
+        id: &str,
+        response_status: Option<u16>,
+        message: &str,
+        response_body: Option<&[u8]>,
+    ) -> Result<(), AppError> {
+        Self::record_semantic_failure_internal(
+            pool,
+            id,
+            response_status,
+            1,
+            message,
+            response_body,
+            true,
+        )
+        .await
+    }
+
+    async fn record_semantic_failure_internal(
+        pool: &SqlitePool,
+        id: &str,
+        response_status: Option<u16>,
+        error_threshold: i64,
+        message: &str,
+        response_body: Option<&[u8]>,
+        error_status_enabled: bool,
+    ) -> Result<(), AppError> {
         let now = Utc::now().to_rfc3339();
         let error_threshold = error_threshold.max(1);
         let fingerprint = semantic_failure_fingerprint(response_status, message);
         let response = truncate_failure_response(response_body);
-        let error_status_enabled = Self::error_status_enabled(pool, id).await?;
         // The streak keeps counting even when the toggle is off, so turning it
         // back on judges the account on its real history rather than from zero.
         let result = sqlx::query(

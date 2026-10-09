@@ -13,6 +13,9 @@
 //! - [`StreamObserver`] folds those frames into the values the request log and
 //!   health bookkeeping need once the stream finishes.
 
+use super::response_failure_service::{
+    detect_response_failed_value, is_new_api_user_quota_failure, SemanticResponseFailure,
+};
 use crate::models::route_pool::RouteUsageBreakdown;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -352,6 +355,7 @@ pub struct StreamObserver {
     marker_carry: String,
     streaming_request: bool,
     semantic_failure: bool,
+    new_api_quota_failure: Option<SemanticResponseFailure>,
     pending_messages: BTreeMap<String, (u64, String)>,
     pending_text_bytes: usize,
     next_output_index: u64,
@@ -383,6 +387,7 @@ impl StreamObserver {
             marker_carry: String::new(),
             streaming_request,
             semantic_failure: false,
+            new_api_quota_failure: None,
             pending_messages: BTreeMap::new(),
             pending_text_bytes: 0,
             next_output_index: 0,
@@ -449,7 +454,15 @@ impl StreamObserver {
         self.semantic_failure = true;
     }
 
+    pub fn new_api_user_quota_failure(&self) -> Option<&SemanticResponseFailure> {
+        self.new_api_quota_failure.as_ref()
+    }
+
     fn note_semantic_failure(&mut self, value: &Value) {
+        if self.new_api_quota_failure.is_none() {
+            self.new_api_quota_failure =
+                detect_response_failed_value(value).filter(is_new_api_user_quota_failure);
+        }
         self.semantic_failure |= matches!(
             value["type"].as_str(),
             Some("response.failed" | "response.incomplete" | "error")
@@ -461,6 +474,7 @@ impl StreamObserver {
     pub fn begin_continuation(&mut self) {
         self.continuation_framer = SseFramer::new();
         self.continuation_saw_terminal = false;
+        self.new_api_quota_failure = None;
         self.pending_messages.clear();
         self.pending_text_bytes = 0;
         self.clear_open_item();
