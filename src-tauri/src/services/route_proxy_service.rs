@@ -1615,6 +1615,8 @@ pub(crate) async fn forward_request(
                 // the bytes behind it were never retained. See
                 // `LIVE_LOG_RAW_PREVIEW_LIMIT`.
                 observer: StreamObserver::new(LIVE_LOG_RAW_PREVIEW_LIMIT, streaming_request),
+                client_headers: outbound_headers.clone(),
+                upstream_query: upstream_query.clone(),
                 // Held until the stream ends so the account's concurrency slot
                 // is not handed out while this response is still in flight.
                 _activity_lease: activity_lease,
@@ -3104,6 +3106,10 @@ struct StreamCompletion {
     upstream_request: Vec<u8>,
     upstream_headers: HeaderMap,
     observer: StreamObserver,
+    /// 客户端原始请求头。聚合模式换账号续写时，用它重新构造上游请求。
+    client_headers: HeaderMap,
+    /// 原请求的 query（如 `beta=true`）；重建续写 URL 需要。
+    upstream_query: Option<String>,
     _activity_lease: RouteCredentialActivityLease,
 }
 
@@ -3157,6 +3163,8 @@ impl StreamCompletion {
             upstream_request,
             upstream_headers,
             observer,
+            client_headers: _client_headers,
+            upstream_query: _upstream_query,
             _activity_lease,
         } = self;
 

@@ -582,10 +582,13 @@ git commit -m "feat(route): 内容完整只缺收尾时补 response.completed"
 
 ### Task 7 实现笔记（2026-10-09 探明，开工前先读）
 
-- **重建上游请求不用手写**：`build_upstream_request_with_bridge(credential, platform, path, query, headers, body, turn_reminder)`
-  （`route_proxy_service.rs:4688`）接受一个 `SelectedCredential` 与**客户端面向的 body**，返回
-  `BuiltUpstreamRequest { target_url, headers, body, bridge_kind, tool_namespaces, streaming_request }`。
-  聚合模式下换账号续写因此就是「换一个 credential 再调一次这个函数」，**鉴权头由它负责**。
+- **重建上游请求不用手写**（2026-10-09 修正）：生产路径用的是
+  `build_upstream_request_internal(credential, platform, path, query, headers, body, Some(&state.codex_history), TurnReminderMode::Apply, state.model_match_mode)`
+  —— 见 `route_proxy_service.rs:1254`（计划早先写的 `build_upstream_request_with_bridge` 其实只在测试里调用）。
+  它返回 `BuiltUpstreamRequest { target_url, headers, body, bridge_kind, tool_namespaces, streaming_request }`，
+  **鉴权头由它负责**；聚合模式换账号续写就是「换一个 credential 再调一次」。
+- **7a 已完成**（提交见 log）：`StreamCompletion` 现在带 `client_headers`（客户端原始请求头）与
+  `upstream_query`，构造点取自 `outbound_headers` / `upstream_query`。续写时把这两个原样传给上面的构造器即可。
 - `StreamCompletion` 已有 `client_request` / `upstream_request` / `path` / `target_url` / `platform` /
   `credential` / `state.pool`，够用。
 - **动手前必须先定的三件事**（否则容易返工）：
