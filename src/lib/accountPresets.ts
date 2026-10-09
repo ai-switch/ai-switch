@@ -30,7 +30,6 @@ export type AccountPreset = {
  */
 const AGENTROUTER_CODEX_MODELS = [
   "gpt-6-astra",
-  "gpt-5.6-sol",
   "glm-5.3",
   "deepseek-v4-flash",
 ] as const;

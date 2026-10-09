@@ -3532,12 +3532,11 @@ describe("AccountsScreen", () => {
     expect(screen.getByLabelText("API 账号名称")).toHaveValue("AgentRouter");
     expect(screen.getByLabelText("请求模型 1")).toHaveValue("gpt-6-astra");
     expect(screen.getByLabelText("上游模型 1")).toHaveValue("gpt-6-astra");
-    expect(screen.getByLabelText("请求模型 2")).toHaveValue("gpt-5.6-sol");
-    expect(screen.getByLabelText("上游模型 2")).toHaveValue("gpt-5.6-sol");
-    expect(screen.getByLabelText("请求模型 3")).toHaveValue("glm-5.3");
-    expect(screen.getByLabelText("上游模型 3")).toHaveValue("glm-5.3");
-    expect(screen.getByLabelText("请求模型 4")).toHaveValue("deepseek-v4-flash");
-    expect(screen.getByLabelText("上游模型 4")).toHaveValue("deepseek-v4-flash");
+    expect(screen.getByLabelText("请求模型 2")).toHaveValue("glm-5.3");
+    expect(screen.getByLabelText("上游模型 2")).toHaveValue("glm-5.3");
+    expect(screen.getByLabelText("请求模型 3")).toHaveValue("deepseek-v4-flash");
+    expect(screen.getByLabelText("上游模型 3")).toHaveValue("deepseek-v4-flash");
+    expect(screen.queryByLabelText("请求模型 4")).not.toBeInTheDocument();
     expect(
       screen.getByText("已套用 AgentRouter 预设，通常只需填写 API Key。"),
     ).toBeInTheDocument();
@@ -3637,7 +3636,7 @@ describe("AccountsScreen", () => {
           base_url: "https://agentrouter.org/v1",
           interface_format: "openai-responses",
           model_mappings_json:
-            "[{\"from\":\"gpt-6-astra\",\"to\":\"gpt-6-astra\"},{\"from\":\"gpt-5.6-sol\",\"to\":\"gpt-5.6-sol\"},{\"from\":\"glm-5.3\",\"to\":\"glm-5.3\"},{\"from\":\"deepseek-v4-flash\",\"to\":\"deepseek-v4-flash\"}]",
+            "[{\"from\":\"gpt-6-astra\",\"to\":\"gpt-6-astra\"},{\"from\":\"glm-5.3\",\"to\":\"glm-5.3\"},{\"from\":\"deepseek-v4-flash\",\"to\":\"deepseek-v4-flash\"}]",
         }),
       ),
     );

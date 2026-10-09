@@ -33,7 +33,6 @@ describe("accountPresets", () => {
     expect(preset.interfaceFormat).toBe("openai-responses");
     expect(preset.modelMappings).toEqual([
       { from: "gpt-6-astra", to: "gpt-6-astra" },
-      { from: "gpt-5.6-sol", to: "gpt-5.6-sol" },
       { from: "glm-5.3", to: "glm-5.3" },
       { from: "deepseek-v4-flash", to: "deepseek-v4-flash" },
     ]);
@@ -48,7 +47,6 @@ describe("accountPresets", () => {
     expect(preset.interfaceFormat).toBe("openai-responses");
     expect(preset.modelMappings).toEqual([
       { from: "gpt-6-astra", to: "gpt-6-astra" },
-      { from: "gpt-5.6-sol", to: "gpt-5.6-sol" },
       { from: "glm-5.3", to: "glm-5.3" },
       { from: "deepseek-v4-flash", to: "deepseek-v4-flash" },
     ]);
