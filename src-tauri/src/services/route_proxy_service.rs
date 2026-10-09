@@ -3436,10 +3436,14 @@ fn observed_upstream_stream(
     transform: Option<StreamResponseTransform>,
     completion: StreamCompletion,
 ) -> impl futures_util::Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send + 'static {
-    let replayed = futures_util::StreamExt::chain(
+    // 装箱是为了让 unfold 里的流**可以被替换**：断流续写时要把内层流换成
+    // 续写请求的响应流（Task 7）。类型必须唯一，`chain` 的具体类型换不了。
+    let replayed: std::pin::Pin<
+        Box<dyn futures_util::Stream<Item = reqwest::Result<axum::body::Bytes>> + Send>,
+    > = Box::pin(futures_util::StreamExt::chain(
         futures_util::stream::once(async move { Ok(first_chunk) }),
         rest,
-    );
+    ));
     let guard = StreamCompletionGuard {
         completion: Some(completion),
     };
