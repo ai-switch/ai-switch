@@ -580,6 +580,21 @@ git commit -m "feat(route): 内容完整只缺收尾时补 response.completed"
   - `pub struct ContinuationPlan { pub body: Vec<u8>, pub response_id: String, pub next_sequence_number: u64, pub next_output_index: u64 }`
   - `pub fn plan_continuation(original_body: &[u8], state: &StreamContinuationState) -> Option<ContinuationPlan>`
 
+### Task 7 实现笔记（2026-10-09 探明，开工前先读）
+
+- **重建上游请求不用手写**：`build_upstream_request_with_bridge(credential, platform, path, query, headers, body, turn_reminder)`
+  （`route_proxy_service.rs:4688`）接受一个 `SelectedCredential` 与**客户端面向的 body**，返回
+  `BuiltUpstreamRequest { target_url, headers, body, bridge_kind, tool_namespaces, streaming_request }`。
+  聚合模式下换账号续写因此就是「换一个 credential 再调一次这个函数」，**鉴权头由它负责**。
+- `StreamCompletion` 已有 `client_request` / `upstream_request` / `path` / `target_url` / `platform` /
+  `credential` / `state.pool`，够用。
+- **动手前必须先定的三件事**（否则容易返工）：
+
+  1. 传给 builder 的 `headers` 应当是**客户端原始请求头**，不是 `StreamCompletion.upstream_headers`
+     （后者是发往上游的、含旧账号的鉴权）。当前没有存客户端头，需要给 `StreamCompletion` 加字段。
+  2. 原请求的 **query**（如 `?beta=true`）没被保存，重建 URL 需要它，也要补进 `StreamCompletion`。
+  3. 聚合模式下换账号：`select_pool_credentials(pool, platform)` 过滤掉当前 `credential.id` 后再交给 builder。
+
 - [ ] **Step 1: 写失败集成测试（两次上游 + 一次续写）**
 
 ```rust
