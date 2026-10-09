@@ -129,6 +129,60 @@ fn build_outbound_http_client_inner(
         .map_err(|err| format!("Could not create HTTP client: {err}"))
 }
 
+/// Proxy environment variables reqwest reads by default, in priority order.
+const PROXY_ENV_KEYS: [&str; 6] = [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+];
+
+/// Which outbound proxy this process is configured to use, for diagnostics.
+///
+/// Mirrors the resolution order of [`build_outbound_http_client_inner`]:
+/// reqwest reads the proxy environment variables itself, and the explicit
+/// WinINET proxy only applies when those are unset. Credentials in the URL are
+/// stripped because the value ends up in request logs. `None` means requests
+/// go direct.
+pub fn outbound_proxy_description() -> Option<String> {
+    let env_proxy = PROXY_ENV_KEYS
+        .iter()
+        .find_map(|key| std::env::var(key).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let wininet_proxy = detect_windows_wininet_proxy()
+        .map(|(url, _)| url)
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty());
+    describe_outbound_proxy(env_proxy.as_deref(), wininet_proxy.as_deref())
+}
+
+/// Pure pick/redact step of [`outbound_proxy_description`].
+fn describe_outbound_proxy(env_proxy: Option<&str>, wininet_proxy: Option<&str>) -> Option<String> {
+    let raw = env_proxy.or(wininet_proxy)?;
+    let raw = raw.trim();
+    (!raw.is_empty()).then(|| redact_proxy_url(raw))
+}
+
+/// Drop `user:password@` from a proxy URL before it is written to a log.
+fn redact_proxy_url(raw: &str) -> String {
+    let Some(scheme_end) = raw.find("://") else {
+        return raw.to_string();
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = raw[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|offset| authority_start + offset)
+        .unwrap_or(raw.len());
+    let Some(at) = raw[authority_start..authority_end].rfind('@') else {
+        return raw.to_string();
+    };
+    let host_start = authority_start + at + 1;
+    format!("{}{}", &raw[..authority_start], &raw[host_start..])
+}
+
 fn chatgpt_cloudflare_cookie_store() -> Arc<ChatGptCloudflareCookieStore> {
     Arc::clone(
         SHARED_CHATGPT_CLOUDFLARE_COOKIE_STORE
@@ -358,5 +412,39 @@ mod tests {
         store.set_cookies(&mut set_cookies, &chatgpt_url);
 
         assert_eq!(store.cookies(&api_url), None);
+    }
+
+    #[test]
+    fn redacts_proxy_credentials_before_logging() {
+        assert_eq!(
+            redact_proxy_url("http://user:s3cret@127.0.0.1:7890"),
+            "http://127.0.0.1:7890"
+        );
+        assert_eq!(
+            redact_proxy_url("socks5://user:pass@10.0.0.1:1080/"),
+            "socks5://10.0.0.1:1080/"
+        );
+    }
+
+    #[test]
+    fn keeps_credential_free_proxy_url_untouched() {
+        assert_eq!(
+            redact_proxy_url("http://127.0.0.1:7897"),
+            "http://127.0.0.1:7897"
+        );
+    }
+
+    #[test]
+    fn env_proxy_wins_over_wininet_and_wininet_is_the_fallback() {
+        assert_eq!(
+            describe_outbound_proxy(Some("http://env:1"), Some("http://wininet:2")).as_deref(),
+            Some("http://env:1")
+        );
+        assert_eq!(
+            describe_outbound_proxy(None, Some("http://wininet:2")).as_deref(),
+            Some("http://wininet:2")
+        );
+        assert_eq!(describe_outbound_proxy(None, None), None);
+        assert_eq!(describe_outbound_proxy(Some("   "), None), None);
     }
 }

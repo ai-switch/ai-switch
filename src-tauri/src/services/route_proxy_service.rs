@@ -17,7 +17,8 @@ use crate::services::anthropic_thinking::strip_replayed_thinking_from_bytes;
 use crate::services::client_identity;
 use crate::services::codex_reasoning_cache::CodexReasoningCache;
 use crate::services::http_client::{
-    build_outbound_http_client, build_outbound_http_client_with_timeouts, OutboundTimeouts,
+    build_outbound_http_client, build_outbound_http_client_with_timeouts,
+    outbound_proxy_description, OutboundTimeouts,
 };
 use crate::services::official_agent_identity_service::{
     resolve_agent_identity_headers, CODEX_CHATGPT_BACKEND_BASE_URL,
@@ -151,33 +152,123 @@ async fn wait_for_credential_retry(policy: RouteCredentialFailurePolicy) {
     }
 }
 
-/// Describe an upstream transport failure, naming the deadline that fired.
+/// Everything the transport log line needs about one failed attempt.
+///
+/// Kept as a struct so [`format_upstream_transport_error`] stays pure: telling
+/// a connect timeout, a refused connection and a read stall apart is exactly
+/// what has been reported wrong before, and it is worth testing without a live
+/// socket per failure mode.
+#[derive(Default)]
+struct TransportErrorDetail<'a> {
+    /// reqwest's top-level Display, e.g. `error sending request for url (...)`.
+    text: &'a str,
+    /// Deepest cause behind that Display, e.g. `connection refused`.
+    cause: Option<&'a str>,
+    /// Outbound proxy this process is configured to use, if any.
+    proxy: Option<&'a str>,
+    is_connect: bool,
+    is_timeout: bool,
+}
+
+/// Describe an upstream transport failure, naming the phase and deadline that fired.
 ///
 /// reqwest renders a timeout as a bare "operation timed out", which reads the
 /// same as any other transport error in the request log. Since a stalled
 /// upstream and a refused one call for different fixes, spell out which limit
 /// was hit and what it was set to.
+///
+/// The phase has to be decided before the timeout: a connect-phase timeout
+/// satisfies *both* `is_connect()` and `is_timeout()` (reqwest wraps the
+/// connect future in its own deadline and keeps the `TimedOut` in the source
+/// chain). Testing `is_timeout()` first therefore reported a connect timeout
+/// with the read-stall wording, and every non-timeout connect error — refused,
+/// aborted, TLS handshake failure — as if it had waited out the connect
+/// deadline, however fast it actually failed.
 fn describe_upstream_transport_error(
     display_name: &str,
     context: &str,
     error: &reqwest::Error,
     timeouts: OutboundTimeouts,
 ) -> String {
-    let mut message = format!("{display_name}: {context}: {error}");
-    if error.is_timeout() {
+    let cause = transport_error_cause(error);
+    let proxy = outbound_proxy_description();
+    format_upstream_transport_error(
+        display_name,
+        context,
+        &TransportErrorDetail {
+            text: &error.to_string(),
+            cause: cause.as_deref(),
+            proxy: proxy.as_deref(),
+            is_connect: error.is_connect(),
+            is_timeout: error.is_timeout(),
+        },
+        timeouts,
+    )
+}
+
+/// Deepest message in reqwest's source chain.
+///
+/// `reqwest::Error`'s own Display stops at "error sending request for url
+/// (...)", which names neither the reason nor the layer that failed: a refused
+/// connection, a DNS failure and a TLS handshake error all read the same. The
+/// cause is what makes the log line actionable.
+fn transport_error_cause(error: &reqwest::Error) -> Option<String> {
+    use std::error::Error as _;
+
+    let mut cause = None;
+    let mut source = error.source();
+    while let Some(current) = source {
+        let text = current.to_string();
+        if !text.trim().is_empty() {
+            cause = Some(text);
+        }
+        source = current.source();
+    }
+    cause.map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Pure formatter behind [`describe_upstream_transport_error`].
+fn format_upstream_transport_error(
+    display_name: &str,
+    context: &str,
+    detail: &TransportErrorDetail<'_>,
+    timeouts: OutboundTimeouts,
+) -> String {
+    let mut message = format!("{display_name}: {context}: {}", detail.text);
+    if let Some(cause) = detail.cause.filter(|cause| {
+        let cause = cause.trim();
+        !cause.is_empty() && !detail.text.contains(cause)
+    }) {
+        message.push_str(": ");
+        message.push_str(cause.trim());
+    }
+
+    let mut notes: Vec<String> = Vec::new();
+    if detail.is_connect {
+        if let Some(connect) = timeouts.connect {
+            if detail.is_timeout {
+                notes.push(format!("connect timed out after {}s", connect.as_secs()));
+            } else {
+                notes.push(format!(
+                    "connection failed before the {}s connect deadline",
+                    connect.as_secs()
+                ));
+            }
+            notes.push("check network/proxy reachability".to_string());
+        }
+    } else if detail.is_timeout {
         if let Some(read) = timeouts.read {
-            message.push_str(&format!(
-                " (no data from upstream for {}s; treated as a stalled connection and retried/failed over)",
+            notes.push(format!(
+                "no data from upstream for {}s; treated as a stalled connection and retried/failed over",
                 read.as_secs()
             ));
         }
-    } else if error.is_connect() {
-        if let Some(connect) = timeouts.connect {
-            message.push_str(&format!(
-                " (could not connect within {}s; check network/proxy reachability)",
-                connect.as_secs()
-            ));
-        }
+    }
+    if let Some(proxy) = detail.proxy.filter(|proxy| !proxy.trim().is_empty()) {
+        notes.push(format!("outbound proxy {}", proxy.trim()));
+    }
+    if !notes.is_empty() {
+        message.push_str(&format!(" ({})", notes.join("; ")));
     }
     message
 }
@@ -17213,5 +17304,114 @@ data: [DONE]\n\n";
             }
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
+    }
+
+    fn transport_detail<'a>(
+        text: &'a str,
+        is_connect: bool,
+        is_timeout: bool,
+    ) -> TransportErrorDetail<'a> {
+        TransportErrorDetail {
+            text,
+            is_connect,
+            is_timeout,
+            ..TransportErrorDetail::default()
+        }
+    }
+
+    const TRANSPORT_TIMEOUTS: OutboundTimeouts = OutboundTimeouts {
+        total: None,
+        connect: Some(Duration::from_secs(20)),
+        read: Some(Duration::from_secs(180)),
+    };
+
+    #[test]
+    fn transport_error_reports_connect_timeout_as_connect_phase() {
+        let message = format_upstream_transport_error(
+            "justwoker",
+            "upstream request failed",
+            &transport_detail(
+                "error sending request for url (https://api.justwoker.icu/v1/messages)",
+                true,
+                true,
+            ),
+            TRANSPORT_TIMEOUTS,
+        );
+        assert!(message.contains("connect timed out after 20s"), "{message}");
+        assert!(!message.contains("no data from upstream"), "{message}");
+    }
+
+    #[test]
+    fn transport_error_does_not_claim_connect_deadline_when_connection_failed_fast() {
+        let message = format_upstream_transport_error(
+            "justwoker",
+            "upstream request failed",
+            &transport_detail(
+                "error sending request for url (https://api.justwoker.icu/v1/messages)",
+                true,
+                false,
+            ),
+            TRANSPORT_TIMEOUTS,
+        );
+        assert!(!message.contains("within 20s"), "{message}");
+        assert!(!message.contains("no data from upstream"), "{message}");
+        assert!(message.contains("connect deadline"), "{message}");
+    }
+
+    #[test]
+    fn transport_error_keeps_stalled_wording_for_read_timeout() {
+        let message = format_upstream_transport_error(
+            "justwoker",
+            "upstream request failed",
+            &transport_detail(
+                "error sending request for url (https://api.justwoker.icu/v1/messages)",
+                false,
+                true,
+            ),
+            TRANSPORT_TIMEOUTS,
+        );
+        assert!(
+            message.contains("no data from upstream for 180s"),
+            "{message}"
+        );
+        assert!(!message.contains("connect deadline"), "{message}");
+    }
+
+    #[test]
+    fn transport_error_appends_the_deepest_cause_and_the_outbound_proxy() {
+        let message = format_upstream_transport_error(
+            "justwoker",
+            "upstream request failed",
+            &TransportErrorDetail {
+                text: "error sending request for url (https://api.justwoker.icu/v1/messages)",
+                cause: Some("tls handshake eof"),
+                proxy: Some("http://127.0.0.1:7897"),
+                is_connect: true,
+                is_timeout: false,
+            },
+            TRANSPORT_TIMEOUTS,
+        );
+        assert!(message.contains(": tls handshake eof"), "{message}");
+        assert!(
+            message.contains("outbound proxy http://127.0.0.1:7897"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn transport_error_omits_a_cause_already_present_in_the_top_level_text() {
+        let message = format_upstream_transport_error(
+            "justwoker",
+            "upstream request failed",
+            &TransportErrorDetail {
+                text: "error sending request for url (https://api.justwoker.icu/v1/messages): timed out",
+                cause: Some("timed out"),
+                proxy: None,
+                is_connect: false,
+                is_timeout: true,
+            },
+            TRANSPORT_TIMEOUTS,
+        );
+        assert_eq!(message.matches("timed out").count(), 1, "{message}");
     }
 }
