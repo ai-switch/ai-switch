@@ -3,9 +3,15 @@
 //! 设计见 `docs/superpowers/specs/2026-10-09-stream-continuation-design.md`。
 
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+mod holdback;
+pub(super) use holdback::ResponsesItemHoldback;
 
 use crate::models::route_pool::RouteUsageBreakdown;
-use crate::services::route_proxy_stream::{OpenItem, OpenItemKind, StreamContinuationState};
+#[cfg(test)]
+use crate::services::route_proxy_stream::OpenItem;
+use crate::services::route_proxy_stream::{OpenItemKind, StreamContinuationState};
 
 /// 与「用户手动继续」等价的那句指令（spec 第 6 节）。
 pub const CONTINUE_INSTRUCTION: &str = "Continue exactly where the previous assistant message stopped. Do not repeat anything already written, do not add a preamble, and do not restate the question.";
@@ -28,11 +34,13 @@ pub fn build_continuation_body(
         .ok_or_else(|| "original request body has no input".to_string())?
         .as_array_mut()
         .ok_or_else(|| "original request input must be an array".to_string())?;
-    items.push(json!({
-        "type": "message",
-        "role": "assistant",
-        "content": [{ "type": "output_text", "text": partial_text }]
-    }));
+    if !partial_text.is_empty() {
+        items.push(json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": partial_text }]
+        }));
+    }
     items.push(json!({
         "type": "message",
         "role": "user",
@@ -78,16 +86,54 @@ pub fn plan_continuation(
         return None;
     }
     let response_id = state.response_id.clone()?;
-    if state.partial_text.is_empty() {
+    if state.partial_text.is_empty()
+        && !state
+            .open_item
+            .as_ref()
+            .is_some_and(|item| is_holdback_item(item.kind))
+    {
         return None;
     }
     let body = build_continuation_body(original_body, &state.partial_text).ok()?;
+    // 断流时还开着的那个 item 也占了一个 `output_index`；新 item 必须排在它后面，
+    // 否则客户端那边两条 item 撞在同一个位置上。它已经被网关补过 done，
+    // 所以这里按「它的位置 + 1」算。
+    let next_output_index = match state.open_item.as_ref() {
+        Some(open) => open.output_index + 1,
+        None => state.completed_items.len() as u64,
+    };
     Some(ContinuationPlan {
         body,
         response_id,
         next_sequence_number: state.last_sequence_number + 1,
-        next_output_index: state.completed_items.len() as u64,
+        next_output_index,
     })
+}
+
+/// 给「断流时还开着的那个文本 item」补一条合成的 `output_item.done`。
+///
+/// 必须先于续写流的第一条事件发出：客户端是靠 `output_item.*` 记录会话历史的，
+/// item 不 done，断流前那一段就永远不会进客户端的历史（Task 1 的 spike 就是这么
+/// 拼的，实机复验也证实：不补这条，客户端只显示续写那一段）。
+pub fn synthesized_item_done_block(
+    sequence_number: u64,
+    item_id: &str,
+    output_index: u64,
+    text: &str,
+) -> String {
+    let value = json!({
+        "type": "response.output_item.done",
+        "sequence_number": sequence_number,
+        "output_index": output_index,
+        "item": {
+            "id": item_id,
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{ "type": "output_text", "text": text }],
+        }
+    });
+    format!("data: {value}\n\n")
 }
 
 /// 需要「收到 `output_item.done` 才转发」的 item 类型（spec 第 8.1 节）。
@@ -106,10 +152,19 @@ pub struct ResponsesResumeRewriter {
     response_id: String,
     next_sequence_number: u64,
     next_output_index: u64,
-    /// 正在暂存的工具调用/reasoning item id（spec 第 8.1 节）。
-    held_item: Option<String>,
-    /// 暂存区块，按到达顺序排好；`output_item.done` 时一次性吐出。
-    held_blocks: Vec<String>,
+    holdback: ResponsesItemHoldback,
+    /// 多个文本 item 可以交错；不能被新工具/reasoning item 覆盖。
+    open_messages: BTreeMap<String, OpenMessage>,
+    item_ids: HashMap<String, (String, u64)>,
+    output_indices: HashMap<u64, u64>,
+    used_ids: HashSet<String>,
+    text_bytes: usize,
+    text_truncated: bool,
+}
+
+struct OpenMessage {
+    output_index: u64,
+    text: String,
 }
 
 impl ResponsesResumeRewriter {
@@ -118,104 +173,191 @@ impl ResponsesResumeRewriter {
             response_id,
             next_sequence_number,
             next_output_index,
-            held_item: None,
-            held_blocks: Vec::new(),
+            holdback: ResponsesItemHoldback::default(),
+            open_messages: BTreeMap::new(),
+            item_ids: HashMap::new(),
+            output_indices: HashMap::new(),
+            used_ids: HashSet::new(),
+            text_bytes: 0,
+            text_truncated: false,
         }
     }
 
-    /// 丢掉没等到 `output_item.done` 的暂存 item。
-    ///
-    /// 续写流又断了、要开下一轮时调用：半截工具调用客户端从未见过，整条丢弃，
-    /// 让模型重新发一次完整的（spec 第 8.2 节）。
+    pub fn reserve_item_ids(&mut self, ids: impl IntoIterator<Item = String>) {
+        self.used_ids.extend(ids);
+    }
+
+    pub fn can_continue(&self) -> bool {
+        self.holdback.can_continue() && !self.text_truncated
+    }
+
+    /// 跨轮游标保留，上游每轮从零开始的索引映射则必须重建。
+    pub fn begin_next_stream(&mut self) {
+        self.item_ids.clear();
+        self.output_indices.clear();
+    }
+
+    /// 断流后先放行交错的完整 item；未收完的工具/reasoning 永不交给客户端。
+    pub fn release_interrupted(&mut self) -> Result<String, String> {
+        let blocks = self.holdback.discard_incomplete();
+        self.rewrite_released(blocks)
+    }
+
+    pub fn take_dangling_message_done(&mut self) -> Option<String> {
+        if self.open_messages.is_empty() || self.text_truncated {
+            return None;
+        }
+        let mut messages: Vec<_> = std::mem::take(&mut self.open_messages)
+            .into_iter()
+            .collect();
+        messages.sort_by_key(|(_, message)| message.output_index);
+        let mut output = String::new();
+        for (id, message) in messages {
+            output.push_str(&synthesized_item_done_block(
+                self.next_sequence_number,
+                &id,
+                message.output_index,
+                &message.text,
+            ));
+            self.next_sequence_number += 1;
+        }
+        self.text_bytes = 0;
+        Some(output)
+    }
+
+    #[cfg(test)]
     pub fn discard_held(&mut self) {
-        self.held_item = None;
-        self.held_blocks.clear();
+        let _ = self.release_interrupted();
+        self.begin_next_stream();
     }
 
-    /// `Ok(None)` 表示这一块不再转发。
     pub fn rewrite_block(&mut self, block: &str) -> Result<Option<String>, String> {
-        let payload = block
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("data:").map(str::trim))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if payload.is_empty() || payload == "[DONE]" {
-            return Ok(None);
-        }
-        let mut value: Value = match serde_json::from_str(&payload) {
-            Ok(value) => value,
-            // 解析不了的块原样透传：宁可让客户端看到上游原文，也不要吞掉它。
-            Err(_) => return Ok(Some(ensure_terminator(block))),
-        };
-        let event = value
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        match event.as_str() {
-            // response 已经在客户端那边创建过了；收尾由 `finish` 自己发。
-            "response.created" | "response.in_progress" | "response.completed" => return Ok(None),
-            _ => {}
-        }
-        // 暂存中的 item：它的后续块先攒着，等 `output_item.done` 一起放。
-        if let Some(held) = self.held_item.clone() {
-            if json_item_id(&value).as_deref() == Some(held.as_str()) {
-                let rendered = self.render(value, &event)?;
-                if event == "response.output_item.done" {
-                    self.held_item = None;
-                    let mut output: String = self.held_blocks.drain(..).collect();
-                    output.push_str(&rendered);
-                    return Ok(Some(output));
-                }
-                self.held_blocks.push(rendered);
-                return Ok(None);
-            }
-            // 不是暂存 item 的块：暂存的东西永远不会收尾了，丢掉它继续。
-            self.discard_held();
-        }
-
-        // 新的工具调用 / reasoning item：开始暂存，先不转发。
-        if event == "response.output_item.added"
-            && json_item_kind(&value).is_some_and(is_holdback_item)
-        {
-            let item_id = json_item_id(&value);
-            let rendered = self.render(value, &event)?;
-            self.held_item = item_id;
-            self.held_blocks.push(rendered);
-            return Ok(None);
-        }
-
-        Ok(Some(self.render(value, &event)?))
+        let blocks = self.holdback.push_block(block)?;
+        let output = self.rewrite_released(blocks)?;
+        Ok((!output.is_empty()).then_some(output))
     }
 
-    /// 给一块事件重写序号与 `output_index`，渲染成完整的 SSE 记录。
+    fn rewrite_released(&mut self, blocks: Vec<String>) -> Result<String, String> {
+        let mut output = String::new();
+        for block in blocks {
+            let payload = block_payload(&block);
+            if payload.is_empty() || payload == "[DONE]" {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(&payload) else {
+                continue;
+            };
+            let event = value["type"].as_str().unwrap_or_default().to_string();
+            if matches!(
+                event.as_str(),
+                "response.created" | "response.in_progress" | "response.completed"
+            ) {
+                continue;
+            }
+            output.push_str(&self.render(value, &event)?);
+        }
+        Ok(output)
+    }
+
     fn render(&mut self, mut value: Value, event: &str) -> Result<String, String> {
+        if !value.is_object() {
+            return Err("Responses event must be an object".into());
+        }
         value["sequence_number"] = Value::from(self.next_sequence_number);
         self.next_sequence_number += 1;
-        match event {
-            // 只有新出现的 item 才占一个新位置；`done` 与后续的 delta 都属于
-            // 同一个 item，必须复用 `added` 分配的那个 `output_index`。
-            "response.output_item.added" => {
-                value["output_index"] = Value::from(self.next_output_index);
-                self.next_output_index += 1;
+        let original_id = json_item_id(&value);
+        let original_index = value["output_index"].as_u64();
+        if event == "response.output_item.added" {
+            if self.used_ids.len() >= 4096 {
+                return Err("too many continuation output items".into());
             }
-            _ => {
-                if value.get("output_index").and_then(Value::as_u64).is_some() {
-                    value["output_index"] = Value::from(self.next_output_index.saturating_sub(1));
+            let index = self.next_output_index;
+            self.next_output_index += 1;
+            if let Some(id) = original_id.as_ref() {
+                let mut client_id = id.clone();
+                if self.used_ids.contains(&client_id) {
+                    client_id = format!("{id}_resume_{index}");
+                    while self.used_ids.contains(&client_id) {
+                        client_id.push('_');
+                    }
+                }
+                self.used_ids.insert(client_id.clone());
+                self.item_ids.insert(id.clone(), (client_id, index));
+            }
+            if let Some(original_index) = original_index {
+                self.output_indices.insert(original_index, index);
+            }
+            value["output_index"] = Value::from(index);
+        }
+        if let Some((id, index)) = original_id.as_ref().and_then(|id| self.item_ids.get(id)) {
+            if value.get("item_id").is_some() {
+                value["item_id"] = Value::String(id.clone());
+            }
+            if value.get("item").is_some_and(Value::is_object) {
+                value["item"]["id"] = Value::String(id.clone());
+            }
+            value["output_index"] = Value::from(*index);
+        } else if let Some(index) = original_index.and_then(|index| self.output_indices.get(&index))
+        {
+            value["output_index"] = Value::from(*index);
+        }
+        if value.get("response").is_some_and(Value::is_object) {
+            value["response"]["id"] = Value::String(self.response_id.clone());
+        }
+        if value.get("response_id").is_some() {
+            value["response_id"] = Value::String(self.response_id.clone());
+        }
+        let id = json_item_id(&value);
+        match event {
+            "response.output_item.added"
+                if value.pointer("/item/type").and_then(Value::as_str) == Some("message") =>
+            {
+                if let Some(id) = id {
+                    self.open_messages.insert(
+                        id,
+                        OpenMessage {
+                            output_index: value["output_index"].as_u64().unwrap_or_default(),
+                            text: String::new(),
+                        },
+                    );
                 }
             }
+            "response.output_text.delta" => {
+                if let (Some(open), Some(delta)) = (
+                    id.as_ref().and_then(|id| self.open_messages.get_mut(id)),
+                    value["delta"].as_str(),
+                ) {
+                    let remaining = (1024usize * 1024).saturating_sub(self.text_bytes);
+                    self.text_truncated |= delta.len() > remaining;
+                    let mut end = delta.len().min(remaining);
+                    while !delta.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    open.text.push_str(&delta[..end]);
+                    self.text_bytes += end;
+                }
+            }
+            "response.output_item.done" => {
+                if let Some(open) = id.as_ref().and_then(|id| self.open_messages.remove(id)) {
+                    self.text_bytes = self.text_bytes.saturating_sub(open.text.len());
+                }
+            }
+            _ => {}
         }
-        let text = serde_json::to_string(&value).map_err(|error| error.to_string())?;
-        Ok(format!("data: {text}\n\n"))
+        Ok(format!("data: {value}\n\n"))
     }
 
-    /// 续写全部结束后由网关合成的收尾事件。
-    ///
-    /// Task 1 实测：客户端是从流式的 `output_item.*` 记录会话历史的，这里
-    /// `output` 留空也不丢内容，所以不必重建整个 output 数组。
     pub fn finish(&mut self, usage: &RouteUsageBreakdown) -> String {
         synthesized_completion_block(&self.response_id, self.next_sequence_number, usage)
     }
+}
+
+pub(super) fn block_payload(block: &str) -> String {
+    block
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("data:").map(str::trim))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 从事件里取 item id：增量事件放 `item_id`，`output_item.*` 放 `item.id`。
@@ -285,6 +427,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn each_round_closes_its_own_text_and_avoids_reused_item_ids() {
+        let mut rw = ResponsesResumeRewriter::new("root".into(), 3, 1);
+        rw.reserve_item_ids(["m".to_string()]);
+        let added = r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"m","type":"message"}}"#;
+        let delta = r#"data: {"type":"response.output_text.delta","output_index":0,"item_id":"m","delta":"中文"}"#;
+        let a = rw.rewrite_block(added).unwrap().unwrap();
+        let d = rw.rewrite_block(delta).unwrap().unwrap();
+        let close = rw.take_dangling_message_done().unwrap();
+        let parse =
+            |s: &str| serde_json::from_str::<Value>(s.trim().trim_start_matches("data: ")).unwrap();
+        let a = parse(&a);
+        let d = parse(&d);
+        let close = parse(&close);
+        assert_ne!(a["item"]["id"], "m");
+        assert_eq!(d["item_id"], a["item"]["id"]);
+        assert_eq!(close["item"]["id"], a["item"]["id"]);
+        assert_eq!(close["item"]["content"][0]["text"], "中文");
+        assert_eq!(close["sequence_number"], 5);
+        rw.begin_next_stream();
+        let next = parse(&rw.rewrite_block(added).unwrap().unwrap());
+        assert_ne!(next["item"]["id"], a["item"]["id"]);
+        assert_eq!(next["output_index"], 2);
+        assert_eq!(next["sequence_number"], 6);
+    }
+
+    #[test]
+    fn continuation_text_buffers_stop_at_the_limit() {
+        let mut rw = ResponsesResumeRewriter::new("root".into(), 0, 0);
+        rw.rewrite_block(r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"m","type":"message"}}"#).unwrap();
+        let block = format!(
+            "data: {}",
+            json!({"type":"response.output_text.delta","item_id":"m",
+            "delta":"x".repeat(1024 * 1024 + 1)})
+        );
+        rw.rewrite_block(&block).unwrap();
+        assert!(!rw.can_continue());
+        assert!(rw.text_bytes <= 1024 * 1024);
+        assert!(
+            rw.take_dangling_message_done().is_none(),
+            "不能提交被截断的缓存正文"
+        );
+    }
+
+    #[test]
     fn appends_partial_answer_and_instruction_without_touching_other_fields() {
         let original = br#"{"model":"gpt-6-astra","store":false,"reasoning":{"effort":"high"},
             "tools":[{"type":"function","name":"t"}],"input":[{"type":"message","role":"user",
@@ -342,7 +528,11 @@ mod tests {
     fn function_call_arguments_are_held_back_until_done() {
         let mut rewriter = ResponsesResumeRewriter::new("resp_1".into(), 0, 0);
         let added = r#"data: {"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"fc_1","type":"function_call","name":"lookup"}}"#;
-        assert_eq!(rewriter.rewrite_block(added).unwrap(), None, "参数没收完前不得转发");
+        assert_eq!(
+            rewriter.rewrite_block(added).unwrap(),
+            None,
+            "参数没收完前不得转发"
+        );
         let delta = r#"data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"a\":"}"#;
         assert_eq!(rewriter.rewrite_block(delta).unwrap(), None);
         let done = r#"data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"id":"fc_1","type":"function_call","arguments":"{}"}}"#;
@@ -353,7 +543,11 @@ mod tests {
         assert!(flushed.contains("fc_1"));
         assert!(flushed.contains("response.output_item.added"));
         assert!(flushed.contains("response.output_item.done"));
-        assert_eq!(flushed.matches("data: ").count(), 3, "added+delta+done 一起放");
+        assert_eq!(
+            flushed.matches("data: ").count(),
+            3,
+            "added+delta+done 一起放"
+        );
     }
 
     #[test]
@@ -365,21 +559,37 @@ mod tests {
         assert_eq!(rewriter.rewrite_block(delta).unwrap(), None);
         // 上游提前结束：整条丢弃，重新请求。
         rewriter.discard_held();
-        let next_round = r#"data: {"type":"response.output_text.delta","item_id":"m2","delta":"接着写"}"#;
+        let next_round =
+            r#"data: {"type":"response.output_text.delta","item_id":"m2","delta":"接着写"}"#;
         let out = rewriter.rewrite_block(next_round).unwrap().expect("block");
         assert!(!out.contains("fc_1"), "半截调用不能到客户端");
         assert!(out.contains("接着写"));
     }
 
     #[test]
-    fn a_new_item_abandons_a_held_call_that_will_never_finish() {
+    fn a_new_item_waits_for_the_held_call_instead_of_discarding_it() {
         let mut rewriter = ResponsesResumeRewriter::new("resp_1".into(), 0, 0);
         let added = r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call"}}"#;
         assert_eq!(rewriter.rewrite_block(added).unwrap(), None);
         let text = r#"data: {"type":"response.output_item.added","output_index":1,"item":{"id":"m1","type":"message"}}"#;
-        let out = rewriter.rewrite_block(text).unwrap().expect("block");
-        assert!(!out.contains("fc_1"), "永远收不了尾的暂存要丢掉");
-        assert!(out.contains("m1"));
+        assert_eq!(rewriter.rewrite_block(text).unwrap(), None);
+        let done = r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","arguments":"{}"}}"#;
+        let out = rewriter
+            .rewrite_block(done)
+            .unwrap()
+            .expect("complete items");
+        assert!(out.contains("fc_1") && out.contains("m1"));
+        let events: Vec<Value> = out
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect();
+        assert_eq!(events[0]["output_index"], 0);
+        assert_eq!(events[1]["output_index"], 1);
+        assert_eq!(
+            events[2]["output_index"], 0,
+            "交错的 done 必须仍属于原 item"
+        );
     }
 
     #[test]
@@ -392,6 +602,7 @@ mod tests {
             open_item: None,
             partial_text: "半截回答".into(),
             text_truncated: false,
+            open_item_text: String::new(),
         };
         let plan = plan_continuation(body, &state).expect("plan");
         assert_eq!(plan.response_id, "resp_1");
@@ -399,7 +610,10 @@ mod tests {
         assert_eq!(plan.next_output_index, 1);
         let value: serde_json::Value = serde_json::from_slice(&plan.body).unwrap();
         let input = value["input"].as_array().unwrap();
-        assert_eq!(input.last().unwrap()["content"][0]["text"], CONTINUE_INSTRUCTION);
+        assert_eq!(
+            input.last().unwrap()["content"][0]["text"],
+            CONTINUE_INSTRUCTION
+        );
     }
 
     #[test]
@@ -432,6 +646,30 @@ mod tests {
             ..encrypted.clone()
         };
         assert!(plan_continuation(body, &plain).is_some());
+    }
+
+    #[test]
+    fn plan_continuation_puts_the_new_item_after_the_dangling_one() {
+        let body = br#"{"model":"m","input":[]}"#;
+        let state = StreamContinuationState {
+            response_id: Some("resp_1".into()),
+            last_sequence_number: 4,
+            completed_items: vec!["m0".into()],
+            open_item: Some(OpenItem {
+                id: "m1".into(),
+                kind: OpenItemKind::Message,
+                output_index: 1,
+                encrypted: false,
+            }),
+            partial_text: "半截".into(),
+            open_item_text: "半截".into(),
+            text_truncated: false,
+        };
+        let plan = plan_continuation(body, &state).expect("plan");
+        assert_eq!(
+            plan.next_output_index, 2,
+            "断流 item 占着 index 1，新 item 必须排到 2"
+        );
     }
 
     #[test]

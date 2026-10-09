@@ -3133,6 +3133,8 @@ impl StreamCompletion {
     fn can_synthesize_completion(&self) -> bool {
         let state = self.observer.continuation();
         state.response_id.is_some()
+            && !self.observer.has_semantic_failure()
+            && !self.observer.has_open_messages()
             && state.open_item.is_none()
             && !state.completed_items.is_empty()
             && self.observer.ended_without_terminal_event()
@@ -3308,6 +3310,7 @@ struct StreamResponseTransform {
     whole_body: Option<WholeBodyTransform>,
     saw_block: bool,
     finished: bool,
+    item_holdback: crate::services::route_stream_continuation::ResponsesItemHoldback,
 }
 
 /// The request facts the whole-body fallback needs.
@@ -3339,6 +3342,11 @@ impl StreamResponseTransform {
             }),
             saw_block: false,
             finished: false,
+            item_holdback: if kind == ProtocolBridgeKind::ResponsesToChat {
+                crate::services::route_stream_continuation::ResponsesItemHoldback::for_chat_bridge()
+            } else {
+                Default::default()
+            },
         }
     }
 
@@ -3354,7 +3362,36 @@ impl StreamResponseTransform {
             },
             None => format!("{record}\n\n"),
         };
-        Ok(self.restore_custom_tools(&converted))
+        self.hold_restored_records(&converted)
+    }
+
+    /// 工具名恢复之后再暂存，首次流和续写都不会泄漏半截调用。
+    fn hold_restored_records(&mut self, text: &str) -> Result<String, String> {
+        let text = self.restore_custom_tools(text);
+        let mut output = String::new();
+        for block in text.split("\n\n").filter(|block| !block.trim().is_empty()) {
+            for block in self.item_holdback.push_block(block)? {
+                output.push_str(&block);
+            }
+        }
+        Ok(output)
+    }
+
+    fn can_continue(&self) -> bool {
+        !self.failed() && self.item_holdback.can_continue()
+            // Chat 桥没有回滚工具状态的接口，不能把新参数接在上一轮的半截参数后。
+            && !(self.is_chat_bridge() && (self.item_holdback.has_pending() || self.item_holdback.discarded()))
+    }
+
+    fn release_interrupted(&mut self) -> String {
+        self.item_holdback.discard_incomplete().concat()
+    }
+
+    fn flush_pending_record(&mut self) -> Result<String, String> {
+        match self.framer.finish_block() {
+            Some(tail) => self.rewrite(&tail),
+            None => Ok(String::new()),
+        }
     }
 
     /// Applies the same custom-tool rewrite the buffered path runs on the whole
@@ -3456,7 +3493,7 @@ impl StreamResponseTransform {
         }
         if let Some(bridge) = self.bridge.as_mut() {
             let closing = bridge.finish()?;
-            output.push_str(&self.restore_custom_tools(&closing));
+            output.push_str(&self.hold_restored_records(&closing)?);
         }
         Ok(output)
     }
@@ -3477,6 +3514,31 @@ enum StreamStage {
 struct ResumeStage {
     rewriter: crate::services::route_stream_continuation::ResponsesResumeRewriter,
     framer: crate::services::route_proxy_stream::SseFramer,
+    bridge: IncrementalResponseBridge,
+    custom_tool_names: HashSet<String>,
+}
+
+impl ResumeStage {
+    fn rewrite_block(&mut self, block: &str) -> Result<Option<String>, String> {
+        let Some(converted) = self.bridge.push_block(block.trim_end_matches("\n\n"))? else {
+            return Ok(None);
+        };
+        let restored = restore_custom_tools_in_responses_payload(
+            converted.as_bytes(),
+            &self.custom_tool_names,
+        );
+        let restored = String::from_utf8_lossy(&restored);
+        let mut output = String::new();
+        for block in restored
+            .split("\n\n")
+            .filter(|block| !block.trim().is_empty())
+        {
+            if let Some(block) = self.rewriter.rewrite_block(block)? {
+                output.push_str(&block);
+            }
+        }
+        Ok((!output.is_empty()).then_some(output))
+    }
 }
 
 /// 驱动内层上游流的泵。
@@ -3496,6 +3558,10 @@ struct StreamPump {
     continuing: bool,
     /// 收尾已经做过：接下来只把流结束掉，不再续写、不再补事件。
     done: bool,
+    /// 换流前要补发给客户端的字节（断流 item 的合成 `done`）。
+    pending_output: Option<axum::body::Bytes>,
+    upstream_ended: bool,
+    upstream_error: Option<String>,
 }
 
 impl StreamPump {
@@ -3517,12 +3583,74 @@ impl StreamPump {
         }
     }
 
+    fn can_synthesize_primary(&self) -> bool {
+        !self.continuing
+            && self
+                .guard
+                .completion
+                .as_ref()
+                .is_some_and(StreamCompletion::can_synthesize_completion)
+            && match &self.stage {
+                StreamStage::Primary(Some(transform)) => {
+                    !transform.item_holdback.has_pending() && !transform.item_holdback.discarded()
+                }
+                StreamStage::Primary(None) => true,
+                _ => false,
+            }
+    }
+
+    fn finish_current_records(&mut self) -> Result<String, String> {
+        if let Some(completion) = self.guard.completion.as_mut() {
+            completion.observer.flush_pending_frame(self.continuing);
+        }
+        let clean = self.ended_with_terminal();
+        let mut output = String::new();
+        match &mut self.stage {
+            StreamStage::Primary(Some(transform)) => {
+                if !transform.is_chat_bridge() && !transform.finished() {
+                    output.push_str(&transform.finish()?);
+                } else if transform.is_chat_bridge() && !clean {
+                    output.push_str(&transform.flush_pending_record()?);
+                }
+                if !clean {
+                    output.push_str(&transform.release_interrupted());
+                }
+            }
+            StreamStage::Resume(resume) => {
+                if let Some(tail) = resume.framer.finish_block() {
+                    if let Some(block) = resume.rewrite_block(&tail)? {
+                        output.push_str(&block);
+                    }
+                }
+                if !clean {
+                    output.push_str(&resume.rewriter.release_interrupted()?);
+                }
+            }
+            _ => {}
+        }
+        Ok(output)
+    }
+
     /// 断流时尝试把内层流换成一次续写请求的响应流。
     ///
     /// 返回 `true` 表示新流已经接上（`stage` / `rounds` 一并更新），调用方应回到
     /// 循环顶部继续 poll；`false` 表示这轮不续写，按既有断流路径收尾。
     async fn try_continue(&mut self) -> bool {
-        if self.ended_with_terminal() {
+        if self.ended_with_terminal()
+            || self
+                .guard
+                .completion
+                .as_ref()
+                .is_some_and(|completion| completion.observer.has_semantic_failure())
+        {
+            return false;
+        }
+        match &self.stage {
+            StreamStage::Primary(Some(transform)) if !transform.can_continue() => return false,
+            StreamStage::Resume(resume) if !resume.rewriter.can_continue() => return false,
+            _ => {}
+        }
+        if self.can_synthesize_primary() {
             return false;
         }
         // 先把施工图与重建请求所需的事实从 completion 里取出，借用随即结束。
@@ -3537,7 +3665,10 @@ impl StreamPump {
                 &completion.client_request,
                 completion.observer.continuation(),
             )
-            .map(|plan| {
+            .map(|mut plan| {
+                plan.next_output_index = plan
+                    .next_output_index
+                    .max(completion.observer.next_output_index());
                 (
                     plan,
                     completion.state.clone(),
@@ -3552,8 +3683,7 @@ impl StreamPump {
             return false;
         };
 
-        let Some(credential) =
-            pick_continuation_credential(&state, &platform, &current_id).await
+        let Some(credential) = pick_continuation_credential(&state, &platform, &current_id).await
         else {
             return false;
         };
@@ -3574,12 +3704,31 @@ impl StreamPump {
                 return false;
             }
         };
+        let expected_bridge = match &self.stage {
+            StreamStage::Primary(Some(transform)) if transform.is_chat_bridge() => {
+                Some(ProtocolBridgeKind::ResponsesToChat)
+            }
+            _ => Some(ProtocolBridgeKind::ResponsesToResponses),
+        };
+        if built.bridge_kind != expected_bridge || credential.kind != "api" {
+            return false;
+        }
         let client = match build_outbound_http_client_with_timeouts(state.upstream_timeouts) {
             Ok(client) => client,
             Err(error) => {
                 eprintln!("[route-continuation] 构造 HTTP 客户端失败: {error}");
                 return false;
             }
+        };
+        let resume_bridge = IncrementalResponseBridge::new(
+            ProtocolBridgeKind::ResponsesToResponses,
+            &built.tool_namespaces,
+        )
+        .expect("native Responses bridge");
+        let resume_custom_tools = match &self.stage {
+            StreamStage::Primary(Some(transform)) => transform.custom_tool_names.clone(),
+            StreamStage::Resume(resume) => resume.custom_tool_names.clone(),
+            _ => HashSet::new(),
         };
         // 与原请求同一条编码路径，别让压缩设置上的差异暴露出来。
         let mut request_headers = built.headers;
@@ -3608,12 +3757,48 @@ impl StreamPump {
             return false;
         }
         eprintln!(
-            "[route-continuation] round={} credential={} model={:?}",
+            "[route-continuation] round={} credential={} response_id={:?}",
             self.rounds + 1,
             credential.display_name,
             plan.response_id,
         );
 
+        // 断流时还开着的那个文本 item 必须先收尾：客户端靠 `output_item.done`
+        // 记录会话历史，不补这条它会把断流前那一段整段丢掉（实机复验确认）。
+        // Chat 桥不走这里——它的 item 跨轮保留，由 bridge 最后统一收尾。
+        let keep_same_item = matches!(
+            &self.stage,
+            StreamStage::Primary(Some(transform)) if transform.is_chat_bridge()
+        );
+        let original_ids = self
+            .guard
+            .completion
+            .as_ref()
+            .map(|completion| completion.observer.seen_item_ids())
+            .unwrap_or_default();
+        let mut resume_sequence = plan.next_sequence_number;
+        let mut open_item_done = None;
+        if !keep_same_item {
+            match &mut self.stage {
+                StreamStage::Resume(resume) => {
+                    open_item_done = resume.rewriter.take_dangling_message_done()
+                }
+                StreamStage::Primary(_) => {
+                    if let Some(completion) = self.guard.completion.as_mut() {
+                        open_item_done = completion
+                            .observer
+                            .take_dangling_messages_done(&mut resume_sequence);
+                    }
+                }
+            }
+        }
+        // 原上游那条 open item 已经（或就此）收尾，别再让下一轮把它当还开着。
+        if let Some(completion) = self.guard.completion.as_mut() {
+            completion.observer.begin_continuation();
+        }
+        if let Some(block) = open_item_done {
+            self.pending_output = Some(axum::body::Bytes::from(block.into_bytes()));
+        }
         // 换流：Chat 桥沿用同一个 transform（bridge 状态跨请求保留），
         // Responses 走事件重写器。
         let previous = std::mem::replace(&mut self.stage, StreamStage::Primary(None));
@@ -3627,20 +3812,30 @@ impl StreamPump {
             // `output_item.done` 的半截工具调用要丢掉，让模型重发一条完整的。
             StreamStage::Resume(mut resume) => {
                 let _ = resume.framer.finish_block();
-                resume.rewriter.discard_held();
+                resume.rewriter.begin_next_stream();
+                resume.bridge = resume_bridge;
+                resume.custom_tool_names = resume_custom_tools;
                 StreamStage::Resume(resume)
             }
-            _ => StreamStage::Resume(ResumeStage {
-                rewriter:
+            _ => {
+                let mut rewriter =
                     crate::services::route_stream_continuation::ResponsesResumeRewriter::new(
                         plan.response_id,
-                        plan.next_sequence_number,
+                        resume_sequence,
                         plan.next_output_index,
-                    ),
-                framer: crate::services::route_proxy_stream::SseFramer::new(),
-            }),
+                    );
+                rewriter.reserve_item_ids(original_ids);
+                StreamStage::Resume(ResumeStage {
+                    rewriter,
+                    framer: crate::services::route_proxy_stream::SseFramer::new(),
+                    bridge: resume_bridge,
+                    custom_tool_names: resume_custom_tools,
+                })
+            }
         };
         self.stream = Box::pin(response.bytes_stream());
+        self.upstream_ended = false;
+        self.upstream_error = None;
         self.rounds += 1;
         self.continuing = true;
         true
@@ -3670,10 +3865,26 @@ fn observed_upstream_stream(
         rounds: 0,
         continuing: false,
         done: false,
+        pending_output: None,
+        upstream_ended: false,
+        upstream_error: None,
     };
     futures_util::stream::unfold(pump, |mut pump| async move {
         loop {
-            match futures_util::StreamExt::next(&mut pump.stream).await {
+            // 换流前攒下的字节（断流 item 的合成 done）先发出去，保证它排在
+            // 续写流的第一条事件之前。
+            if let Some(pending) = pump.pending_output.take() {
+                return Some((Ok(pending), pump));
+            }
+            if pump.done {
+                return None;
+            }
+            let next = if pump.upstream_ended {
+                None
+            } else {
+                futures_util::StreamExt::next(&mut pump.stream).await
+            };
+            match next {
                 Some(Ok(chunk)) => {
                     let continuing = pump.continuing;
                     let chat_bridge = matches!(
@@ -3705,7 +3916,7 @@ fn observed_upstream_stream(
                         StreamStage::Resume(resume) => {
                             let mut output = String::new();
                             for block in resume.framer.push_blocks(&chunk) {
-                                match resume.rewriter.rewrite_block(&block) {
+                                match resume.rewrite_block(&block) {
                                     Ok(Some(block)) => output.push_str(&block),
                                     Ok(None) => {}
                                     Err(error) => {
@@ -3719,7 +3930,9 @@ fn observed_upstream_stream(
                         }
                     };
                     if let Some(error) = failure {
-                        if let Some(completion) = pump.guard.completion.take() {
+                        pump.done = true;
+                        if let Some(mut completion) = pump.guard.completion.take() {
+                            completion.observer.mark_stream_failed();
                             completion.finish().await;
                         }
                         return Some((Err(std::io::Error::other(error)), pump));
@@ -3740,24 +3953,26 @@ fn observed_upstream_stream(
                         None => continue,
                     }
                 }
-                Some(Err(error)) => {
-                    // 上游中途死了：先试续写，续不上才把错误抛给客户端。
-                    if pump.try_continue().await {
-                        continue;
-                    }
-                    if let Some(completion) = pump.guard.completion.take() {
-                        completion.finish().await;
-                    }
-                    return Some((
-                        Err(std::io::Error::other(format!(
-                            "upstream stream failed: {error}"
-                        ))),
-                        pump,
-                    ));
-                }
-                None => {
-                    if pump.done {
-                        return None;
+                ended => {
+                    if !pump.upstream_ended {
+                        pump.upstream_error = ended
+                            .and_then(Result::err)
+                            .map(|error| format!("upstream stream failed: {error}"));
+                        pump.upstream_ended = true;
+                        match pump.finish_current_records() {
+                            Ok(output) if !output.is_empty() => {
+                                return Some((Ok(axum::body::Bytes::from(output)), pump))
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                pump.done = true;
+                                if let Some(mut completion) = pump.guard.completion.take() {
+                                    completion.observer.mark_stream_failed();
+                                    completion.finish().await;
+                                }
+                                return Some((Err(std::io::Error::other(error)), pump));
+                            }
+                        }
                     }
                     // 内层流断了或写完了：还差内容就先续写。
                     if pump.try_continue().await {
@@ -3766,12 +3981,7 @@ fn observed_upstream_stream(
                     pump.done = true;
                     // 先在动 `stage` 之前把要读 completion 的判定做完，
                     // 免得同时借 `pump.stage` 与 `pump.guard`。
-                    let can_synthesize = matches!(&pump.stage, StreamStage::Primary(_))
-                        && pump
-                            .guard
-                            .completion
-                            .as_ref()
-                            .is_some_and(StreamCompletion::can_synthesize_completion);
+                    let can_synthesize = pump.can_synthesize_primary();
                     let ended_cleanly = pump.ended_with_terminal();
                     let usage = pump
                         .guard
@@ -3787,7 +3997,8 @@ fn observed_upstream_stream(
                             // Flush the tail before settling the completion, so
                             // the closing frames still reach the client.
                             if let Some(transform) = transform.as_mut() {
-                                if !transform.finished() {
+                                if !transform.finished() && (ended_cleanly || !transform.saw_block)
+                                {
                                     match transform.finish() {
                                         Ok(tail) => output.push_str(&tail),
                                         Err(error) => failure = Some(error),
@@ -3800,7 +4011,7 @@ fn observed_upstream_stream(
                                 // 续写流写完了一轮：它自己的收尾事件已被重写器丢掉，
                                 // 这里补一条属于原 response 的收尾。
                                 if let Some(tail) = resume.framer.finish_block() {
-                                    match resume.rewriter.rewrite_block(&tail) {
+                                    match resume.rewrite_block(&tail) {
                                         Ok(Some(block)) => output.push_str(&block),
                                         Ok(None) => {}
                                         Err(error) => failure = Some(error),
@@ -3817,7 +4028,9 @@ fn observed_upstream_stream(
                         }
                     }
                     if let Some(error) = failure {
-                        if let Some(completion) = pump.guard.completion.take() {
+                        pump.done = true;
+                        if let Some(mut completion) = pump.guard.completion.take() {
+                            completion.observer.mark_stream_failed();
                             completion.finish().await;
                         }
                         return Some((Err(std::io::Error::other(error)), pump));
@@ -3836,6 +4049,11 @@ fn observed_upstream_stream(
                     }
                     if let Some(completion) = pump.guard.completion.take() {
                         completion.finish().await;
+                    }
+                    if let Some(error) = pump.upstream_error.take() {
+                        if output.is_empty() {
+                            return Some((Err(std::io::Error::other(error)), pump));
+                        }
                     }
                     if output.is_empty() {
                         return None;
@@ -3859,9 +4077,15 @@ async fn pick_continuation_credential(
     let mode = RoutePoolRepository::model_mode(&state.pool, platform)
         .await
         .ok()?;
-    let candidates = select_pool_credentials(&state.pool, platform).await.ok()?;
+    // 沿用池的冷却分区，同时保留本次请求的账号范围，不能因续写绕开授权范围。
+    let candidates = load_request_candidates(state, platform).await.ok()?;
+    let candidates = partition_by_cooldown(candidates, &HashMap::new(), Utc::now())
+        .into_iter()
+        .filter(|credential| credential.kind == "api");
     match mode {
-        PoolModelMode::Precise => candidates.into_iter().find(|candidate| candidate.id == current_id),
+        PoolModelMode::Precise => candidates
+            .into_iter()
+            .find(|candidate| candidate.id == current_id),
         PoolModelMode::Aggregate => candidates
             .into_iter()
             .find(|candidate| candidate.id != current_id),
@@ -7722,6 +7946,10 @@ mod live_responses_test;
 mod tests {
     use super::*;
 
+    mod continuation_safety {
+        include!("route_proxy_service/continuation_safety_tests.rs");
+    }
+
     // The pre-mode signatures: these assertions are about the aggregated list.
     fn build_models_list_payload(platform: &str, credentials: &[SelectedCredential]) -> Value {
         super::build_models_list_payload(platform, credentials, PoolModelMode::Aggregate)
@@ -10607,13 +10835,13 @@ mod tests {
         // restore both have something to do instead of passing vacuously.
         let responses_sse = concat!(
             "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\"}}\n\n",
-            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"name\":\"mcp__browser__open\",\"call_id\":\"call_1\",\"arguments\":\"\"}}\n\n",
-            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"name\":\"apply_patch\",\"call_id\":\"call_2\",\"arguments\":\"\"}}\n\n",
-            "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{}\"}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc1\",\"type\":\"function_call\",\"name\":\"mcp__browser__open\",\"call_id\":\"call_1\",\"arguments\":\"\"}}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"fc2\",\"type\":\"function_call\",\"name\":\"apply_patch\",\"call_id\":\"call_2\",\"arguments\":\"\"}}\n\n",
+            "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc2\",\"output_index\":1,\"delta\":\"{}\"}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc1\",\"type\":\"function_call\",\"name\":\"mcp__browser__open\",\"call_id\":\"call_1\",\"arguments\":\"{}\"}}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"fc2\",\"type\":\"function_call\",\"name\":\"apply_patch\",\"call_id\":\"call_2\",\"arguments\":\"{}\"}}\n\n",
             "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}\n\n",
-            "data: [DONE]\n\n"
         );
-
         let cases = [
             (
                 ProtocolBridgeKind::ResponsesToChat,
@@ -17854,6 +18082,14 @@ data: [DONE]\n\n";
         RouteProxyService::stop(&runtime).await.expect("stop proxy");
     }
 
+    /// 把一条 Responses SSE 响应体拆成事件，供续写接缝断言用。
+    fn responses_events(body: &str) -> Vec<Value> {
+        body.lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+            .collect()
+    }
+
     /// 文本流断在半句中间：网关换一个账号再发一次「继续」，把两段文字接回
     /// 同一条 response，客户端只看到一个 `response.created` 与一条收尾事件。
     #[tokio::test]
@@ -17862,12 +18098,12 @@ data: [DONE]\n\n";
         use crate::database::{create_memory_pool, run_migrations};
 
         const FIRST: &str = "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r1\"}}\n\n\
-            data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"m1\",\"type\":\"message\"}}\n\n\
-            data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"m1\",\"delta\":\"前半句，\"}\n\n";
+            data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}\n\n\
+            data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"前半句，\"}\n\n";
         const SECOND: &str = "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r2\"}}\n\n\
-            data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"m2\",\"type\":\"message\"}}\n\n\
-            data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"m2\",\"delta\":\"后半句。\"}\n\n\
-            data: {\"type\":\"response.output_item.done\",\"sequence_number\":3,\"output_index\":0,\"item\":{\"id\":\"m2\",\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"后半句。\"}]}}\n\n\
+            data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"m2\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}\n\n\
+            data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"m2\",\"content_index\":0,\"delta\":\"后半句。\"}\n\n\
+            data: {\"type\":\"response.output_item.done\",\"sequence_number\":3,\"output_index\":0,\"item\":{\"id\":\"m2\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"后半句。\"}]}}\n\n\
             data: {\"type\":\"response.completed\",\"sequence_number\":4,\"response\":{\"id\":\"r2\",\"status\":\"completed\"}}\n\n";
 
         let (upstream, calls) =
@@ -17920,19 +18156,51 @@ data: [DONE]\n\n";
 
         assert!(body.contains("前半句，"), "断流前的正文丢了: {body}");
         assert!(body.contains("后半句。"), "续写的正文没接上: {body}");
-        assert_eq!(
-            body.matches("\"type\":\"response.created\"").count(),
-            1,
-            "续写流自己的 response.created 必须被吞掉: {body}"
-        );
         assert!(body.contains("\"id\":\"r1\""), "必须沿用原 response id: {body}");
         assert!(
             !body.contains("\"id\":\"r2\""),
             "续写流的 response id 不能泄漏给客户端: {body}"
         );
+
+        let events = responses_events(&body);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["type"] == "response.created")
+                .count(),
+            1,
+            "续写流自己的 response.created 必须被吞掉: {body}"
+        );
         assert!(
-            body.contains("\"type\":\"response.completed\""),
+            events
+                .iter()
+                .any(|event| event["type"] == "response.completed"),
             "必须补一条收尾事件: {body}"
+        );
+
+        // 断流时还开着的 m1 必须被网关补一条 done，客户端才会把它记成一条消息。
+        let m1_done = events
+            .iter()
+            .find(|event| {
+                event["type"] == "response.output_item.done" && event["item"]["id"] == "m1"
+            })
+            .unwrap_or_else(|| panic!("断流的 m1 没被补 done，客户端会丢掉前半句: {body}"));
+        assert_eq!(
+            m1_done["item"]["content"][0]["text"], "前半句，",
+            "补的 done 要带上断流前的正文: {body}"
+        );
+        assert_eq!(m1_done["output_index"], 0);
+
+        // 续写的新 item 必须排在 m1 后面，不能和它撞同一个 output_index。
+        let m2_added = events
+            .iter()
+            .find(|event| {
+                event["type"] == "response.output_item.added" && event["item"]["id"] == "m2"
+            })
+            .expect("m2 的 added");
+        assert_eq!(
+            m2_added["output_index"], 1,
+            "续写 item 要和断流 item 错开: {body}"
         );
         assert_eq!(
             calls.load(Ordering::SeqCst),

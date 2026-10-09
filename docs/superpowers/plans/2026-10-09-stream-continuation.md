@@ -763,7 +763,7 @@ Task 7 的文本续写主路径与 Chat 桥路径都已落地并提交，几处�
 
 ---
 
-### Task 8 实现笔记（2026-10-09，已完成）
+### Task 8 初始实现记录（2026-10-09，遗漏已由下文补充修复纠正）
 
 - `pub fn is_holdback_item(kind: OpenItemKind) -> bool`（`FunctionCall` / `Reasoning`）已落地。
 - 延迟提交做在 **`ResponsesResumeRewriter`** 里：`output_item.added` 命中的是这两类 item 时
@@ -775,13 +775,12 @@ Task 7 的文本续写主路径与 Chat 桥路径都已落地并提交，几处�
 - **不可恢复边界**：`StreamContinuationState.open_item` 增加 `encrypted: bool`
   （`output_item.added` 的 `item.encrypted_content` 非空时置真），`plan_continuation`
   在「断在加密 reasoning 中间」时返回 `None`，放弃续写走今天的报错路径（spec 第 8.3 节）。
-- 说明：延迟提交目前只覆盖**续写流**（重写器所在的那条）。原上游的 Responses 透传仍是
-  逐块转发——它的半截工具调用会先到客户端，随后续写轮重发的完整调用是第二个 item。
-  要让原上游也延迟提交，得给透传路径加一层按 item 的暂存，属于后续可选项。
+- 初始版本只覆盖续写流，把首次流暂存误列为“可选项”。用户确认它必须修复，
+  现由下文 P0/P1 修复任务统一覆盖；不能据初始版本的测试通过判定为安全。
 
 ---
 
-### Task 9: 记账、日志与文档收尾
+### Task 8: 工具调用延迟提交与不可恢复边界
 
 **Files:**
 - Modify: `src-tauri/src/services/route_stream_continuation.rs`
@@ -925,3 +924,39 @@ git commit -m "feat(route): 续写记账、日志与文档收尾"
 2. Task 6 可**单独上线**（内容完整只缺收尾 → 不再报错），收益立竿见影、风险最低。
 3. Task 2–5 是 7/8 的地基，可合并成一次提交上线（无行为变化）。
 4. Task 7 是主路径；Task 8 补安全边界；Task 9 收尾。
+
+
+## 2026-10-09 补充修复：P0 文本接缝与 P1 首次工具调用暂存
+
+用户已确认同时修复 P0/P1；直接在 main 上修改，不创建新分支、不推送。
+此前「Task 1–9 全部完成」的结论过早：假上游替实现补了文本 item.done，
+而工具调用暂存只覆盖续写流，首次流并未达到 spec §8 的承诺。
+
+- [x] 复核中断前的 P0 工作区改动，保留文本 item 独立正文与合成 done。
+- [x] 添加首次工具断流（有/无续写预算）、多轮文本、只缺终止帧的真实代理回归测试。
+      修复前实测：4 个新增用例中 3 个按预期失败，1 个多轮文本用例通过。
+- [x] 首次流与续写流共用按 item 的有界暂存器；交错 item 不等于断流。
+- [x] 断流丢弃未完成工具，正常调用只提交一次；不得把半截参数拼到下一次请求。
+- [x] 复核每轮文本 done 的顺序、索引、重复 item id、中文 UTF-8 分块和失败边界。
+- [x] 跑 Rust 相关及全量回归、前端类型检查与测试，更新 spec，提交到本地 main。
+
+实施约束：
+1. 暂存区上限 1 MiB 和 16,384 帧；超限失败关闭，不释放半截调用。
+2. 首次和续写的工具事件都在工具名恢复之后暂存。
+3. 只有真实 EOF/传输中断才丢弃未完成 item；已经完成的交错 item 不得一起丢掉。
+4. 已提交工具的断流不自动重发，避免缺少工具结果时重复执行副作用。
+5. 明确失败帧、加密 reasoning 截断都不能被合成成功掩盖。
+6. 只缺 response.completed 时优先补齐，不额外请求模型。
+7. Chat 桥可续纯文本；半截工具不拼参数、不合成完成调用，保守停止该流。
+
+
+最终验证（2026-10-09）：
+- `CARGO_TARGET_DIR=target-codex cargo test --lib`（src-tauri 目录）：1933 通过、13 忽略、0 失败。
+- `pnpm typecheck`：通过。
+- `pnpm test:run`：79 个文件、941 个测试通过。
+- `git diff --check`：通过。没有创建第三个 Rust 构建目录，也没有调用真实模型渠道。
+
+新增的代理级安全回归集中在
+`src-tauri/src/services/route_proxy_service/continuation_safety_tests.rs`；
+首次流与续写共用的有界暂存器位于
+`src-tauri/src/services/route_stream_continuation/holdback.rs`。

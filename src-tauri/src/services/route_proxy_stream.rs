@@ -15,6 +15,7 @@
 
 use crate::models::route_pool::RouteUsageBreakdown;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// Terminal markers that mean "this stream ended on purpose".
 ///
@@ -41,7 +42,7 @@ const MAX_MARKER_OVERLAP: usize = 24;
 /// across chunks is never handed out as two malformed halves.
 #[derive(Debug, Default)]
 pub struct SseFramer {
-    buffer: String,
+    buffer: Vec<u8>,
 }
 
 impl SseFramer {
@@ -68,17 +69,22 @@ impl SseFramer {
     /// — needs this: `push` drops the `event:` lines and the `[DONE]` sentinel,
     /// and forwarding those is part of the contract with the client.
     pub fn push_blocks(&mut self, chunk: &[u8]) -> Vec<String> {
-        // Lossy is right here: a chunk can split a multi-byte UTF-8 sequence,
-        // and the replacement char only ever lands inside a payload we then
-        // fail to parse as JSON — never in the ASCII framing itself.
-        self.buffer.push_str(&String::from_utf8_lossy(chunk));
-        if self.buffer.contains('\r') {
-            self.buffer = self.buffer.replace("\r\n", "\n");
+        // 先积累原始字节，整帧之后才解码。网络包可以劈开一个中文/emoji 字符，
+        // 逐包 from_utf8_lossy 会把仍未收全的字符永久替换成乱码。
+        self.buffer.extend_from_slice(chunk);
+        if self.buffer.contains(&b'\r') {
+            let mut normalized = Vec::with_capacity(self.buffer.len());
+            for (index, byte) in self.buffer.iter().copied().enumerate() {
+                if byte != b'\r' || self.buffer.get(index + 1) != Some(&b'\n') {
+                    normalized.push(byte);
+                }
+            }
+            self.buffer = normalized;
         }
-
         let mut blocks = Vec::new();
-        while let Some(index) = self.buffer.find("\n\n") {
-            blocks.push(self.buffer.drain(..index + 2).collect());
+        while let Some(index) = self.buffer.windows(2).position(|pair| pair == b"\n\n") {
+            let bytes: Vec<_> = self.buffer.drain(..index + 2).collect();
+            blocks.push(String::from_utf8_lossy(&bytes).into_owned());
         }
         blocks
     }
@@ -90,14 +96,15 @@ impl SseFramer {
     /// that often ride on exactly that frame.
     pub fn finish(&mut self) -> Option<String> {
         let block = std::mem::take(&mut self.buffer);
-        frame_payload(&block)
+        frame_payload(&String::from_utf8_lossy(&block))
     }
 
     /// Flush the trailing bytes as a final raw block, keeping its framing.
     ///
     /// The [`Self::push_blocks`] counterpart of [`Self::finish`].
     pub fn finish_block(&mut self) -> Option<String> {
-        let block = std::mem::take(&mut self.buffer);
+        let bytes = std::mem::take(&mut self.buffer);
+        let block = String::from_utf8_lossy(&bytes).into_owned();
         (!block.trim().is_empty()).then_some(block)
     }
 }
@@ -278,6 +285,13 @@ pub struct StreamContinuationState {
     pub partial_text: String,
     /// 正文超过 [`PARTIAL_TEXT_LIMIT`]：续写不再可行，只能按断流处理。
     pub text_truncated: bool,
+    /// **当前这个 open message item 自己**的正文。
+    ///
+    /// 和 `partial_text` 的区别：后者是整个 response 已生成的正文（跨多个 item
+    /// 累加），用于构造续写请求；这个是断流时那条 item 的内容，用来给它补一条
+    /// 合成的 `output_item.done`——客户端是从 `output_item.*` 记录会话历史的，
+    /// 不补这条，断流前那一段在客户端就整段丢了。
+    pub open_item_text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,6 +351,10 @@ pub struct StreamObserver {
     /// boundary is still found.
     marker_carry: String,
     streaming_request: bool,
+    semantic_failure: bool,
+    pending_messages: BTreeMap<String, (u64, String)>,
+    pending_text_bytes: usize,
+    next_output_index: u64,
     /// 续写用状态；非 Responses 事件不会写它。
     continuation: StreamContinuationState,
     /// 专门给续写流按帧读用量：续写流的帧不能走 `continuation`，
@@ -364,6 +382,10 @@ impl StreamObserver {
             reasoning_deltas: 0,
             marker_carry: String::new(),
             streaming_request,
+            semantic_failure: false,
+            pending_messages: BTreeMap::new(),
+            pending_text_bytes: 0,
+            next_output_index: 0,
             continuation: StreamContinuationState::default(),
             continuation_framer: SseFramer::new(),
             continuation_saw_terminal: false,
@@ -383,33 +405,118 @@ impl StreamObserver {
     ///   「已经写出来的内容」，少接一段模型就会重复上一轮的话。
     pub fn observe_continuation(&mut self, chunk: &[u8]) {
         for payload in self.continuation_framer.push(chunk) {
-            let Ok(value) = serde_json::from_str::<Value>(&payload) else {
-                continue;
-            };
-            self.usage
-                .merge_from(super::route_proxy_service::usage_breakdown_from_value(
-                    &value,
-                ));
-            if continuation_frame_is_terminal(&value) {
-                self.continuation_saw_terminal = true;
+            self.absorb_continuation_frame(&payload);
+        }
+    }
+
+    fn absorb_continuation_frame(&mut self, payload: &str) {
+        let Ok(value) = serde_json::from_str::<Value>(payload) else {
+            return;
+        };
+        self.note_semantic_failure(&value);
+        self.usage
+            .merge_from(super::route_proxy_service::usage_breakdown_from_value(
+                &value,
+            ));
+        self.continuation_saw_terminal |= continuation_frame_is_terminal(&value);
+        match value["type"].as_str() {
+            Some(
+                "response.output_item.added"
+                | "response.output_item.done"
+                | "response.output_text.delta",
+            ) => {
+                // 仅保留当前 item 的断点事实。根 response id 仍属于第一次请求，
+                // 客户端序号与跨轮索引由重写器维护，不从新 response.created 重置。
+                let sequence = self.continuation.last_sequence_number;
+                self.observe_continuation_event(&value);
+                self.continuation.last_sequence_number = sequence;
             }
-            // Responses 是 `response.output_text.delta`；Chat 上游是
-            // `choices[0].delta.content`。两种都要，续写流是哪一种由上游决定。
-            let delta = value
-                .get("delta")
-                .and_then(Value::as_str)
-                .filter(|_| {
-                    value.get("type").and_then(Value::as_str)
-                        == Some("response.output_text.delta")
-                })
-                .or_else(|| {
-                    value
-                        .pointer("/choices/0/delta/content")
-                        .and_then(Value::as_str)
-                });
-            if let Some(delta) = delta {
-                self.append_partial_text(delta);
+            _ => {
+                if let Some(delta) = value
+                    .pointer("/choices/0/delta/content")
+                    .and_then(Value::as_str)
+                {
+                    self.append_partial_text(delta);
+                }
             }
+        }
+    }
+
+    pub fn has_semantic_failure(&self) -> bool {
+        self.semantic_failure
+    }
+    pub fn mark_stream_failed(&mut self) {
+        self.semantic_failure = true;
+    }
+
+    fn note_semantic_failure(&mut self, value: &Value) {
+        self.semantic_failure |= matches!(
+            value["type"].as_str(),
+            Some("response.failed" | "response.incomplete" | "error")
+        ) || value.get("error").is_some_and(|value| !value.is_null())
+            || value.pointer("/response/status").and_then(Value::as_str) == Some("failed");
+    }
+
+    /// 每一条上游流各自分帧，断在 JSON 中间的尾巴不能拼到下一条流里。
+    pub fn begin_continuation(&mut self) {
+        self.continuation_framer = SseFramer::new();
+        self.continuation_saw_terminal = false;
+        self.pending_messages.clear();
+        self.pending_text_bytes = 0;
+        self.clear_open_item();
+    }
+
+    pub fn next_output_index(&self) -> u64 {
+        self.next_output_index
+    }
+    pub fn has_open_messages(&self) -> bool {
+        !self.pending_messages.is_empty()
+    }
+
+    pub fn seen_item_ids(&self) -> Vec<String> {
+        self.continuation
+            .completed_items
+            .iter()
+            .cloned()
+            .chain(
+                self.continuation
+                    .open_item
+                    .iter()
+                    .map(|item| item.id.clone()),
+            )
+            .chain(self.pending_messages.keys().cloned())
+            .collect()
+    }
+
+    /// 工具和文本可以交错出现；为每条仍打开的文本单独补 done，而不是仅关最后一条 item。
+    pub fn take_dangling_messages_done(&mut self, sequence: &mut u64) -> Option<String> {
+        if self.pending_messages.is_empty() || self.continuation.text_truncated {
+            return None;
+        }
+        let mut messages: Vec<_> = std::mem::take(&mut self.pending_messages)
+            .into_iter()
+            .collect();
+        messages.sort_by_key(|(_, (index, _))| *index);
+        let mut output = String::new();
+        for (id, (index, text)) in messages {
+            output.push_str(
+                &super::route_stream_continuation::synthesized_item_done_block(
+                    *sequence, &id, index, &text,
+                ),
+            );
+            *sequence = sequence.saturating_add(1);
+        }
+        self.pending_text_bytes = 0;
+        Some(output)
+    }
+
+    pub fn flush_pending_frame(&mut self, continuing: bool) {
+        if continuing {
+            if let Some(payload) = self.continuation_framer.finish() {
+                self.absorb_continuation_frame(&payload);
+            }
+        } else if let Some(payload) = self.framer.finish() {
+            self.absorb_frame(&payload);
         }
     }
 
@@ -439,7 +546,7 @@ impl StreamObserver {
             // JSON reply has no terminal event to miss.
             disconnected_before_completion: self.streaming_request
                 && self.saw_data_frame
-                && !self.saw_terminal_marker,
+                && (!self.saw_terminal_marker || self.semantic_failure),
             reasoning_deltas: self.reasoning_deltas,
             continuation: self.continuation,
         }
@@ -487,6 +594,7 @@ impl StreamObserver {
             // contents are unusable. Matches the lossy buffered parser.
             return;
         };
+        self.note_semantic_failure(&value);
         if reasoning_text_in_frame(&value).is_some() {
             self.reasoning_deltas += 1;
         }
@@ -506,7 +614,11 @@ impl StreamObserver {
             return;
         };
         if let Some(sequence_number) = value.get("sequence_number").and_then(Value::as_u64) {
-            self.continuation.last_sequence_number = sequence_number;
+            self.continuation.last_sequence_number =
+                self.continuation.last_sequence_number.max(sequence_number);
+        }
+        if let Some(index) = value["output_index"].as_u64() {
+            self.next_output_index = self.next_output_index.max(index.saturating_add(1));
         }
         match event {
             "response.created" => {
@@ -526,6 +638,21 @@ impl StreamObserver {
                     .and_then(Value::as_str)
                     .and_then(open_item_kind);
                 if let (Some(id), Some(kind)) = (id, kind) {
+                    self.continuation.open_item_text.clear();
+                    if kind == OpenItemKind::Message {
+                        if self.pending_messages.len() >= 4096 {
+                            self.continuation.text_truncated = true;
+                        } else {
+                            self.pending_messages
+                                .entry(id.to_string())
+                                .or_insert_with(|| {
+                                    (
+                                        value["output_index"].as_u64().unwrap_or_default(),
+                                        String::new(),
+                                    )
+                                });
+                        }
+                    }
                     let encrypted = item
                         .and_then(|item| item.get("encrypted_content"))
                         .and_then(Value::as_str)
@@ -544,6 +671,35 @@ impl StreamObserver {
             "response.output_text.delta" => {
                 if let Some(delta) = value.get("delta").and_then(Value::as_str) {
                     self.append_partial_text(delta);
+                    let id = value["item_id"].as_str().map(str::to_string).or_else(|| {
+                        (self.pending_messages.len() == 1)
+                            .then(|| self.pending_messages.keys().next().unwrap().clone())
+                    });
+                    if let Some((_, text)) =
+                        id.as_ref().and_then(|id| self.pending_messages.get_mut(id))
+                    {
+                        let mut end = delta
+                            .len()
+                            .min(PARTIAL_TEXT_LIMIT.saturating_sub(self.pending_text_bytes));
+                        while !delta.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        text.push_str(&delta[..end]);
+                        self.pending_text_bytes += end;
+                    }
+                    let belongs_to_open = value
+                        .get("item_id")
+                        .and_then(Value::as_str)
+                        .map(|id| {
+                            self.continuation
+                                .open_item
+                                .as_ref()
+                                .is_some_and(|open| open.id == id)
+                        })
+                        .unwrap_or(true);
+                    if belongs_to_open {
+                        self.append_open_item_text(delta);
+                    }
                 }
             }
             "response.output_item.done" => {
@@ -552,9 +708,22 @@ impl StreamObserver {
                     .and_then(|item| item.get("id"))
                     .and_then(Value::as_str)
                 {
-                    self.continuation.completed_items.push(id.to_string());
+                    if self.continuation.completed_items.len() < 4096 {
+                        self.continuation.completed_items.push(id.to_string());
+                    } else {
+                        self.continuation.text_truncated = true;
+                    }
+                    if let Some((_, text)) = self.pending_messages.remove(id) {
+                        self.pending_text_bytes =
+                            self.pending_text_bytes.saturating_sub(text.len());
+                    }
                 }
-                self.continuation.open_item = None;
+                if self.continuation.open_item.as_ref().is_some_and(|open| {
+                    value.pointer("/item/id").and_then(Value::as_str) == Some(open.id.as_str())
+                }) {
+                    self.continuation.open_item = None;
+                    self.continuation.open_item_text.clear();
+                }
             }
             _ => {}
         }
@@ -572,6 +741,23 @@ impl StreamObserver {
                 self.observe_continuation_event(&value);
             }
         }
+    }
+
+    /// 往「当前 open item 自己」的正文尾部接一段（只截断，不动 `text_truncated`：
+    /// 真超限的话 `partial_text` 已经先标了）。
+    fn append_open_item_text(&mut self, delta: &str) {
+        let remaining = PARTIAL_TEXT_LIMIT.saturating_sub(self.continuation.open_item_text.len());
+        let mut end = remaining.min(delta.len());
+        while end > 0 && !delta.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.continuation.open_item_text.push_str(&delta[..end]);
+    }
+
+    /// 断流时那条 open item 已经由网关补过收尾：别再当成「还开着」。
+    pub fn clear_open_item(&mut self) {
+        self.continuation.open_item = None;
+        self.continuation.open_item_text.clear();
     }
 
     /// 往半截正文尾部接一段增量；超过内存上限就标记不可续并只截到上限。
@@ -622,6 +808,17 @@ impl StreamObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn framer_keeps_utf8_text_and_crlf_across_every_byte_boundary() {
+        let input = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"中文🙂\"}\r\n\r\n";
+        for split in 0..=input.len() {
+            let mut framer = SseFramer::new();
+            let mut frames = framer.push_blocks(&input.as_bytes()[..split]);
+            frames.extend(framer.push_blocks(&input.as_bytes()[split..]));
+            assert_eq!(frames, [input.replace("\r\n", "\n")], "split={split}");
+        }
+    }
 
     #[test]
     fn framer_joins_a_frame_split_across_chunks() {
