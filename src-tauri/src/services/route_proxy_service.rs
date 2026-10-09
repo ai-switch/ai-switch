@@ -18180,4 +18180,99 @@ data: [DONE]\n\n";
 
         RouteProxyService::stop(&runtime).await.expect("stop proxy");
     }
+
+    /// 续写成功不改记账规则：断流照旧给原账号记一次 `semantic_response_transient`，
+    /// 客户端看到的是完整回答（spec 第 11 节）。
+    #[tokio::test]
+    async fn a_continued_request_still_charges_the_failing_account_once() {
+        use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
+        use crate::database::{create_memory_pool, run_migrations};
+
+        const FIRST: &str = "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r1\"}}\n\n\
+            data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"m1\",\"type\":\"message\"}}\n\n\
+            data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"m1\",\"delta\":\"前半句，\"}\n\n";
+        const SECOND: &str = "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r2\"}}\n\n\
+            data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"m2\",\"type\":\"message\"}}\n\n\
+            data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"m2\",\"delta\":\"后半句。\"}\n\n\
+            data: {\"type\":\"response.output_item.done\",\"sequence_number\":3,\"output_index\":0,\"item\":{\"id\":\"m2\",\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"后半句。\"}]}}\n\n\
+            data: {\"type\":\"response.completed\",\"sequence_number\":4,\"response\":{\"id\":\"r2\",\"status\":\"completed\"}}\n\n";
+
+        let (upstream, _calls) =
+            start_scripted_sse_upstream(vec![vec![FIRST], vec![SECOND]]).await;
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let first = create_proxy_api_credential_with_config(
+            &pool,
+            "first",
+            &upstream,
+            json!({"interface_format": "openai-responses"}),
+        )
+        .await;
+        let second = create_proxy_api_credential_with_config(
+            &pool,
+            "second",
+            &upstream,
+            json!({"interface_format": "openai-responses"}),
+        )
+        .await;
+        RoutePoolRepository::replace_members(&pool, "codex", &[first.clone(), second.clone()])
+            .await
+            .expect("pool members");
+        let route_key =
+            RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-test")
+                .await
+                .expect("route key");
+        let runtime = RouteProxyRuntimeState::default();
+        let proxy = RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+            .await
+            .expect("start proxy");
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/v1/responses",
+                proxy.base_url.as_deref().expect("base url")
+            ))
+            .bearer_auth(route_key)
+            .json(&json!({
+                "model": "gpt-6-astra",
+                "stream": true,
+                "input": [{"type":"message","role":"user",
+                           "content":[{"type":"input_text","text":"hi"}]}]
+            }))
+            .send()
+            .await
+            .expect("proxy response");
+        let body = response.text().await.expect("body");
+
+        assert!(
+            body.contains("前半句，") && body.contains("后半句。"),
+            "客户端应当看到完整回答: {body}"
+        );
+        assert!(body.contains("\"type\":\"response.completed\""), "{body}");
+
+        let a = RouteCredentialRepository::get(&pool, &first)
+            .await
+            .expect("credential a");
+        let b = RouteCredentialRepository::get(&pool, &second)
+            .await
+            .expect("credential b");
+        assert_eq!(
+            a.transient_failure_count + b.transient_failure_count,
+            1,
+            "断流只给一个账号记一次失败: {:?} / {:?}",
+            a.last_failure_message,
+            b.last_failure_message
+        );
+        let failed = if a.transient_failure_count == 1 { &a } else { &b };
+        assert!(
+            failed
+                .last_failure_message
+                .as_deref()
+                .is_some_and(|message| message.contains("stream disconnected")),
+            "失败原因应当是断流: {:?}",
+            failed.last_failure_message
+        );
+
+        RouteProxyService::stop(&runtime).await.expect("stop proxy");
+    }
 }

@@ -233,3 +233,35 @@ SSE 是已提交的单向流：字节一旦转发给客户端就无法回滚重�
 - 不做全量暂存（完整性优先模式）；
 - 不做逐字拼接同一个 item；
 - 不依赖任何客户端特有的自动续写行为。
+
+## 15. 实现结果（2026-10-09）
+
+已落地并合并到 `main`（见 `docs/superpowers/plans/2026-10-09-stream-continuation.md` 的分步笔记）：
+
+- **客户端接受度**（第 12 节）：拼接流可被真实 Codex 客户端接受，直接实施。
+- **状态采集**：`StreamObserver` 采集 `response_id` / 最大 `sequence_number` /
+  已完成的 item / 当前 open item / 半截正文（上限 1 MiB）/ 用量。
+- **续写请求**：`build_continuation_body` 以**客户端请求体**为基底追加「半截回答 + 继续指令」，
+  再由 `build_upstream_request_internal` 重新做映射/桥接/净化。
+- **事件重写**：`ResponsesResumeRewriter` 丢掉续写流的 `response.created` 与收尾事件，
+  把序号与 `output_index` 接到原 response 后面，结束时由网关合成一条 `response.completed`。
+- **账号选择**：聚合模式换账号（排除当前），精确模式同账号重试。
+- **预算**：设置项 `route_proxy_stream_continue_max`，**默认 10，0 关闭**；保存设置即刷新运行态。
+- **Chat 桥**：`ResponsesToChat` 的续写沿用同一个 `ChatStreamBridge`，客户端只看到一条
+  `response.created`。
+- **工具调用延迟提交**：续写流里的 `function_call` / `reasoning` item 等
+  `output_item.done` 才整体转发；断在半截就整条丢弃并要求模型重发。
+- **不可恢复边界**：断在加密 reasoning 中间、半截正文超限、精确模式下无可换账号、
+  续写请求自身失败——都放弃续写，回落到第 10 节的报错 + 记账。
+
+**与设计的差异 / 已知取舍**：
+
+1. **不走额外的请求事件**。第 9 节原写「每次续写写一条日志」。实现只在 `eprintln!` 里
+   记录轮次与账号，**不再多插一行 `route_credential_request_events`**：那会给统计接口凭空
+   多算一次请求、动摇第 11 节「失败记账规则不变」的承诺。断流那一次请求照旧由
+   `StreamCompletion::finish` 记一条（`truncated` → `semantic_response_transient`），
+   续写成功**不回滚**这条失败。
+2. **延迟提交只覆盖续写流**。原上游的 Responses 透传仍是逐块转发：它若断在工具调用中间，
+   半截调用已经到过客户端，之后续写轮重发的完整调用会是第二个 item。要连原上游一起延迟
+   提交，需要给透传路径加一层按 item 的暂存（后续可选项，不在本次范围）。
+3. **接缝**：续写从原 response 的下一个 `output_index` 起一段新 item，与第 7 节的取舍一致。
