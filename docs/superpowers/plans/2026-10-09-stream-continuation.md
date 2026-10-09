@@ -736,6 +736,33 @@ git commit -m "feat(route): 文本断流自动续写并拼接回同一响应"
 
 ---
 
+### Task 7c 实现笔记（2026-10-09，已完成）
+
+Task 7 的文本续写主路径与 Chat 桥路径都已落地并提交，几处与计划原文不同、以代码为准：
+
+- **续写请求的基底是客户端请求体**（`StreamCompletion.client_request`），不是发往上游的那份。
+  对 `ResponsesToChat` 来说上游体已经是 Chat 形状、没有 `input`；`build_continuation_body`
+  追加的是 Responses 形状的 input 项，所以必须先拼好再交给
+  `build_upstream_request_internal` 重新做一次桥接/映射/净化。
+- **`observed_upstream_stream` 里是一个 `StreamPump`**，不是裸的 unfold 元组。它持有内层流、
+  `StreamStage`（`Primary`/`Resume`）、已用轮次、以及 `continuing`/`done` 两个标志。
+- **续写流的帧不写原响应的事件状态**：`StreamObserver::observe_continuation` 只并 token 用量、
+  只把 `response.output_text.delta`（或 Chat 的 `choices[0].delta.content`）接到 `partial_text`
+  后面。走 `observe` 会把 `response_id` 覆盖成续写流自己的 id，让第二轮错位；同时
+  `saw_terminal_marker` 被续写流的收尾事件置真后，原账号的断流就不会被记账了。
+- **Chat 桥的续写状态从桥的输出里读**：原始 Chat 帧没有 `response.created`，所以桥每轮吐出的
+  Responses 事件会再喂一遍 `StreamObserver::observe_client_events`。续写轮里桥上正文已由
+  `observe_continuation` 收过，不再重复。
+- **预算用尽时按断流收尾**：续写流再次断掉且没有预算，就丢掉半截记录、不补假的
+  `response.completed`，让客户端按断流处理，并照旧给原账号记一次 `semantic_response_transient`。
+- **顺手修了 Task 4 重写器的一个 `output_index` bug**：`response.output_item.done` 之前会和
+  `added` 一样自增，导致同一个 item 的 added/done 落在两个不同的 index 上；现在只有 `added`
+  占新位，`done` 与 delta 复用同一个。
+- **设置项接进运行态**：`RouteProxyRuntimeState`/`ProxyAppState` 各加 `stream_continue_max`
+  （`Arc<AtomicU32>`），`save_settings_core` 保存时刷新，默认 10、0 关闭。
+
+---
+
 ### Task 8: 工具调用延迟提交与不可恢复边界
 
 **Files:**

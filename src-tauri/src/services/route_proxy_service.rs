@@ -12,7 +12,9 @@ use crate::models::route_credential_model::{
     FailureScope, RouteCredentialModelState, MODEL_STATUS_OK,
 };
 use crate::models::route_pool::RouteUsageBreakdown;
-use crate::models::settings::DEFAULT_ROUTE_PROXY_REQUEST_BODY_LIMIT_MIB;
+use crate::models::settings::{
+    DEFAULT_ROUTE_PROXY_REQUEST_BODY_LIMIT_MIB, DEFAULT_ROUTE_PROXY_STREAM_CONTINUE_MAX,
+};
 use crate::services::anthropic_thinking::strip_replayed_thinking_from_bytes;
 use crate::services::client_identity;
 use crate::services::codex_reasoning_cache::CodexReasoningCache;
@@ -61,6 +63,7 @@ use crate::services::route_proxy_live_log::{
     LIVE_LOG_ELISION_MARKER, LIVE_LOG_RAW_PREVIEW_LIMIT, LIVE_LOG_STAGE_LIMIT,
 };
 use crate::services::route_proxy_stream::{sse_payload_started, StreamObserver};
+use crate::services::route_stream_continuation::plan_continuation;
 use axum::body::Body;
 use axum::extract::State as AxumState;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
@@ -320,6 +323,8 @@ pub struct RouteProxyRuntimeState {
     activity: RouteCredentialActivityRegistry,
     live_log: RouteProxyLiveLog,
     request_body_limit_mib: Arc<AtomicU32>,
+    /// 流式断流自动续写的最大轮次；0 关闭。与 body limit 一样由设置保存时刷新。
+    stream_continue_max: Arc<AtomicU32>,
 }
 
 impl Default for RouteProxyRuntimeState {
@@ -330,6 +335,9 @@ impl Default for RouteProxyRuntimeState {
             live_log: RouteProxyLiveLog::default(),
             request_body_limit_mib: Arc::new(AtomicU32::new(
                 DEFAULT_ROUTE_PROXY_REQUEST_BODY_LIMIT_MIB,
+            )),
+            stream_continue_max: Arc::new(AtomicU32::new(
+                DEFAULT_ROUTE_PROXY_STREAM_CONTINUE_MAX,
             )),
         }
     }
@@ -434,6 +442,8 @@ pub(crate) struct ProxyAppState {
     upstream_timeouts: OutboundTimeouts,
     /// Shared with the runtime so saving settings affects existing listeners.
     request_body_limit_mib: Arc<AtomicU32>,
+    /// 流式断流自动续写预算，同样与运行态共享。
+    stream_continue_max: Arc<AtomicU32>,
 }
 
 #[derive(Clone)]
@@ -479,6 +489,10 @@ struct RouteProxyKeyCache {
 impl RouteProxyRuntimeState {
     pub fn set_request_body_limit_mib(&self, limit_mib: u32) {
         self.request_body_limit_mib.store(limit_mib, Ordering::Relaxed);
+    }
+
+    pub fn set_stream_continue_max(&self, max: u32) {
+        self.stream_continue_max.store(max, Ordering::Relaxed);
     }
 
     pub fn activity(&self) -> RouteCredentialActivityRegistry {
@@ -540,6 +554,7 @@ pub(crate) fn build_proxy_state(
         codex_history: CodexReasoningCache::default(),
         upstream_timeouts: ProxyAppState::default_upstream_timeouts(),
         request_body_limit_mib: runtime.request_body_limit_mib.clone(),
+        stream_continue_max: runtime.stream_continue_max.clone(),
     }
 }
 
@@ -3370,6 +3385,23 @@ impl StreamResponseTransform {
         self.finished
     }
 
+    /// 是不是「Responses → Chat」桥：它的续写要沿用同一个 bridge 实例，
+    /// 而不是换成 [`crate::services::route_stream_continuation::ResponsesResumeRewriter`]。
+    fn is_chat_bridge(&self) -> bool {
+        matches!(
+            self.bridge,
+            Some(IncrementalResponseBridge::ResponsesToChat(_))
+        )
+    }
+
+    /// 丢掉 framer 里没凑成完整记录的尾巴。
+    ///
+    /// 断流时这条尾巴本身就是残缺的（上游死在记录中间）。要接续写流之前必须丢掉，
+    /// 否则它会同续写流的第一个字节拼成一条坏记录，被 bridge 整条忽略。
+    fn drop_pending_record(&mut self) {
+        let _ = self.framer.finish_block();
+    }
+
     /// Converts whatever this chunk completes. Returns the bytes to forward —
     /// empty while a record is still split across chunks.
     fn push(&mut self, chunk: &[u8]) -> Result<String, String> {
@@ -3430,6 +3462,189 @@ impl StreamResponseTransform {
     }
 }
 
+/// 内层上游流在续写泵里所处的形态。
+enum StreamStage {
+    /// 原上游（含 Chat 桥）：逐块交给 `transform`；`None` 表示纯字节透传。
+    Primary(Option<StreamResponseTransform>),
+    /// Responses 续写流：事件先重写成「原 response 的后续」再转发。
+    Resume(ResumeStage),
+}
+
+/// 续写流的重写状态。
+///
+/// 跨多轮续写保留同一份：重写器自己持有 `sequence_number` / `output_index`
+/// 游标，重建一个会让序号从旧值重来。`framer` 每轮开始前清空。
+struct ResumeStage {
+    rewriter: crate::services::route_stream_continuation::ResponsesResumeRewriter,
+    framer: crate::services::route_proxy_stream::SseFramer,
+}
+
+/// 驱动内层上游流的泵。
+///
+/// 除了「观察每一块、必要时转换」，它还负责在流中途断掉、且还有续写预算时，
+/// 悄悄换一条续写流接着吐给客户端（设计见
+/// `docs/superpowers/specs/2026-10-09-stream-continuation-design.md`）。
+struct StreamPump {
+    stream: std::pin::Pin<
+        Box<dyn futures_util::Stream<Item = reqwest::Result<axum::body::Bytes>> + Send>,
+    >,
+    guard: StreamCompletionGuard,
+    stage: StreamStage,
+    /// 已经用掉的续写轮次。
+    rounds: u32,
+    /// 当前内层流是不是续写流：续写流的帧只并用量与正文，不写原响应的事件状态。
+    continuing: bool,
+    /// 收尾已经做过：接下来只把流结束掉，不再续写、不再补事件。
+    done: bool,
+}
+
+impl StreamPump {
+    /// 刚结束的内层流是不是「正常收尾」（见到了终止标记）。
+    ///
+    /// 正常收尾就该结束整条响应；只有「没看到终止标记」才值得续写。原上游的
+    /// 终止标记由 observer 直接看，续写流的要单独记（它不走 `observe`）。
+    fn ended_with_terminal(&self) -> bool {
+        match self.guard.completion.as_ref() {
+            // 已经结账了：别再来一轮。
+            None => true,
+            Some(completion) => {
+                if self.continuing {
+                    completion.observer.continuation_saw_terminal()
+                } else {
+                    completion.observer.saw_terminal_marker()
+                }
+            }
+        }
+    }
+
+    /// 断流时尝试把内层流换成一次续写请求的响应流。
+    ///
+    /// 返回 `true` 表示新流已经接上（`stage` / `rounds` 一并更新），调用方应回到
+    /// 循环顶部继续 poll；`false` 表示这轮不续写，按既有断流路径收尾。
+    async fn try_continue(&mut self) -> bool {
+        if self.ended_with_terminal() {
+            return false;
+        }
+        // 先把施工图与重建请求所需的事实从 completion 里取出，借用随即结束。
+        let Some((plan, state, platform, path, query, headers, current_id)) = ({
+            let Some(completion) = self.guard.completion.as_ref() else {
+                return false;
+            };
+            if self.rounds >= completion.state.stream_continue_max.load(Ordering::Relaxed) {
+                return false;
+            }
+            plan_continuation(
+                &completion.client_request,
+                completion.observer.continuation(),
+            )
+            .map(|plan| {
+                (
+                    plan,
+                    completion.state.clone(),
+                    completion.platform.clone(),
+                    completion.path.clone(),
+                    completion.upstream_query.clone(),
+                    completion.client_headers.clone(),
+                    completion.credential.id.clone(),
+                )
+            })
+        }) else {
+            return false;
+        };
+
+        let Some(credential) =
+            pick_continuation_credential(&state, &platform, &current_id).await
+        else {
+            return false;
+        };
+        let built = match build_upstream_request_internal(
+            &credential,
+            &platform,
+            &path,
+            query.as_deref(),
+            headers,
+            &plan.body,
+            Some(&state.codex_history),
+            TurnReminderMode::Apply,
+            state.model_match_mode,
+        ) {
+            Ok(built) => built,
+            Err(error) => {
+                eprintln!("[route-continuation] 重建上游请求失败: {error}");
+                return false;
+            }
+        };
+        let client = match build_outbound_http_client_with_timeouts(state.upstream_timeouts) {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!("[route-continuation] 构造 HTTP 客户端失败: {error}");
+                return false;
+            }
+        };
+        // 与原请求同一条编码路径，别让压缩设置上的差异暴露出来。
+        let mut request_headers = built.headers;
+        let outbound_body = request_compression::encode_request_body(
+            &built.target_url,
+            &mut request_headers,
+            &built.body,
+            &parse_json_object(&credential.config_json, "config").unwrap_or(Value::Null),
+        )
+        .unwrap_or(built.body);
+        let response = match client
+            .post(&built.target_url)
+            .headers(map_to_reqwest_headers(&request_headers))
+            .body(outbound_body)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("[route-continuation] 续写请求发送失败: {error}");
+                return false;
+            }
+        };
+        if !response.status().is_success() {
+            eprintln!("[route-continuation] 续写上游返回 {}", response.status());
+            return false;
+        }
+        eprintln!(
+            "[route-continuation] round={} credential={} model={:?}",
+            self.rounds + 1,
+            credential.display_name,
+            plan.response_id,
+        );
+
+        // 换流：Chat 桥沿用同一个 transform（bridge 状态跨请求保留），
+        // Responses 走事件重写器。
+        let previous = std::mem::replace(&mut self.stage, StreamStage::Primary(None));
+        self.stage = match previous {
+            StreamStage::Primary(Some(mut transform)) if transform.is_chat_bridge() => {
+                // 丢掉没凑完的半截记录，免得同续写流的第一个字节拼成坏记录。
+                transform.drop_pending_record();
+                StreamStage::Primary(Some(transform))
+            }
+            // 多轮续写沿用同一个重写器与游标。
+            StreamStage::Resume(mut resume) => {
+                let _ = resume.framer.finish_block();
+                StreamStage::Resume(resume)
+            }
+            _ => StreamStage::Resume(ResumeStage {
+                rewriter:
+                    crate::services::route_stream_continuation::ResponsesResumeRewriter::new(
+                        plan.response_id,
+                        plan.next_sequence_number,
+                        plan.next_output_index,
+                    ),
+                framer: crate::services::route_proxy_stream::SseFramer::new(),
+            }),
+        };
+        self.stream = Box::pin(response.bytes_stream());
+        self.rounds += 1;
+        self.continuing = true;
+        true
+    }
+}
+
 fn observed_upstream_stream(
     first_chunk: axum::body::Bytes,
     rest: impl futures_util::Stream<Item = reqwest::Result<axum::body::Bytes>> + Send + 'static,
@@ -3444,21 +3659,37 @@ fn observed_upstream_stream(
         futures_util::stream::once(async move { Ok(first_chunk) }),
         rest,
     ));
-    let guard = StreamCompletionGuard {
-        completion: Some(completion),
+    let pump = StreamPump {
+        stream: replayed,
+        guard: StreamCompletionGuard {
+            completion: Some(completion),
+        },
+        stage: StreamStage::Primary(transform),
+        rounds: 0,
+        continuing: false,
+        done: false,
     };
-    futures_util::stream::unfold(
-        (Box::pin(replayed), guard, transform),
-        |(mut stream, mut guard, mut transform)| async move {
-            loop {
-                match futures_util::StreamExt::next(&mut stream).await {
-                    Some(Ok(chunk)) => {
-                        if let Some(completion) = guard.completion.as_mut() {
+    futures_util::stream::unfold(pump, |mut pump| async move {
+        loop {
+            match futures_util::StreamExt::next(&mut pump.stream).await {
+                Some(Ok(chunk)) => {
+                    let continuing = pump.continuing;
+                    let chat_bridge = matches!(
+                        &pump.stage,
+                        StreamStage::Primary(Some(transform)) if transform.is_chat_bridge()
+                    );
+                    if let Some(completion) = pump.guard.completion.as_mut() {
+                        if continuing {
+                            // 续写流的帧只并用量与正文；它的 id / 序号归重写器管。
+                            completion.observer.observe_continuation(&chunk);
+                        } else {
                             completion.observer.observe(&chunk);
                         }
+                    }
+                    let mut failure = None;
+                    let converted = match &mut pump.stage {
                         // A response that is not bridged is forwarded verbatim.
-                        let mut failure = None;
-                        let converted = match transform.as_mut() {
+                        StreamStage::Primary(transform) => match transform.as_mut() {
                             None => Some(chunk),
                             Some(transform) => match transform.push(&chunk) {
                                 Ok(output) => (!output.is_empty())
@@ -3468,85 +3699,171 @@ fn observed_upstream_stream(
                                     None
                                 }
                             },
-                        };
-                        if let Some(error) = failure {
-                            if let Some(completion) = guard.completion.take() {
-                                completion.finish().await;
-                            }
-                            return Some((
-                                Err(std::io::Error::other(error)),
-                                (stream, guard, transform),
-                            ));
-                        }
-                        match converted {
-                            Some(converted) => {
-                                return Some((Ok(converted), (stream, guard, transform)))
-                            }
-                            // Still mid-record: nothing to forward yet.
-                            None => continue,
-                        }
-                    }
-                    Some(Err(error)) => {
-                        // Upstream died mid-body. The client already has the earlier
-                        // bytes, so this can only end the stream — but the partial
-                        // response still gets accounted for.
-                        if let Some(completion) = guard.completion.take() {
-                            completion.finish().await;
-                        }
-                        return Some((
-                            Err(std::io::Error::other(format!(
-                                "upstream stream failed: {error}"
-                            ))),
-                            (stream, guard, transform),
-                        ));
-                    }
-                    None => {
-                        // Flush the tail before settling the completion, so the
-                        // closing frames still reach the client.
-                        let mut failure = None;
-                        let tail = match transform.as_mut() {
-                            Some(transform) if !transform.finished() => match transform.finish() {
-                                Ok(tail) => (!tail.is_empty())
-                                    .then(|| axum::body::Bytes::from(tail.into_bytes())),
-                                Err(error) => {
-                                    failure = Some(error);
-                                    None
+                        },
+                        StreamStage::Resume(resume) => {
+                            let mut output = String::new();
+                            for block in resume.framer.push_blocks(&chunk) {
+                                match resume.rewriter.rewrite_block(&block) {
+                                    Ok(Some(block)) => output.push_str(&block),
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        failure = Some(error);
+                                        break;
+                                    }
                                 }
-                            },
-                            _ => None,
-                        };
-                        if let Some(error) = failure {
-                            if let Some(completion) = guard.completion.take() {
-                                completion.finish().await;
                             }
-                            return Some((
-                                Err(std::io::Error::other(error)),
-                                (stream, guard, transform),
-                            ));
+                            (!output.is_empty())
+                                .then(|| axum::body::Bytes::from(output.into_bytes()))
                         }
-                        if let Some(tail) = tail {
-                            return Some((Ok(tail), (stream, guard, transform)));
-                        }
-                        // 内容已经完整、只缺收尾事件：补一条 response.completed，
-                        // 按成功结账，不记断流、不报错。
-                        if guard
-                            .completion
-                            .as_ref()
-                            .is_some_and(StreamCompletion::can_synthesize_completion)
-                        {
-                            let completion = guard.completion.take().expect("checked above");
-                            let bytes = completion.finish_with_synthesized_completion().await;
-                            return Some((Ok(bytes), (stream, guard, transform)));
-                        }
-                        if let Some(completion) = guard.completion.take() {
+                    };
+                    if let Some(error) = failure {
+                        if let Some(completion) = pump.guard.completion.take() {
                             completion.finish().await;
                         }
-                        return None;
+                        return Some((Err(std::io::Error::other(error)), pump));
+                    }
+                    if chat_bridge && !continuing {
+                        // Chat 桥：客户端看到的事件是桥合成的，续写状态从桥的
+                        // 输出里补读；原始 Chat 帧喂不了这些字段。续写轮里桥上
+                        // 的正文已经由 `observe_continuation` 收过，别再接一遍。
+                        if let (Some(completion), Some(converted)) =
+                            (pump.guard.completion.as_mut(), converted.as_deref())
+                        {
+                            completion.observer.observe_client_events(converted);
+                        }
+                    }
+                    match converted {
+                        Some(converted) => return Some((Ok(converted), pump)),
+                        // Still mid-record: nothing to forward yet.
+                        None => continue,
                     }
                 }
+                Some(Err(error)) => {
+                    // 上游中途死了：先试续写，续不上才把错误抛给客户端。
+                    if pump.try_continue().await {
+                        continue;
+                    }
+                    if let Some(completion) = pump.guard.completion.take() {
+                        completion.finish().await;
+                    }
+                    return Some((
+                        Err(std::io::Error::other(format!(
+                            "upstream stream failed: {error}"
+                        ))),
+                        pump,
+                    ));
+                }
+                None => {
+                    if pump.done {
+                        return None;
+                    }
+                    // 内层流断了或写完了：还差内容就先续写。
+                    if pump.try_continue().await {
+                        continue;
+                    }
+                    pump.done = true;
+                    // 先在动 `stage` 之前把要读 completion 的判定做完，
+                    // 免得同时借 `pump.stage` 与 `pump.guard`。
+                    let can_synthesize = matches!(&pump.stage, StreamStage::Primary(_))
+                        && pump
+                            .guard
+                            .completion
+                            .as_ref()
+                            .is_some_and(StreamCompletion::can_synthesize_completion);
+                    let ended_cleanly = pump.ended_with_terminal();
+                    let usage = pump
+                        .guard
+                        .completion
+                        .as_ref()
+                        .map(|completion| completion.observer.usage_snapshot())
+                        .unwrap_or_default();
+
+                    let mut output = String::new();
+                    let mut failure: Option<String> = None;
+                    match &mut pump.stage {
+                        StreamStage::Primary(transform) => {
+                            // Flush the tail before settling the completion, so
+                            // the closing frames still reach the client.
+                            if let Some(transform) = transform.as_mut() {
+                                if !transform.finished() {
+                                    match transform.finish() {
+                                        Ok(tail) => output.push_str(&tail),
+                                        Err(error) => failure = Some(error),
+                                    }
+                                }
+                            }
+                        }
+                        StreamStage::Resume(resume) => {
+                            if ended_cleanly {
+                                // 续写流写完了一轮：它自己的收尾事件已被重写器丢掉，
+                                // 这里补一条属于原 response 的收尾。
+                                if let Some(tail) = resume.framer.finish_block() {
+                                    match resume.rewriter.rewrite_block(&tail) {
+                                        Ok(Some(block)) => output.push_str(&block),
+                                        Ok(None) => {}
+                                        Err(error) => failure = Some(error),
+                                    }
+                                }
+                                if failure.is_none() {
+                                    output.push_str(&resume.rewriter.finish(&usage));
+                                }
+                            } else {
+                                // 预算用尽、续写流也断了：丢掉半截记录，不补收尾，
+                                // 让客户端按断流处理，并照旧给原账号记一次失败。
+                                let _ = resume.framer.finish_block();
+                            }
+                        }
+                    }
+                    if let Some(error) = failure {
+                        if let Some(completion) = pump.guard.completion.take() {
+                            completion.finish().await;
+                        }
+                        return Some((Err(std::io::Error::other(error)), pump));
+                    }
+                    if can_synthesize {
+                        // 内容已经完整、只缺收尾事件：补一条 response.completed，
+                        // 按成功结账，不记断流、不报错。
+                        let completion = pump.guard.completion.take().expect("checked above");
+                        let bytes = completion.finish_with_synthesized_completion().await;
+                        if output.is_empty() {
+                            return Some((Ok(bytes), pump));
+                        }
+                        let mut merged = output.into_bytes();
+                        merged.extend_from_slice(&bytes);
+                        return Some((Ok(axum::body::Bytes::from(merged)), pump));
+                    }
+                    if let Some(completion) = pump.guard.completion.take() {
+                        completion.finish().await;
+                    }
+                    if output.is_empty() {
+                        return None;
+                    }
+                    return Some((Ok(axum::body::Bytes::from(output.into_bytes())), pump));
+                }
             }
-        },
-    )
+        }
+    })
+}
+
+/// 选一个账号来做这一轮续写。
+///
+/// 聚合模式允许换账号（排除当前这个，尽量换一条通道）；精确模式只允许同账号
+/// 重试（spec 第 6 节）。
+async fn pick_continuation_credential(
+    state: &ProxyAppState,
+    platform: &str,
+    current_id: &str,
+) -> Option<SelectedCredential> {
+    let mode = RoutePoolRepository::model_mode(&state.pool, platform)
+        .await
+        .ok()?;
+    let candidates = select_pool_credentials(&state.pool, platform).await.ok()?;
+    match mode {
+        PoolModelMode::Precise => candidates.into_iter().find(|candidate| candidate.id == current_id),
+        PoolModelMode::Aggregate => candidates
+            .into_iter()
+            .find(|candidate| candidate.id != current_id),
+    }
 }
 
 /// Ensures a streamed response is always accounted for.
@@ -14473,6 +14790,7 @@ data: [DONE]\n\n";
             codex_history: CodexReasoningCache::default(),
             upstream_timeouts: ProxyAppState::default_upstream_timeouts(),
             request_body_limit_mib: RouteProxyRuntimeState::default().request_body_limit_mib,
+            stream_continue_max: RouteProxyRuntimeState::default().stream_continue_max,
         };
 
         let mut headers = HeaderMap::new();
@@ -14508,6 +14826,7 @@ data: [DONE]\n\n";
             codex_history: CodexReasoningCache::default(),
             upstream_timeouts: ProxyAppState::default_upstream_timeouts(),
             request_body_limit_mib: RouteProxyRuntimeState::default().request_body_limit_mib,
+            stream_continue_max: RouteProxyRuntimeState::default().stream_continue_max,
         };
 
         let error = resolve_platform(&state, &HeaderMap::new(), None)
@@ -14538,6 +14857,7 @@ data: [DONE]\n\n";
             codex_history: CodexReasoningCache::default(),
             upstream_timeouts: ProxyAppState::default_upstream_timeouts(),
             request_body_limit_mib: RouteProxyRuntimeState::default().request_body_limit_mib,
+            stream_continue_max: RouteProxyRuntimeState::default().stream_continue_max,
         };
 
         let key = "sk-invalid";
@@ -17526,6 +17846,242 @@ data: [DONE]\n\n";
         assert_eq!(
             credential.transient_failure_count, 0,
             "补齐收尾不应记账: {:?}",
+            credential.last_failure_message
+        );
+
+        RouteProxyService::stop(&runtime).await.expect("stop proxy");
+    }
+
+    /// 文本流断在半句中间：网关换一个账号再发一次「继续」，把两段文字接回
+    /// 同一条 response，客户端只看到一个 `response.created` 与一条收尾事件。
+    #[tokio::test]
+    async fn a_mid_text_cut_is_continued_into_the_same_response() {
+        use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
+        use crate::database::{create_memory_pool, run_migrations};
+
+        const FIRST: &str = "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r1\"}}\n\n\
+            data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"m1\",\"type\":\"message\"}}\n\n\
+            data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"m1\",\"delta\":\"前半句，\"}\n\n";
+        const SECOND: &str = "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r2\"}}\n\n\
+            data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"m2\",\"type\":\"message\"}}\n\n\
+            data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"m2\",\"delta\":\"后半句。\"}\n\n\
+            data: {\"type\":\"response.output_item.done\",\"sequence_number\":3,\"output_index\":0,\"item\":{\"id\":\"m2\",\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"后半句。\"}]}}\n\n\
+            data: {\"type\":\"response.completed\",\"sequence_number\":4,\"response\":{\"id\":\"r2\",\"status\":\"completed\"}}\n\n";
+
+        let (upstream, calls) =
+            start_scripted_sse_upstream(vec![vec![FIRST], vec![SECOND]]).await;
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let first = create_proxy_api_credential_with_config(
+            &pool,
+            "first",
+            &upstream,
+            json!({"interface_format": "openai-responses"}),
+        )
+        .await;
+        let second = create_proxy_api_credential_with_config(
+            &pool,
+            "second",
+            &upstream,
+            json!({"interface_format": "openai-responses"}),
+        )
+        .await;
+        RoutePoolRepository::replace_members(&pool, "codex", &[first, second])
+            .await
+            .expect("pool members");
+        let route_key =
+            RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-test")
+                .await
+                .expect("route key");
+        let runtime = RouteProxyRuntimeState::default();
+        let proxy = RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+            .await
+            .expect("start proxy");
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/v1/responses",
+                proxy.base_url.as_deref().expect("base url")
+            ))
+            .bearer_auth(route_key)
+            .json(&json!({
+                "model": "gpt-6-astra",
+                "stream": true,
+                "input": [{"type":"message","role":"user",
+                           "content":[{"type":"input_text","text":"hi"}]}]
+            }))
+            .send()
+            .await
+            .expect("proxy response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.expect("body");
+
+        assert!(body.contains("前半句，"), "断流前的正文丢了: {body}");
+        assert!(body.contains("后半句。"), "续写的正文没接上: {body}");
+        assert_eq!(
+            body.matches("\"type\":\"response.created\"").count(),
+            1,
+            "续写流自己的 response.created 必须被吞掉: {body}"
+        );
+        assert!(body.contains("\"id\":\"r1\""), "必须沿用原 response id: {body}");
+        assert!(
+            !body.contains("\"id\":\"r2\""),
+            "续写流的 response id 不能泄漏给客户端: {body}"
+        );
+        assert!(
+            body.contains("\"type\":\"response.completed\""),
+            "必须补一条收尾事件: {body}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "一次断流续写应当再打一次上游"
+        );
+
+        RouteProxyService::stop(&runtime).await.expect("stop proxy");
+    }
+
+    /// 上游是 Chat 协议的续写：客户端看到的 Responses 事件是桥自己合成的，
+    /// 续写必须沿用同一个 bridge，只看到一条 `response.created`。
+    #[tokio::test]
+    async fn a_mid_text_cut_is_continued_over_chat_bridge() {
+        use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
+        use crate::database::{create_memory_pool, run_migrations};
+
+        const FIRST: &str = "data: {\"id\":\"chatcmpl-1\",\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n\
+            data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"第一段\"}}]}\n\n";
+        const SECOND: &str = "data: {\"id\":\"chatcmpl-2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"第二段。\"}}]}\n\n\
+            data: {\"id\":\"chatcmpl-2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n";
+
+        let (upstream, calls) =
+            start_scripted_sse_upstream(vec![vec![FIRST], vec![SECOND]]).await;
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let mappings = json!([{"from": "gpt-6-astra", "to": "deepseek-chat"}]);
+        let first =
+            create_proxy_api_credential_with_mappings(&pool, "first", &upstream, mappings.clone())
+                .await;
+        let second =
+            create_proxy_api_credential_with_mappings(&pool, "second", &upstream, mappings).await;
+        RoutePoolRepository::replace_members(&pool, "codex", &[first, second])
+            .await
+            .expect("pool members");
+        let route_key =
+            RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-test")
+                .await
+                .expect("route key");
+        let runtime = RouteProxyRuntimeState::default();
+        let proxy = RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+            .await
+            .expect("start proxy");
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/v1/responses",
+                proxy.base_url.as_deref().expect("base url")
+            ))
+            .bearer_auth(route_key)
+            .json(&json!({
+                "model": "gpt-6-astra",
+                "stream": true,
+                "input": [{"type":"message","role":"user",
+                           "content":[{"type":"input_text","text":"hi"}]}]
+            }))
+            .send()
+            .await
+            .expect("proxy response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.expect("body");
+
+        assert!(body.contains("第一段"), "断流前的正文丢了: {body}");
+        assert!(body.contains("第二段。"), "续写的正文没接上: {body}");
+        assert_eq!(
+            body.matches("\"type\":\"response.created\"").count(),
+            1,
+            "桥的状态跨请求保留，不能再合成一条 response.created: {body}"
+        );
+        assert!(
+            body.contains("\"type\":\"response.completed\""),
+            "收尾事件必须补上: {body}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "应当续写一次");
+
+        RouteProxyService::stop(&runtime).await.expect("stop proxy");
+    }
+
+    /// 预算用尽后仍然断流：不再续写，按断流收尾并给原账号记一次失败。
+    #[tokio::test]
+    async fn continuation_stops_at_the_configured_budget() {
+        use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
+        use crate::database::{create_memory_pool, run_migrations};
+
+        const CUT: &str = "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"r1\"}}\n\n\
+            data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"m1\",\"type\":\"message\"}}\n\n\
+            data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"m1\",\"delta\":\"半句\"}\n\n";
+
+        let (upstream, calls) = start_scripted_sse_upstream(vec![vec![CUT]]).await;
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let first = create_proxy_api_credential_with_config(
+            &pool,
+            "first",
+            &upstream,
+            json!({"interface_format": "openai-responses"}),
+        )
+        .await;
+        let second = create_proxy_api_credential_with_config(
+            &pool,
+            "second",
+            &upstream,
+            json!({"interface_format": "openai-responses"}),
+        )
+        .await;
+        RoutePoolRepository::replace_members(&pool, "codex", &[first.clone(), second])
+            .await
+            .expect("pool members");
+        let route_key =
+            RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-test")
+                .await
+                .expect("route key");
+        let runtime = RouteProxyRuntimeState::default();
+        runtime.set_stream_continue_max(2);
+        let proxy = RouteProxyService::start(&runtime, pool.clone(), RouteProxyTransport::HttpOnly)
+            .await
+            .expect("start proxy");
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/v1/responses",
+                proxy.base_url.as_deref().expect("base url")
+            ))
+            .bearer_auth(route_key)
+            .json(&json!({
+                "model": "gpt-6-astra",
+                "stream": true,
+                "input": [{"type":"message","role":"user",
+                           "content":[{"type":"input_text","text":"hi"}]}]
+            }))
+            .send()
+            .await
+            .expect("proxy response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.expect("body");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "1 次原始 + 2 次续写后必须停手: {body}"
+        );
+        assert!(
+            !body.contains("\"type\":\"response.completed\""),
+            "没续完就不该补假的收尾事件: {body}"
+        );
+        let credential = RouteCredentialRepository::get(&pool, &first)
+            .await
+            .expect("credential");
+        assert_eq!(
+            credential.transient_failure_count, 1,
+            "断流要给原账号记一次失败: {:?}",
             credential.last_failure_message
         );
 

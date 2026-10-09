@@ -40,6 +40,7 @@ pub async fn save_settings_core(
     // behaving the way the persisted settings still describe.
     close_to_tray.set_enabled(settings.close_to_tray);
     route_proxy.set_request_body_limit_mib(settings.route_proxy_request_body_limit_mib);
+    route_proxy.set_stream_continue_max(settings.route_proxy_stream_continue_max);
     // Same order rule: the env now matches what was actually persisted. An
     // explicit disable clears the vars; clients built afterwards pick it up.
     proxy_service::apply(&settings);

@@ -102,6 +102,19 @@ impl SseFramer {
     }
 }
 
+/// 一帧是不是「这一轮写完了」。
+///
+/// Responses 上游用 `response.completed`；Chat 上游用带 `finish_reason` 的
+/// chunk。两种都要认，续写流是哪一种由上游决定。
+fn continuation_frame_is_terminal(value: &Value) -> bool {
+    if value.get("type").and_then(Value::as_str) == Some("response.completed") {
+        return true;
+    }
+    value
+        .pointer("/choices/0/finish_reason")
+        .is_some_and(|reason| !reason.is_null())
+}
+
 /// Extract the joined `data:` payload of one SSE block, if it carries one.
 fn frame_payload(block: &str) -> Option<String> {
     let data = block
@@ -323,6 +336,15 @@ pub struct StreamObserver {
     streaming_request: bool,
     /// 续写用状态；非 Responses 事件不会写它。
     continuation: StreamContinuationState,
+    /// 专门给续写流按帧读用量：续写流的帧不能走 `continuation`，
+    /// 否则会把原 response 的 id / 序号覆盖成续写流自己的值。
+    continuation_framer: SseFramer,
+    /// 最近一轮续写流有没有出现终止标记。预算用尽时要靠它区分「续写流正常收尾」
+    /// 与「续写流又断了」——后者要按断流处理，不能补一条假的完成事件。
+    continuation_saw_terminal: bool,
+    /// 给「客户端看到的 Responses 事件」分帧：Chat 上游的客户端事件是桥自己
+    /// 合成的，续写状态只能从这条流里读（见 [`Self::observe_client_events`]）。
+    client_event_framer: SseFramer,
 }
 
 impl StreamObserver {
@@ -340,6 +362,51 @@ impl StreamObserver {
             marker_carry: String::new(),
             streaming_request,
             continuation: StreamContinuationState::default(),
+            continuation_framer: SseFramer::new(),
+            continuation_saw_terminal: false,
+            client_event_framer: SseFramer::new(),
+        }
+    }
+
+    /// 收续写流的帧：并 token 用量、接着累加半截正文，但不碰
+    /// `response_id` / `sequence_number` / `completed_items`。
+    ///
+    /// 续写流属于「新的一次上游请求」，它的 id 与序号是重写器自己在管的；
+    /// 若走 [`StreamObserver::observe`]，续写流的 id 会覆盖原 response 的 id，
+    /// 让下一轮续写错位、把错误的事件拼到一起。所以这里只做两件事：
+    ///
+    /// - 合并 usage（Responses 与 Chat 两种上游的形状都认）；
+    /// - 把文本增量接到 `partial_text` 后面——它正是下一轮续写请求要带上的
+    ///   「已经写出来的内容」，少接一段模型就会重复上一轮的话。
+    pub fn observe_continuation(&mut self, chunk: &[u8]) {
+        for payload in self.continuation_framer.push(chunk) {
+            let Ok(value) = serde_json::from_str::<Value>(&payload) else {
+                continue;
+            };
+            self.usage
+                .merge_from(super::route_proxy_service::usage_breakdown_from_value(
+                    &value,
+                ));
+            if continuation_frame_is_terminal(&value) {
+                self.continuation_saw_terminal = true;
+            }
+            // Responses 是 `response.output_text.delta`；Chat 上游是
+            // `choices[0].delta.content`。两种都要，续写流是哪一种由上游决定。
+            let delta = value
+                .get("delta")
+                .and_then(Value::as_str)
+                .filter(|_| {
+                    value.get("type").and_then(Value::as_str)
+                        == Some("response.output_text.delta")
+                })
+                .or_else(|| {
+                    value
+                        .pointer("/choices/0/delta/content")
+                        .and_then(Value::as_str)
+                });
+            if let Some(delta) = delta {
+                self.append_partial_text(delta);
+            }
         }
     }
 
@@ -383,6 +450,16 @@ impl StreamObserver {
     /// 续写所需的状态快照。
     pub fn continuation(&self) -> &StreamContinuationState {
         &self.continuation
+    }
+
+    /// 原上游流有没有出现终止标记。
+    pub fn saw_terminal_marker(&self) -> bool {
+        self.saw_terminal_marker
+    }
+
+    /// 最近一轮续写流有没有正常收尾（见字段说明）。
+    pub fn continuation_saw_terminal(&self) -> bool {
+        self.continuation_saw_terminal
     }
 
     /// 有数据帧、但从未见过终止标记 —— 「只缺收尾」与「断流」都以它为前提。
@@ -458,17 +535,7 @@ impl StreamObserver {
             }
             "response.output_text.delta" => {
                 if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                    let remaining =
-                        PARTIAL_TEXT_LIMIT.saturating_sub(self.continuation.partial_text.len());
-                    if delta.len() > remaining {
-                        self.continuation.text_truncated = true;
-                    }
-                    // 只按 UTF-8 边界截，别把多字节字符劈开。
-                    let mut end = remaining.min(delta.len());
-                    while end > 0 && !delta.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    self.continuation.partial_text.push_str(&delta[..end]);
+                    self.append_partial_text(delta);
                 }
             }
             "response.output_item.done" => {
@@ -483,6 +550,34 @@ impl StreamObserver {
             }
             _ => {}
         }
+    }
+
+    /// 只把「客户端看到的那串 Responses 事件」喂给续写状态。
+    ///
+    /// Chat 上游的客户端事件（`response.created`、`response.output_text.delta`…）
+    /// 是 `ChatStreamBridge` 自己合成的，原始 Chat 帧里什么都没有，所以续写
+    /// 需要的 response_id 与半截正文只能从桥的输出里读。用法与断流判定不走这里，
+    /// 免得同原始帧重复记账。
+    pub fn observe_client_events(&mut self, events: &[u8]) {
+        for payload in self.client_event_framer.push(events) {
+            if let Ok(value) = serde_json::from_str::<Value>(&payload) {
+                self.observe_continuation_event(&value);
+            }
+        }
+    }
+
+    /// 往半截正文尾部接一段增量；超过内存上限就标记不可续并只截到上限。
+    fn append_partial_text(&mut self, delta: &str) {
+        let remaining = PARTIAL_TEXT_LIMIT.saturating_sub(self.continuation.partial_text.len());
+        if delta.len() > remaining {
+            self.continuation.text_truncated = true;
+        }
+        // 只按 UTF-8 边界截，别把多字节字符劈开。
+        let mut end = remaining.min(delta.len());
+        while end > 0 && !delta.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.continuation.partial_text.push_str(&delta[..end]);
     }
 
     fn scan_for_terminal_marker(&mut self, chunk: &[u8]) {

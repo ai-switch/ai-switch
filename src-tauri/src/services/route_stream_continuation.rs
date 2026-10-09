@@ -5,6 +5,7 @@
 use serde_json::{json, Value};
 
 use crate::models::route_pool::RouteUsageBreakdown;
+use crate::services::route_proxy_stream::StreamContinuationState;
 
 /// 与「用户手动继续」等价的那句指令（spec 第 6 节）。
 pub const CONTINUE_INSTRUCTION: &str = "Continue exactly where the previous assistant message stopped. Do not repeat anything already written, do not add a preamble, and do not restate the question.";
@@ -40,6 +41,45 @@ pub fn build_continuation_body(
     object.insert("stream".to_string(), Value::Bool(true));
     serde_json::to_vec(&value)
         .map_err(|error| format!("could not serialize continuation body: {error}"))
+}
+
+/// 一次续写的施工图：请求体、以及把续写流接回原 response 所需的游标。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContinuationPlan {
+    /// 以原请求为基础、追加了半截回答与继续指令的续写请求体。
+    pub body: Vec<u8>,
+    /// 原 response 的 id；续写流的收尾事件必须沿用它。
+    pub response_id: String,
+    /// 续写流里第一个事件要用的 `sequence_number`。
+    pub next_sequence_number: u64,
+    /// 续写流里第一个 item 要用的 `output_index`。
+    pub next_output_index: u64,
+}
+
+/// 断流后是否值得再发一次「继续」请求；能续就返回施工图。
+///
+/// 放弃续写的情形（spec 第 8、10 节）：
+/// - 半截正文超过内存上限（`text_truncated`）；
+/// - 还没拿到 `response.created`，或正文为空——没有可续的东西；
+/// - 原请求体不是可改写的 JSON。
+pub fn plan_continuation(
+    original_body: &[u8],
+    state: &StreamContinuationState,
+) -> Option<ContinuationPlan> {
+    if state.text_truncated {
+        return None;
+    }
+    let response_id = state.response_id.clone()?;
+    if state.partial_text.is_empty() {
+        return None;
+    }
+    let body = build_continuation_body(original_body, &state.partial_text).ok()?;
+    Some(ContinuationPlan {
+        body,
+        response_id,
+        next_sequence_number: state.last_sequence_number + 1,
+        next_output_index: state.completed_items.len() as u64,
+    })
 }
 
 /// 把续写流重写成「原 response 的后续」（spec 第 7 节）。
@@ -89,7 +129,9 @@ impl ResponsesResumeRewriter {
         value["sequence_number"] = Value::from(self.next_sequence_number);
         self.next_sequence_number += 1;
         match event.as_str() {
-            "response.output_item.added" | "response.output_item.done" => {
+            // 只有新出现的 item 才占一个新位置；`done` 与后续的 delta 都属于
+            // 同一个 item，必须复用 `added` 分配的那个 `output_index`。
+            "response.output_item.added" => {
                 value["output_index"] = Value::from(self.next_output_index);
                 self.next_output_index += 1;
             }
@@ -211,5 +253,51 @@ mod tests {
     #[test]
     fn rejects_a_body_whose_input_is_not_an_array() {
         assert!(build_continuation_body(br#"{"model":"m","input":"hi"}"#, "x").is_err());
+    }
+
+    #[test]
+    fn plan_continuation_carries_the_seam_cursor_and_the_half_written_text() {
+        let body = br#"{"model":"gpt-6-astra","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#;
+        let state = StreamContinuationState {
+            response_id: Some("resp_1".into()),
+            last_sequence_number: 7,
+            completed_items: vec!["m0".into()],
+            open_item: None,
+            partial_text: "半截回答".into(),
+            text_truncated: false,
+        };
+        let plan = plan_continuation(body, &state).expect("plan");
+        assert_eq!(plan.response_id, "resp_1");
+        assert_eq!(plan.next_sequence_number, 8);
+        assert_eq!(plan.next_output_index, 1);
+        let value: serde_json::Value = serde_json::from_slice(&plan.body).unwrap();
+        let input = value["input"].as_array().unwrap();
+        assert_eq!(input.last().unwrap()["content"][0]["text"], CONTINUE_INSTRUCTION);
+    }
+
+    #[test]
+    fn plan_continuation_gives_up_without_a_response_id_or_partial_text() {
+        let body = br#"{"model":"m","input":[]}"#;
+        let no_text = StreamContinuationState {
+            response_id: Some("resp_1".into()),
+            partial_text: String::new(),
+            ..StreamContinuationState::default()
+        };
+        assert!(plan_continuation(body, &no_text).is_none());
+
+        let no_id = StreamContinuationState {
+            response_id: None,
+            partial_text: "x".into(),
+            ..StreamContinuationState::default()
+        };
+        assert!(plan_continuation(body, &no_id).is_none());
+
+        let truncated = StreamContinuationState {
+            response_id: Some("resp_1".into()),
+            partial_text: "x".into(),
+            text_truncated: true,
+            ..StreamContinuationState::default()
+        };
+        assert!(plan_continuation(body, &truncated).is_none());
     }
 }
