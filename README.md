@@ -235,3 +235,17 @@ docker build --build-arg AI_SWITCH_VERSION=v0.9.0 .
 ## 许可证
 
 仓库默认采用根目录 LICENSE 中的 MIT License，但 SaaS 插件是独立许可范围：src/saas/ 与 src-tauri/src/saas/ 采用 GNU General Public License v3.0 only（GPL-3.0-only），分别以目录内的 LICENSE 为准。范围、分发注意事项及中英文说明见 docs/saas-license.md。
+
+## 赞助
+
+AI Switch 是完全开源、免费的项目。如果你觉得好用，欢迎用支付宝扫码赞助，每一笔都会用于持续的开发与服务器开销。
+
+![支付宝收款码](docs-site/docs/public/sponsor-alipay.jpg)
+
+### 赞助记录
+
+| 日期 | 赞助人 | 方式 | 金额 | 留言 |
+| --- | --- | --- | --- | --- |
+| 示例 | 匿名 | 支付宝 | ¥ -- | 感谢你的支持，期待更多功能！ |
+
+感谢每一位支持 AI Switch 的朋友！

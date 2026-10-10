@@ -235,3 +235,17 @@ This project may study public behavior, public documentation, and public file fo
 ## License
 
 The repository is generally available under the MIT License in the root LICENSE. The SaaS plugin has a separate license scope: src/saas/ and src-tauri/src/saas/ are licensed under the GNU General Public License v3.0 only (GPL-3.0-only), as stated in each directory's LICENSE. See docs/saas-license.md for the scope, distribution notes, and bilingual explanation.
+
+## Sponsor
+
+AI Switch is a fully open-source, free project. If you find it useful, you can sponsor via Alipay by scanning the code below — every contribution goes toward ongoing development and server costs.
+
+![Alipay donation QR code](docs-site/docs/public/sponsor-alipay.jpg)
+
+### Sponsorship Log
+
+| Date | Sponsor | Method | Amount | Message |
+| --- | --- | --- | --- | --- |
+| example | Anonymous | Alipay | ¥ -- | Thanks for your support, looking forward to more features! |
+
+Thank you to everyone who supports AI Switch!

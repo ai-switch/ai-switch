@@ -17,6 +17,7 @@ const zhNav: DefaultTheme.NavItem[] = [
   { text: "部署", link: "/deploy/desktop", activeMatch: "^/deploy/" },
   { text: "开发", link: "/dev/architecture", activeMatch: "^/dev/" },
   { text: "FAQ", link: "/faq" },
+  { text: "赞助", link: "/sponsor" },
   { text: "下载", link: RELEASES },
 ];
 
@@ -92,6 +93,7 @@ const enNav: DefaultTheme.NavItem[] = [
   { text: "Deploy", link: "/en/deploy/desktop", activeMatch: "^/en/deploy/" },
   { text: "Develop", link: "/en/dev/architecture", activeMatch: "^/en/dev/" },
   { text: "FAQ", link: "/en/faq" },
+  { text: "Sponsor", link: "/en/sponsor" },
   { text: "Download", link: RELEASES },
 ];
 
