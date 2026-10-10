@@ -146,6 +146,20 @@ run_loop → 常驻轮询调度器（10s 一跳，单轮最多 32 个任务，�
 `video.generate` 被拦、按所选协议创建、启用停用、编辑不动平台与 key）+
 `tests/lib/videoPlatforms.test.ts`（4 例）。
 
+### 6. SaaS 管理端支持视频定价
+
+后端计费早已支持视频（迁移 0007 / 0008），但管理端没有填价入口，只能靠 SQL 或接口写。
+
+- `src/saas/types.ts`：`ModelPrice` 加 `videoPriceMicros` / `videoPricePerSecondMicros`。
+- `src/saas/admin/Groups.tsx`：定价表加「视频 · USD/条 + USD/秒」列；每个模型行加两个
+  输入（USD/条、USD/sec），后者的 hint 写明与前者**相加**，避免被当成二选一；
+  保存时两列一起提交——`groups.save` 是整行覆盖 `saas_group_models`，漏掉就会把已存的
+  视频价格清成 0。
+- **顺带修一个显示 bug**：平台徽标原本是 `codex ? … : gemini ? … : "Claude"` 的三元表达式，
+  视频分组会被显示成 "Claude"。抽成 `platformLabel()`，视频显示「Video · Kling」。
+- `SaasEndpoint` 原本只有 `codex | claude | gemini`（后端 SaaS 平台白名单的前端镜像），
+  改为从 `VideoPlatform`（`video:${VideoProtocol}`）推导，保持单一来源。
+
 ## 验证
 
 ```bash
@@ -157,7 +171,7 @@ CARGO_TARGET_DIR=target-codex cargo test --lib
 - `cargo check --lib`：**通过，0 error**（89 条 warning 全部是既有告警，本轮新增文件零告警）。
 - `cargo test --lib`：**1968 passed / 0 failed / 13 ignored**（整仓，128s）。
 - `npx tsc --noEmit`：**0 error**。
-- `npx vitest run`：**938 passed / 0 failed**（80 个文件；`src/` 下没有测试文件，
+- `npx vitest run`：**953 passed / 0 failed**（81 个文件；`src/` 下没有测试文件，
   前端测试都在仓库根的 `tests/`）。
 - 分套件：`videogen` 12 例（新增 `dialect_and_platform_protocol_round_trip`、
   `minimax_polls_through_query_string`、`platform_hint_round_trips_to_a_dialect`、
@@ -182,6 +196,7 @@ CARGO_TARGET_DIR=target-codex cargo test --lib
 | 平台钉死、能力收窄、账号池选择 | ✅ 集成测试间接覆盖 |
 | 视频渠道的导入（含别名归一） | ✅ 单测 |
 | 前端视频渠道管理（合并列表 + TAG、增删改、能力校验） | ✅ 组件测试 |
+| SaaS 管理端的视频定价（按条 + 按秒）与平台徽标 | ✅ 组件测试 |
 | `reserve_video` / `settle_video` 的计费与退款 | ✅ 集成测试（SaaS 全链路）+ 定价矩阵单测（起步价 / 按秒 / 相加 / 越界 fail closed） |
 | `execute_video_request` 的 HTTP 行为 | ✅ 集成测试（201 契约体、日志、模型名不泄漏） |
 | 视频 key 的端点边界 | ✅ 单测（不能打文本端点） |
@@ -268,18 +283,15 @@ CARGO_TARGET_DIR=target-codex cargo test --lib
    （认证 → 预留 → 提交上游 → 按条结算 → 写日志，含响应体模型名与任务表两列的断言）
    与 `saas_video_key_cannot_reach_text_endpoints`。
 
-1. ~~**前端没有视频渠道入口**~~ —— **已解决**（见下「第三轮：前端」）。
-   剩下的是 SaaS 后台里还没有填 `video_price_micros` / `video_price_per_second_micros`
-   的入口（列已经能存能算，`groups.save` 已接受视频组），目前只能靠 SQL 或接口写。
-   SaaS 的定价 UI 与「视频渠道」这一屏是两件事：前者在 SaaS 管理端（`SaasAdmin`），
-   后者是本地账号池的渠道管理，已经做完。
+1. ~~**前端没有视频渠道入口 / SaaS 后台没有视频定价入口**~~ —— **都已解决**：
+   本地渠道管理见「第三轮：前端」，SaaS 定价见「第六轮：SaaS 管理端」。
+   至此「跑视频」的两条路径在界面上都完整了：
+   - **本地直连**：在侧边栏「视频」屏新增渠道 → 客户端带
+     `x-ai-switch-platform: video:kling` 打 `/v1/video/generations`；
+   - **SaaS**：管理端建视频分组并定价（按条 + 按秒）→ 发 `sk-saas-` key → 同一个端点。
 
-   **导入路径也仍然可用**（现在界面上也能选到视频平台了）：
-   `video:kling` / `video:seedance`（别名归一成 `video:ark`）都能导入成账号。
-   所以「跑视频」有两条完整路径：
-   - **本地直连**：在「视频」屏新增渠道 → 客户端带 `x-ai-switch-platform: video:kling`
-     打 `/v1/video/generations`；
-   - **SaaS**：管理员建视频组并定价 → 发 `sk-saas-` key → 同一个端点。
+   **导入路径也仍然可用**（界面上也能选到视频平台）：`video:kling` / `video:seedance`
+   （别名归一成 `video:ark`）都能导入成账号。
 2. ~~**按「次」计价覆盖不了时长成本差**~~ —— **已解决**（迁移 `0008_video_price_per_second.sql`）。
    加列 `video_price_per_second_micros`，计价口径是**相加**而不是二选一：
 
