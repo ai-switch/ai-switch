@@ -1,5 +1,8 @@
 export type SaasLocale = "zh" | "en";
-export type SaasEndpoint = "codex" | "claude" | "gemini";
+import type { VideoPlatform } from "../lib/videoPlatforms";
+
+/// SaaS 能服务的平台。与后端 `supported_platforms()` 对齐：3 个文本平台 + 全部视频渠道。
+export type SaasEndpoint = "codex" | "claude" | "gemini" | VideoPlatform;
 export interface SaasHostProps { onConfigChanged?: () => void }
 export interface PageResult<Item> { items: Item[]; total: number; page?: number; pageSize?: number }
 export interface SaasErrorEnvelope { code: string; message: string; details?: unknown }
@@ -104,7 +107,7 @@ export interface AdminOverview {
 }
 
 export type SaasModelSyncState = "active" | "pending_pricing" | "stale";
-export interface ModelPrice { model: string; upstreamModel: string; inputPriceMicros: number; cachePriceMicros: number; outputPriceMicros: number; imagePriceMicros?: number; enabled?: boolean; syncState?: SaasModelSyncState; managedByPool?: boolean; lastSeenAt?: number | null; updatedAt?: number }
+export interface ModelPrice { model: string; upstreamModel: string; inputPriceMicros: number; cachePriceMicros: number; outputPriceMicros: number; imagePriceMicros?: number; /** 视频按「条」计价 */ videoPriceMicros?: number; /** 视频按「秒」计价；与 videoPriceMicros **相加** */ videoPricePerSecondMicros?: number; enabled?: boolean; syncState?: SaasModelSyncState; managedByPool?: boolean; lastSeenAt?: number | null; updatedAt?: number }
 export interface SaasGroup {
   id: string;
   name: string;

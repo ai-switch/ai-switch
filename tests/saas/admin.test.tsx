@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SaasAdmin, SaasSettings } from "../../src/saas";
-import { claudeGroup, config, group, page, recharge, user } from "./fixtures";
+import { claudeGroup, config, group, page, recharge, user, videoGroup } from "./fixtures";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("../../src/lib/transport", () => ({ getTransport: () => ({ call: invoke }), isDesktop: () => true }));
@@ -230,6 +230,50 @@ describe("SaaS administrator", () => {
     expect(payload).not.toHaveProperty("name");
     expect(payload).not.toHaveProperty("batchIds");
     expect(payload).not.toHaveProperty("platform");
+    // 视频的两列也必须一起提交（`groups.save` 会整行覆盖 saas_group_models）
+    expect(payload.models[0]).toEqual(expect.objectContaining({ videoPriceMicros: 0, videoPricePerSecondMicros: 0 }));
+  });
+
+  it("labels a video channel group with its protocol instead of Claude", async () => {
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command, request) => {
+      if (request?.operation === "groups.list") return page([videoGroup]);
+      return original(command, request);
+    });
+    render(<SaasAdmin />);
+    await userEvent.click(screen.getByRole("button", { name: /^groups & pricing$/i }));
+    // 原来的三元表达式会把 `video:kling` 显示成 "Claude"
+    expect(await screen.findByText("Video · Kling")).toBeInTheDocument();
+    expect(screen.queryByText("Claude")).not.toBeInTheDocument();
+  });
+
+  it("edits video per-clip and per-second prices", async () => {
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command, request) => {
+      if (request?.operation === "groups.list") return page([videoGroup]);
+      if (request?.operation === "catalog") return { platforms:["video:kling"],platform:"video:kling",groupId:videoGroup.id,name:videoGroup.name,models:["kling-v1-upstream"],availableAccountCount:1,accounts:[] };
+      return original(command, request);
+    });
+    render(<SaasAdmin />);
+    await userEvent.click(screen.getByRole("button", { name: /^groups & pricing$/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /^edit saas settings$/i }));
+
+    // 已存的价格要回填到输入框里（30000 micros = 0.03 USD，5000 micros = 0.005 USD）
+    expect(screen.getByLabelText(/video price 1/i)).toHaveValue("0.03");
+    expect(screen.getByLabelText(/video per-second price 1/i)).toHaveValue("0.005");
+
+    await userEvent.clear(screen.getByLabelText(/video per-second price 1/i));
+    await userEvent.type(screen.getByLabelText(/video per-second price 1/i), "0.008");
+    await userEvent.click(screen.getByRole("button", { name: /save settings/i }));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("saas_admin", { operation: "groups.save", payload: expect.objectContaining({ id: videoGroup.id }) }));
+    const payload = invoke.mock.calls.find(([, request]) => request?.operation === "groups.save")?.[1].payload;
+    expect(payload.models[0]).toEqual(expect.objectContaining({
+      model: "kling-v1",
+      upstreamModel: "kling-v1-upstream",
+      videoPriceMicros: 30000,
+      videoPricePerSecondMicros: 8000,
+    }));
   });
 
   it("adds an unconfigured core group before it appears in pricing", async () => {

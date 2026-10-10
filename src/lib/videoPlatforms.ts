@@ -11,6 +11,9 @@
  */
 export type VideoProtocol = "kling" | "ark" | "minimax" | "zhipu" | "sora";
 
+/// 账号/分组 `platform` 列里的视频取值，形如 `video:kling`。
+export type VideoPlatform = `video:${VideoProtocol}`;
+
 export const VIDEO_PROTOCOLS: ReadonlyArray<{
   protocol: VideoProtocol;
   platform: string;
