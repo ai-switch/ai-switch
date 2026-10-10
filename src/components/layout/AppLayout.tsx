@@ -91,7 +91,8 @@ type AgentNavItem = {
     | "nav.agent.gemini"
     | "nav.agent.opencode"
     | "nav.agent.openclaw"
-    | "nav.agent.hermes";
+    | "nav.agent.hermes"
+    | "nav.agent.video";
 };
 
 const agentItems: AgentNavItem[] = [
@@ -102,6 +103,9 @@ const agentItems: AgentNavItem[] = [
   { icon: "opencode", screen: "OpenCode", platform: "opencode", labelKey: "nav.agent.opencode" },
   { icon: "openclaw", screen: "OpenClaw", platform: "openclaw", labelKey: "nav.agent.openclaw" },
   { icon: "hermes", screen: "Hermes", platform: "hermes", labelKey: "nav.agent.hermes" },
+  // 视频的 5 个方言合成一个入口（账号列表里用 TAG 标协议），
+  // 所以这里的 `platform` 是导航用的伪平台 `video`，不是真实平台值。
+  { icon: "video", screen: "Video", platform: "video", labelKey: "nav.agent.video" },
 ];
 
 function isSettingsArea(screen: string) {

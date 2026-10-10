@@ -19,6 +19,7 @@ import type {
   RouteCredentialImportPreviewItem,
   TransferPlatformChoice,
 } from "../../lib/api/types";
+import { VIDEO_PROTOCOLS } from "../../lib/videoPlatforms";
 
 export type RouteCredentialImportDialogProps = {
   open: boolean;
@@ -27,7 +28,7 @@ export type RouteCredentialImportDialogProps = {
 };
 
 const MAX_SOURCE_BYTES = 8 * 1024 * 1024;
-const platformOptions = [
+const platformOptions: ReadonlyArray<{ value: string; label: string }> = [
   { value: "codex", label: "Codex" },
   { value: "claude", label: "Claude" },
   { value: "gemini", label: "Gemini" },
@@ -35,7 +36,10 @@ const platformOptions = [
   { value: "opencode", label: "OpenCode" },
   { value: "openclaw", label: "OpenClaw" },
   { value: "hermes", label: "Hermes" },
-] as const;
+  // 视频渠道（5 个方言）。导入时它和文本平台没有区别——后端按
+  // `PlatformId::parse` 认 `video:kling` 这类「模态:协议」串，别名也会归一。
+  ...VIDEO_PROTOCOLS.map((item) => ({ value: item.platform, label: item.label })),
+];
 const interfaceOptions = [
   { value: "", label: "自动判断" },
   { value: "openai", label: "OpenAI" },

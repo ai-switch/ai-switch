@@ -34,6 +34,7 @@ import { OcrScreen } from "./screens/OcrScreen";
 import { ProvidersScreen } from "./screens/ProvidersScreen";
 import { SessionsScreen } from "./screens/SessionsScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
+import { VideoChannelsScreen } from "./screens/VideoChannelsScreen";
 import { TargetsScreen } from "./screens/TargetsScreen";
 import { UpdatesScreen } from "./screens/UpdatesScreen";
 import { VibeScreen } from "./screens/VibeScreen";
@@ -242,7 +243,9 @@ export function App() {
               >
                 <AnimatePresence initial={false} mode="wait">
                   <MotionPage direction={navigationDirection} key={screen}>
-                    {agentPlatform && (
+                    {/* `video` 是导航用的伪平台（5 个方言合成一屏），
+                        不能交给 AccountsScreen——它的 platform 是真实平台值。 */}
+                    {agentPlatform && agentPlatform !== "video" && (
                   <AccountsScreen
                     onOpenSessions={openSessions}
                     platform={agentPlatform}
@@ -251,6 +254,7 @@ export function App() {
                     sidebarCollapsed={sidebarCollapsed}
                   />
                 )}
+                {screen === "Video" && <VideoChannelsScreen />}
                 {screen === "Dashboard" && <DashboardScreen />}
                 {screen === "Batches" && <BatchesScreen />}
                 {screen === "Providers" && <ProvidersScreen />}

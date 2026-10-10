@@ -42,7 +42,13 @@ const platformLabels: Record<AgentPlatform, string> = {
   opencode: "OpenCode",
   openclaw: "OpenClaw",
   hermes: "Hermes",
+  // 视频是导航用的伪平台：视频的生成会话模型（G-P5）还没做，
+  // 所以不会有 `providerId === "video"` 的会话。这一项只是为了类型完整。
+  video: "Video",
 };
+
+/// 会话筛选下拉里要排除视频：它没有会话，列出来只会是个恒为 0 的死选项。
+const sessionPlatformOptions = agentPlatforms.filter((platform) => platform !== "video");
 
 function isAgentPlatform(value: string | null | undefined): value is AgentPlatform {
   return Boolean(value && agentPlatforms.includes(value as AgentPlatform));
@@ -472,7 +478,7 @@ export function SessionsScreen({ initialPlatform = null }: SessionsScreenProps) 
                 value={platform}
               >
                 <option value="all">{t("sessions.all")} · {sessions.length}</option>
-                {agentPlatforms.map((item) => (
+                {sessionPlatformOptions.map((item) => (
                   <option key={item} value={item}>
                     {platformLabels[item]} · {counts.get(item) ?? 0}
                   </option>

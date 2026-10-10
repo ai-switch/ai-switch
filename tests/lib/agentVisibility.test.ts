@@ -17,14 +17,11 @@ describe("agent visibility preferences", () => {
       setItem: (key, value) => storage.set(key, value),
     });
 
+    // 以「默认全可见」为基准再覆盖被存过的那个：这样断言仍然在测
+    // 「默认全可见 + 合并已存选择 + 丢掉不认识的键」，但以后新增平台不用再改这里。
     expect(visibility).toEqual({
-      codex: true,
+      ...createDefaultAgentVisibility(),
       claude: false,
-      grok: true,
-      gemini: true,
-      opencode: true,
-      openclaw: true,
-      hermes: true,
     });
   });
 

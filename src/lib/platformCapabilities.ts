@@ -5,6 +5,10 @@ const capabilityReasons: Record<string, string> = {
   "capability.official_account_unavailable": "该平台不支持官方账号导入或官方账号路由。",
   "capability.deeplink_unavailable": "该平台不支持 Deeplink 导入。",
   "capability.quota_unavailable": "该平台不支持官方账号额度刷新。",
+  // 视频渠道专用的三个（`platform_capability_service` 的 VIDEO_* 常量）
+  "capability.video_no_config_write": "视频渠道不是 CLI 的 provider，不写任何客户端配置。",
+  "capability.video_model_test_separate": "视频的模型测试走视频提交链路，不在账号页的模型测试里。",
+  "capability.video_not_an_agent": "视频渠道没有终端与会话概念，不能启动或续跑 Agent。",
 };
 
 export function findPlatformCapability(

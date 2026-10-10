@@ -234,6 +234,7 @@ describe("SettingsScreen", () => {
               opencode: true,
               openclaw: true,
               hermes: true,
+            video: true,
             }}
             onAgentVisibilityChange={onAgentVisibilityChange}
           />

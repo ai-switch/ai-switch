@@ -145,6 +145,7 @@ describe("AppLayout", () => {
             opencode: true,
             openclaw: true,
             hermes: true,
+            video: true,
           }}
           onNavigate={vi.fn()}
           onToggleSidebar={vi.fn()}
