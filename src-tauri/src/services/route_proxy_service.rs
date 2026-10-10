@@ -47,7 +47,9 @@ use crate::services::route_credential_activity::{
 };
 use crate::services::route_failure_scope::is_account_scoped_failure;
 use crate::services::route_model_capability::{
-    advertised_model_catalog_entries_with_baseline, catalog_members,
+    advertised_model_catalog_entries, advertised_model_catalog_entries_with_baseline,
+    advertised_model_catalog_entries_with_baseline_and_capability,
+    advertised_model_catalog_entries_with_capability, catalog_members,
     codex_effective_context_window, codex_reasoning_metadata,
     effective_context_window_for_upstream, known_upstream_models_with_baseline,
     mapping_declares_one_m_context, model_matches_with_baseline, model_state_key_with_mode,
@@ -142,6 +144,12 @@ const CUSTOM_TOOL_INPUT_DESCRIPTION: &str =
     "Raw string input for the original custom tool. Preserve formatting exactly and follow the original tool definition embedded in the description.";
 const CUSTOM_TOOL_PRESERVED_METADATA_HEADING: &str = "Original tool definition:";
 const ROUTE_PROXY_PLATFORM_HEADER: &str = "x-ai-switch-platform";
+
+/// 视频端点要求账号声明的能力（`requested_video_capability` 的返回值）。
+///
+/// 提成常量是因为它有**两个**必须一致的消费方：请求期的候选过滤，以及
+/// `video_route_groups`（跨供应商选号）。两处写两遍字面量迟早漂移。
+const VIDEO_GENERATE_CAPABILITY: &str = "video.generate";
 pub const ROUTE_PROXY_TRACE_HEADER: &str = "x-ai-switch-test-trace-id";
 const ROUTE_PROXY_CORS_ALLOW_METHODS: &str = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 const ROUTE_PROXY_CORS_DEFAULT_ALLOW_HEADERS: &str =
@@ -622,18 +630,15 @@ impl RouteProxyService {
         pool: &SqlitePool,
         platform: &str,
     ) -> Result<String, AppError> {
-        let platform = PlatformId::parse(platform)?;
-        if let Some(existing) =
-            RouteProxyKeyRepository::get_by_platform(pool, platform.as_str()).await?
-        {
+        let platform = PlatformId::parse(platform)?.as_str();
+        if let Some(existing) = RouteProxyKeyRepository::get_by_platform(pool, platform).await? {
             if !existing.starts_with("sk-ai-switch-test-") {
                 return Ok(existing);
             }
 
             let replacement = generate_route_proxy_key();
-            RouteProxyKeyRepository::replace_platform_key(pool, platform.as_str(), &replacement)
-                .await?;
-            return RouteProxyKeyRepository::get_by_platform(pool, platform.as_str())
+            RouteProxyKeyRepository::replace_platform_key(pool, platform, &replacement).await?;
+            return RouteProxyKeyRepository::get_by_platform(pool, platform)
                 .await?
                 .ok_or_else(|| AppError::Database {
                     code: "database.route_proxy_key_missing_after_rotate",
@@ -643,12 +648,8 @@ impl RouteProxyService {
                 });
         }
 
-        RouteProxyKeyRepository::ensure_platform_key(
-            pool,
-            platform.as_str(),
-            &generate_route_proxy_key(),
-        )
-        .await
+        RouteProxyKeyRepository::ensure_platform_key(pool, platform, &generate_route_proxy_key())
+            .await
     }
 
     pub async fn status(state: &RouteProxyRuntimeState) -> RouteProxyStatus {
@@ -5357,6 +5358,88 @@ async fn load_request_candidates(
     .await
 }
 
+/// 视频路由的一组账号：**同一个上游方言**（`config_json.interface_format`）。
+///
+/// 视频只有一个平台 `video`，方言在账号自己身上，所以「落到哪家」要等选完账号
+/// 才知道——上游请求体的形状取决于它。这个结构就是「选完账号」的产物。
+#[derive(Debug, Clone)]
+pub(crate) struct VideoRouteGroup {
+    /// 账号声明的 `interface_format`（原样，未归一；解析交给 `videogen`）
+    pub interface_format: String,
+    /// 该方言下可用账号，已按 `route_priority` 升序 + 游标轮转排好序
+    pub credential_ids: Vec<String>,
+}
+
+/// 把「能服务这个 model」的视频账号按方言分组并排序（跨供应商路由的选号步骤）。
+///
+/// 一次做完候选加载 → 模型过滤 → `video.generate` 能力过滤 → 冷却剔除 →
+/// 优先级/游标排序，然后按 `interface_format` 分组。组序 = 组内首个账号在排序里的
+/// 位置，所以游标推进时「哪家优先」也会跟着轮转。
+///
+/// 为什么放在这里而不是 `videogen`：`partition_by_cooldown` /
+/// `credential_indexes_by_priority` / `load_candidate_model_states` 都是本模块的
+/// 内部机制，让视频侧再实现一遍必然漂移。
+/// 跨供应商选号的结果。
+#[derive(Debug, Clone)]
+pub(crate) struct VideoRoutePlan {
+    /// 按选择顺序排好的方言分组，**第一组优先**
+    pub groups: Vec<VideoRouteGroup>,
+    /// 候选账号总数与当前游标。
+    ///
+    /// 调用方成功后按 `(cursor + 1) % ready_len` 推进——必须由调用方推进，因为
+    /// 视频每次提交只钉**一个**账号（轮询要回到它），而 `forward_request` 的游标
+    /// 推进是 `(0 + 1) % 1 = 0`，会把游标按回 0，轮转就停了。
+    pub cursor: i64,
+    pub ready_len: usize,
+}
+
+pub(crate) async fn video_route_plan(
+    pool: &SqlitePool,
+    model: &str,
+    credential_ids: Option<&HashSet<String>>,
+) -> Result<VideoRoutePlan, AppError> {
+    let platform = crate::models::platform::VIDEO_PLATFORM;
+    let candidates = load_scoped_candidates(pool, platform, credential_ids).await?;
+    // 只留「这个 model 在它自己的方言下可用、且声明了 video.generate」的账号
+    let matched = candidates
+        .into_iter()
+        .filter(|candidate| {
+            supports_requested_capability_with_mode(
+                platform,
+                &candidate_capability(candidate),
+                Some(model),
+                VIDEO_GENERATE_CAPABILITY,
+                ModelMatchMode::ClientFacing,
+            )
+        })
+        .collect::<Vec<_>>();
+    if matched.is_empty() {
+        return Ok(VideoRoutePlan { groups: Vec::new(), cursor: 0, ready_len: 0 });
+    }
+    let model_states = load_candidate_model_states(pool, &matched).await?;
+    let ready = partition_by_cooldown(matched, &model_states, Utc::now());
+    if ready.is_empty() {
+        return Ok(VideoRoutePlan { groups: Vec::new(), cursor: 0, ready_len: 0 });
+    }
+    let ready_len = ready.len();
+    let cursor = RoutePoolRepository::next_cursor_index(pool, platform).await?;
+    let order = credential_indexes_by_priority(&ready, cursor);
+    let mut groups: Vec<VideoRouteGroup> = Vec::new();
+    for index in order {
+        let credential = &ready[index];
+        let interface_format =
+            config_string_field(&credential.config_json, "interface_format").unwrap_or_default();
+        match groups.iter_mut().find(|group| group.interface_format == interface_format) {
+            Some(group) => group.credential_ids.push(credential.id.clone()),
+            None => groups.push(VideoRouteGroup {
+                interface_format,
+                credential_ids: vec![credential.id.clone()],
+            }),
+        }
+    }
+    Ok(VideoRoutePlan { groups, cursor, ready_len })
+}
+
 async fn load_scoped_candidates(
     pool: &SqlitePool,
     platform: &str,
@@ -5547,7 +5630,7 @@ fn filter_candidates_for_rule(
 
 /// The capability the router judges a candidate by.
 ///
-fn candidate_capability(candidate: &PoolCandidate) -> ModelCapability {
+pub(crate) fn candidate_capability(candidate: &PoolCandidate) -> ModelCapability {
     parse_model_capability(&candidate.credential.config_json)
 }
 
@@ -5773,7 +5856,7 @@ fn requested_video_capability_for(path: &str) -> Option<&'static str> {
         || normalized.starts_with("/video/generations/")
         || normalized.starts_with("/v1/video/generations/")
     {
-        return Some("video.generate");
+        return Some(VIDEO_GENERATE_CAPABILITY);
     }
     None
 }
@@ -6220,6 +6303,13 @@ fn build_api_upstream_request(
     let platform = PlatformId::parse(platform).map_err(format_app_error)?;
     PlatformCapabilityService::require(platform, PlatformOperation::GenericApiRouting)
         .map_err(format_app_error)?;
+    // 视频走一条直路。账号的 `interface_format` 是**上游方言**（kling / ark / …），
+    // 不是文本的 `ApiDialect`（下面那句 `ApiDialect::parse` 会直接失败）；而且文本
+    // 那一整套「协议桥接 / 模型改写 / reasoning 清理 / 路径版本规范化」对视频全不
+    // 适用——请求体已经由 `videogen::protocol::upstream_body` 按方言建好了。
+    if platform.is_video() {
+        return build_video_upstream_request(credential, path, query, headers, body, secret, config);
+    }
     let dialect = match string_value(config, "interface_format") {
         Some(value) => ApiDialect::parse(value).map_err(format_app_error)?,
         None if matches!(
@@ -6422,6 +6512,45 @@ fn build_api_upstream_request(
         tool_namespaces,
         streaming_request,
         reasoning_sanitized,
+    })
+}
+
+/// 视频账号的上游请求：`base_url` + 路径 + `Authorization: Bearer` + **原样**请求体。
+///
+/// 为什么单独一条路：视频的请求体已经按方言建好，`interface_format` 存的是上游方言
+/// 而不是文本线协议。五家上游都用 Bearer，所以鉴权头与方言无关——方言只决定路径与
+/// 请求体，那两样都由 `videogen` 备好了。
+fn build_video_upstream_request(
+    credential: &SelectedCredential,
+    path: &str,
+    query: Option<&str>,
+    headers: &mut HeaderMap,
+    body: &[u8],
+    secret: &Value,
+    config: &Value,
+) -> Result<BuiltUpstreamRequest, String> {
+    let api_key = string_value(secret, "api_key").ok_or_else(|| {
+        format!(
+            "Route credential {} is missing api_key",
+            credential.display_name
+        )
+    })?;
+    let base_url = string_value(config, "base_url").ok_or_else(|| {
+        format!(
+            "Route credential {} is missing base_url",
+            credential.display_name
+        )
+    })?;
+    insert_header(headers, "authorization", &format!("Bearer {api_key}"))?;
+    let target_url = build_target_url(base_url, path, query);
+    Ok(BuiltUpstreamRequest {
+        target_url,
+        headers: headers.clone(),
+        body: body.to_vec(),
+        bridge_kind: None,
+        tool_namespaces: BTreeMap::new(),
+        streaming_request: false,
+        reasoning_sanitized: false,
     })
 }
 
@@ -7326,6 +7455,20 @@ fn parse_json_object(raw: &str, label: &str) -> Result<Value, String> {
     }
 }
 
+/// 从账号 `config_json`（**原始字符串**）里取一个非空字符串字段。
+fn config_string_field(config_json: &str, key: &str) -> Option<String> {
+    serde_json::from_str::<Value>(config_json)
+        .ok()
+        .and_then(|value| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+        })
+}
+
 fn string_value<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value
         .get(key)
@@ -7883,6 +8026,18 @@ mod image_path_tests {
     }
 }
 
+/// `/v1/models` 要按哪个能力过滤。
+///
+/// 视频渠道是**整平台**只做视频，而它的端点强制要求 `video.generate`，所以列出来的
+/// 必须是真能提交成功的那些。文本平台没有这一层（能力过滤只对图像/视频生效，
+/// 而图像与文本共用一个平台，没有单一正确答案），返回 `None` 保持原行为。
+pub(crate) fn models_list_capability(platform: &str) -> Option<&'static str> {
+    crate::models::platform::PlatformId::parse(platform)
+        .ok()
+        .filter(|platform| platform.is_video())
+        .map(|_| "video.generate")
+}
+
 fn is_models_list_path(path: &str) -> bool {
     matches!(path.trim().trim_end_matches('/'), "/models" | "/v1/models")
 }
@@ -7912,14 +8067,15 @@ fn build_models_list_payload_with_baseline(
         })
         .collect::<Vec<_>>();
     let members = catalog_members(&inputs);
-    let data: Vec<Value> = advertised_model_catalog_entries_with_baseline(
+    let data: Vec<Value> = advertised_model_catalog_entries_with_baseline_and_capability(
         platform,
         &members,
         mode,
         baseline_models,
+        models_list_capability(platform),
     )
-        .into_iter()
-        .map(|entry| {
+    .into_iter()
+    .map(|entry| {
             let mut model = json!({
                 "id": entry.id,
                 "object": "model",
@@ -8368,7 +8524,7 @@ fn default_official_base_url(platform: PlatformId) -> Result<&'static str, Strin
             Err("capability.unavailable: official account routing is unavailable".to_string())
         }
         // 视频渠道全是 API key 渠道；不存在官网上游地址可回退。
-        PlatformId::Video(_) => Err(
+        PlatformId::Video => Err(
             "capability.unavailable: official account routing is unavailable for video channels"
                 .to_string(),
         ),

@@ -540,7 +540,7 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
     sqlx::query(
         "INSERT INTO route_pool_groups
            (id,platform,name,sort_order,is_internal,is_active,created_at,updated_at)
-         VALUES('video-saas','video:kling','Video SaaS',10,0,1,'2026-01-01','2026-01-01')",
+         VALUES('video-saas','video','Video SaaS',10,0,1,'2026-01-01','2026-01-01')",
     )
     .execute(&pool)
     .await
@@ -548,13 +548,13 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
     sqlx::query(
         "INSERT INTO route_credentials
            (id,platform,kind,display_name,status,secret_payload_json,config_json,created_at,updated_at)
-         VALUES('video-account','video:kling','api','Kling','ok',?,?,'2026-01-01','2026-01-01')",
+         VALUES('video-account','video','api','Kling','ok',?,?,'2026-01-01','2026-01-01')",
     )
     .bind(r#"{"api_key":"upstream-video-key"}"#)
     .bind(
         json!({
             "base_url": format!("http://{address}/v1"),
-            "interface_format": "openai",
+            "interface_format": "kling",
             "model_mappings": [{
                 "from": "kling-v1",
                 "to": "kling-v1-upstream",
@@ -569,7 +569,7 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
     sqlx::query(
         "INSERT INTO route_pool_members
            (id,platform,route_credential_id,enabled,group_id,created_at,updated_at)
-         VALUES('video-member','video:kling','video-account',1,'video-saas','2026-01-01','2026-01-01')",
+         VALUES('video-member','video','video-account',1,'video-saas','2026-01-01','2026-01-01')",
     )
     .execute(&pool)
     .await
@@ -626,7 +626,7 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
     )
     .await
     .expect("video key authenticates");
-    assert_eq!(principal.platform, "video:kling");
+    assert_eq!(principal.platform, "video");
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -704,7 +704,7 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
     assert_eq!(logs.total, 1);
     assert_eq!(logs.items[0].amount_usd_micros, 60_000);
     assert_eq!(logs.items[0].model, "kling-v1");
-    assert_eq!(logs.items[0].platform, "video:kling");
+    assert_eq!(logs.items[0].platform, "video");
 
     upstream.abort();
 }
@@ -724,7 +724,7 @@ async fn saas_video_key_cannot_reach_text_endpoints() {
     sqlx::query(
         "INSERT INTO route_pool_groups
            (id,platform,name,sort_order,is_internal,is_active,created_at,updated_at)
-         VALUES('video-saas','video:kling','Video SaaS',10,0,1,'2026-01-01','2026-01-01')",
+         VALUES('video-saas','video','Video SaaS',10,0,1,'2026-01-01','2026-01-01')",
     )
     .execute(&pool)
     .await
@@ -805,7 +805,7 @@ async fn video_billing_fixture(
     sqlx::query(
         "INSERT INTO route_pool_groups
            (id,platform,name,sort_order,is_internal,is_active,created_at,updated_at)
-         VALUES('video-saas','video:kling','Video SaaS',10,0,1,'2026-01-01','2026-01-01')",
+         VALUES('video-saas','video','Video SaaS',10,0,1,'2026-01-01','2026-01-01')",
     )
     .execute(&pool)
     .await
@@ -813,12 +813,12 @@ async fn video_billing_fixture(
     sqlx::query(
         "INSERT INTO route_credentials
            (id,platform,kind,display_name,status,secret_payload_json,config_json,created_at,updated_at)
-         VALUES('video-account','video:kling','api','Kling','ok','{}',?,'2026-01-01','2026-01-01')",
+         VALUES('video-account','video','api','Kling','ok','{}',?,'2026-01-01','2026-01-01')",
     )
     .bind(
         json!({
             "base_url": "http://127.0.0.1:1/v1",
-            "interface_format": "openai",
+            "interface_format": "kling",
             "model_mappings": [{
                 "from": "kling-v1",
                 "to": "kling-v1",
@@ -833,7 +833,7 @@ async fn video_billing_fixture(
     sqlx::query(
         "INSERT INTO route_pool_members
            (id,platform,route_credential_id,enabled,group_id,created_at,updated_at)
-         VALUES('video-member','video:kling','video-account',1,'video-saas','2026-01-01','2026-01-01')",
+         VALUES('video-member','video','video-account',1,'video-saas','2026-01-01','2026-01-01')",
     )
     .execute(&pool)
     .await
@@ -967,6 +967,7 @@ async fn saas_video_status_is_available_and_scoped_to_its_owner() {
             model: "kling-v1".into(),
             upstream_model: Some("kling-v1-upstream".into()),
             dialect: "kling".into(),
+            credential_id: Some("video-account".into()),
             upstream_task_id: Some("upstream-1".into()),
             callback_url: None,
             owner_user_id: Some(principal.user_id.clone()),
@@ -995,6 +996,7 @@ async fn saas_video_status_is_available_and_scoped_to_its_owner() {
             model: "kling-v1".into(),
             upstream_model: None,
             dialect: "kling".into(),
+            credential_id: Some("video-account".into()),
             upstream_task_id: Some("upstream-2".into()),
             callback_url: None,
             owner_user_id: Some("someone-else".into()),

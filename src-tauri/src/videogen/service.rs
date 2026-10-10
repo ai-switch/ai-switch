@@ -16,16 +16,20 @@
 
 use super::models::*;
 use super::protocol::{
-    dialect_from_provider_kind, parse_upstream_status, parse_upstream_submit, status_response,
+    dialect_from_interface_format, parse_upstream_status, parse_upstream_submit, status_response,
     submit_response, upstream_body, upstream_status_path, upstream_submit_path,
     validate_callback_url, CallbackTargetPolicy, UpstreamStatus, VideoDialect,
     VideoGenerationRequest, VideoTaskStatus,
 };
 use super::repository::VideoGenerationRepository;
 use crate::app_state::AppState;
+use crate::database::repositories::route_pool_repository::RoutePoolRepository;
 use crate::error::AppError;
-use crate::models::platform::PlatformId;
-use crate::services::route_proxy_service::{build_proxy_state, forward_request, ProxyAppState};
+use crate::models::platform::{PlatformId, VIDEO_PLATFORM};
+use crate::services::route_proxy_service::{
+    build_proxy_state, classify_proxy_failure, forward_request, video_route_plan, ProxyAppState,
+    ProxyFailureKind,
+};
 use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, HeaderValue, Method, Uri};
 use serde::Deserialize;
@@ -53,7 +57,7 @@ const MAX_POLL_ATTEMPTS: i64 = 240;
 /// 入站提交输入（HTTP 层的 `POST /v1/video/generations` 直传）
 #[derive(Debug, Clone, Deserialize)]
 pub struct SubmitVideoInput {
-    /// 渠道平台 id（形如 `video:kling`）。HTTP 层从 `Provider.kind` 或请求头取。
+    /// 渠道平台 id。**只有 `video` 一个值**；供应商由请求里的 `model` 名决定。
     pub platform: String,
     pub request: VideoGenerationRequest,
     /// 可选：挂在某个会话/消息下（工作台调用）；网关直连时为空
@@ -86,13 +90,28 @@ pub struct SubmitVideoInput {
     pub owner_user_id: Option<String>,
 }
 
+/// 这次请求的路由目标：**方言 + 可尝试的账号**（已按优先级/游标排好序）。
+///
+/// 视频只有一个平台 `video`，供应商住在账号的 `interface_format` 里，而上游请求体
+/// 的形状取决于方言 —— 所以「选账号」必须发生在「建体」之前。这个结构就是那个中间产物。
+struct SelectedRouteGroup {
+    dialect: VideoDialect,
+    credential_ids: Vec<String>,
+    /// 候选总数与本次游标，成功后用来推进轮转
+    ready_len: usize,
+    cursor: i64,
+}
+
 /// 提交结果：对外契约体 + 落库的任务
 pub struct VideoGenerationService;
 
 impl VideoGenerationService {
     /// 提交一次视频生成，返回 new-api 契约的 201 响应体（已序列化）。
     ///
-    /// 方言取自 `platform`（`video:kling` → `Kling`）。
+    /// **平台只有一个 `video`；供应商由请求里的 `model` 名决定。** 可灵 / 方舟 /
+    /// MiniMax / 智谱 / Sora 的差别是线协议，住在账号的 `config_json.interface_format`
+    /// 里，所以流程是：按 model 选账号 → 从选中账号读出方言 → 用那个方言建体 →
+    /// 把请求钉到那个账号。这就是「跨供应商路由」，不需要额外的模式开关。
     ///
     /// **两个模型名要分清**：
     ///   - `request.model` 是客户端看到的名字，进 201 响应体与任务表的 `model` 列；
@@ -107,14 +126,22 @@ impl VideoGenerationService {
     /// 而任务的生命周期由轮询循环接管，调用方拿着任务行也没有可做的事。
     pub async fn submit(state: &AppState, input: SubmitVideoInput) -> Result<Vec<u8>, AppError> {
         let platform = input.platform.trim();
-        let dialect = dialect_from_provider_kind(platform).ok_or_else(|| {
-            validation(
+        if PlatformId::parse(platform).ok() != Some(PlatformId::Video) {
+            return Err(validation(
                 "validation.video_platform",
-                "Video channel platform must look like video:kling / video:seedance",
-            )
-        })?;
+                &format!(
+                    "Video generation requires the '{VIDEO_PLATFORM}' platform; the vendor is the account's interface_format"
+                ),
+            ));
+        }
         let request = input.request;
         let model = request.model.trim().to_string();
+        if model.is_empty() {
+            return Err(validation(
+                "validation.video_request",
+                "A model is required",
+            ));
+        }
         let upstream_model = input
             .upstream_model
             .as_deref()
@@ -141,13 +168,21 @@ impl VideoGenerationService {
                 .map_err(|error| validation("validation.video_callback", &error))?;
         }
 
+        // 选号（含方言）：必须早于建体，因为上游请求体的形状由方言决定。
+        let group =
+            Self::select_route_group(state, &model, input.credential_ids.as_deref()).await?;
+
         let has_image = request.image.is_some();
-        let body = upstream_body(dialect, &upstream_model, &request)
+        let body = upstream_body(group.dialect, &upstream_model, &request)
             .map_err(|error| validation("videogen.upstream_body", &error))?;
-        let path = upstream_submit_path(dialect, has_image);
-        let upstream_task_id =
-            Self::forward_submit(state, platform, &path, body, input.credential_ids.as_deref())
+        let path = upstream_submit_path(group.dialect, has_image);
+        let (upstream_task_id, credential_id) =
+            Self::forward_submit(state, platform, group.dialect, &path, body, &group.credential_ids)
                 .await?;
+
+        // 轮转：`forward_request` 只看到一个账号，它的推进是 `(0+1)%1=0`，
+        // 会把游标按回 0，所以这里按整个候选列表推进一格。
+        Self::advance_route_cursor(state, group.cursor, group.ready_len).await;
 
         let task_id = Uuid::new_v4().to_string();
         VideoGenerationRepository::create_task(
@@ -158,7 +193,9 @@ impl VideoGenerationService {
                 message_id: input.message_id,
                 model: model.clone(),
                 upstream_model: Some(upstream_model),
-                dialect: dialect.as_str().to_string(),
+                dialect: group.dialect.as_str().to_string(),
+                // **必须记住提交者**：上游的任务按账号隔离，轮询用别的账号查会 404。
+                credential_id: Some(credential_id),
                 upstream_task_id: Some(upstream_task_id),
                 callback_url: request.callback_url().map(str::to_string),
                 owner_user_id: input.owner_user_id,
@@ -167,6 +204,52 @@ impl VideoGenerationService {
         .await?;
 
         Ok(submit_response(&model, &task_id))
+    }
+
+    /// 选出这次请求要用的方言与账号集合。
+    ///
+    /// 落到哪家完全由 `model` 名决定：谁映射了这个 model（且该映射声明
+    /// `video.generate`）就是谁。同名模型映射在多家时，按账号的
+    /// `route_priority` + 游标顺序取第一组——也就是跨供应商的轮转。
+    async fn select_route_group(
+        state: &AppState,
+        model: &str,
+        credential_ids: Option<&[String]>,
+    ) -> Result<SelectedRouteGroup, AppError> {
+        // SaaS 的组白名单：`Some(空集)` 的语义是「一个都不允许」（fail closed），
+        // 所以这里不能把空集归一成 `None`。
+        let scope = credential_ids.map(|ids| ids.iter().cloned().collect::<std::collections::HashSet<_>>());
+        let plan = video_route_plan(&state.pool, model, scope.as_ref()).await?;
+        let Some(group) = plan.groups.into_iter().next() else {
+            return Err(validation(
+                "route_pool.model_unmatched",
+                &format!("No enabled video channel supports model '{model}'"),
+            ));
+        };
+        let dialect = dialect_from_interface_format(&group.interface_format).ok_or_else(|| {
+            validation(
+                "validation.video_interface_format",
+                &format!(
+                    "Video channel has an unsupported interface_format '{}'; expected kling / ark / minimax / zhipu / sora",
+                    group.interface_format
+                ),
+            )
+        })?;
+        Ok(SelectedRouteGroup {
+            dialect,
+            credential_ids: group.credential_ids,
+            ready_len: plan.ready_len,
+            cursor: plan.cursor,
+        })
+    }
+
+    /// 成功后把跨供应商游标推进一格（见 `VideoRoutePlan` 的说明）。
+    async fn advance_route_cursor(state: &AppState, cursor: i64, ready_len: usize) {
+        if ready_len == 0 {
+            return;
+        }
+        let next = (cursor + 1) % ready_len as i64;
+        let _ = RoutePoolRepository::save_cursor_index(&state.pool, VIDEO_PLATFORM, next).await;
     }
 
     /// 查询任务状态（new-api 契约响应体）。
@@ -192,35 +275,49 @@ impl VideoGenerationService {
         ))
     }
 
-    /// 向 `forward_request` 打一次上游提交请求，返回上游 task_id。
+    /// 向 `forward_request` 打一次上游提交，返回 `(上游 task_id, 实际用的账号 id)`。
     ///
-    /// `credential_ids` 非空时收窄账号池（SaaS 计费用）。
+    /// **每次只钉一个账号。** 轮询必须回到提交它的那一个（上游的任务按账号隔离，
+    /// 换个账号查会 404/403），所以「用了谁」必须是确定的、能记下来的。代价是
+    /// `forward_request` 内部的多账号 failover 用不上，改由这里自己轮：一个账号
+    /// 失败时按 `classify_proxy_failure` 判断值不值得换下一个——方言不变（同一组），
+    /// 所以请求体可以直接复用。
     async fn forward_submit(
         state: &AppState,
         platform: &str,
+        dialect: VideoDialect,
         path: &str,
         body: Vec<u8>,
-        credential_ids: Option<&[String]>,
-    ) -> Result<String, AppError> {
-        let proxy = Self::proxy_state(state, platform, credential_ids)?;
-        let mut headers = HeaderMap::new();
-        headers.insert("content-type", HeaderValue::from_static("application/json"));
-        headers.insert(
-            "x-ai-switch-platform",
-            HeaderValue::from_str(platform).map_err(|error| {
-                validation("validation.video_platform", &error.to_string())
-            })?,
-        );
-        let uri = Uri::from_str_checked(path)?;
-        let response = forward_request(&proxy, Method::POST, headers, uri, Body::from(body))
-            .await
-            .map_err(|error| validation("videogen.submit_failed", &error))?;
-        let status = response.status();
-        let bytes = to_bytes(response.into_body(), UPSTREAM_RESPONSE_LIMIT)
-            .await
-            .map_err(|error| validation("videogen.upstream_body", &error.to_string()))?;
-        if !status.is_success() {
-            return Err(validation(
+        account_ids: &[String],
+    ) -> Result<(String, String), AppError> {
+        let mut last_error: Option<AppError> = None;
+        for account_id in account_ids {
+            let single = [account_id.clone()];
+            let proxy = Self::proxy_state(state, platform, Some(&single))?;
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", HeaderValue::from_static("application/json"));
+            let uri = Uri::from_str_checked(path)?;
+            let response =
+                match forward_request(&proxy, Method::POST, headers, uri, Body::from(body.clone()))
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        last_error = Some(validation("videogen.submit_failed", &error));
+                        continue;
+                    }
+                };
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), UPSTREAM_RESPONSE_LIMIT)
+                .await
+                .map_err(|error| validation("videogen.upstream_body", &error.to_string()))?;
+            if status.is_success() {
+                let upstream_task_id = parse_upstream_submit(dialect, &bytes)
+                    .map_err(|error| validation("videogen.upstream_response", &error))?;
+                return Ok((upstream_task_id, account_id.clone()));
+            }
+            let kind = classify_proxy_failure(Some(status), None);
+            last_error = Some(validation(
                 "videogen.submit_failed",
                 &format!(
                     "Video upstream returned {}: {}",
@@ -228,13 +325,20 @@ impl VideoGenerationService {
                     preview(&bytes)
                 ),
             ));
+            // 只有瞬时失败才值得换账号：4xx 换谁都一样，白烧配额。
+            if kind != ProxyFailureKind::Transient {
+                break;
+            }
         }
-        let dialect = Self::dialect_of(platform)?;
-        parse_upstream_submit(dialect, &bytes)
-            .map_err(|error| validation("videogen.upstream_response", &error))
+        Err(last_error.unwrap_or_else(|| {
+            validation(
+                "videogen.submit_failed",
+                "No video channel account was available for this request",
+            )
+        }))
     }
 
-    /// 构造一个把平台固定成给定视频渠道的代理状态。
+    /// 构造一个把请求钉死在视频平台（可再钉到具体账号）的代理状态。
     ///
     /// **必须固定平台。** `forward_request` 里 `resolve_platform` 的取值顺序是
     /// 「入站 key → `x-ai-switch-platform` 请求头」；不设 `access_scope` 时，一个
@@ -280,15 +384,13 @@ impl VideoGenerationService {
             )
         })?;
         let path = upstream_status_path(dialect, upstream_task_id);
-        // 轮询也用锁死平台的状态，理由同 `forward_submit`：视频任务必须回到
-        // 它当初提交的那个渠道去查，不能被别的平台头带跑。
-        let proxy = Self::proxy_state(state, &task.platform_hint(), None)?;
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-ai-switch-platform",
-            HeaderValue::from_str(&task.platform_hint())
-                .map_err(|error| validation("validation.video_platform", &error.to_string()))?,
-        );
+        // **必须回到提交时那个账号**：上游的任务是按账号隔离的，用别的账号的 key
+        // 查会拿到 404/403。平台统一成 `video` 之后账号变多，靠「按平台重选一个」
+        // 几乎必然选错，所以提交时就把 `credential_id` 记在了任务行上。
+        // 老行（迁移前）没有这个值，退回「只钉平台」。
+        let pinned = task.credential_id.as_deref().map(|id| vec![id.to_string()]);
+        let proxy = Self::proxy_state(state, VIDEO_PLATFORM, pinned.as_deref())?;
+        let headers = HeaderMap::new();
         let uri = Uri::from_str_checked(&query_path(dialect, &path, upstream_task_id))?;
         let response = forward_request(&proxy, Method::GET, headers, uri, Body::empty())
             .await
@@ -558,29 +660,6 @@ impl VideoGenerationService {
         }
     }
 
-    fn dialect_of(platform: &str) -> Result<VideoDialect, AppError> {
-        // 走 `PlatformId` 而不是直接 `dialect_from_provider_kind`：解析只有一处
-        // （`models::platform`），方言经 `From<VideoProtocol>` 桥接过来。这样
-        // `video:kling` 的取值集合与平台枚举天然一致，不会再有两份别名表。
-        PlatformId::parse(platform)
-            .ok()
-            .and_then(PlatformId::video_protocol)
-            .map(VideoDialect::from)
-            .ok_or_else(|| {
-                validation(
-                    "validation.video_platform",
-                    "Video channel platform must look like video:kling / video:seedance",
-                )
-            })
-    }
-}
-
-impl VideoTask {
-    /// 轮询时用的平台标识。任务表没有单独存 platform 列（`dialect` 就是它的
-    /// 协议段），这里把它还原成 `video:<dialect>` 交给 `forward_request` 解析。
-    fn platform_hint(&self) -> String {
-        format!("video:{}", self.dialect)
-    }
 }
 
 /// MiniMax 的轮询把 task_id 放在 query string 上，其余方言走路径参数。
@@ -660,35 +739,6 @@ mod tests {
         assert_eq!(
             query_path(VideoDialect::Kling, "/v1/videos/text2video/t-1", "t-1"),
             "/v1/videos/text2video/t-1"
-        );
-    }
-
-    #[test]
-    fn platform_hint_round_trips_to_a_dialect() {
-        let task = VideoTask {
-            task_id: "t".into(),
-            session_id: None,
-            message_id: None,
-            model: "m".into(),
-            upstream_model: None,
-            dialect: "kling".into(),
-            status: "processing".into(),
-            upstream_task_id: Some("k-1".into()),
-            url: None,
-            error_message: None,
-            callback_url: None,
-            callback_delivered: false,
-            callback_attempts: 0,
-            attempt_count: 0,
-            owner_user_id: None,
-            last_polled_at: None,
-            created_at: "2026-01-01".into(),
-            updated_at: "2026-01-01".into(),
-        };
-        assert_eq!(task.platform_hint(), "video:kling");
-        assert_eq!(
-            dialect_from_provider_kind(&task.platform_hint()),
-            Some(VideoDialect::Kling)
         );
     }
 
@@ -776,13 +826,13 @@ mod tests {
             axum::serve(listener, upstream).await.unwrap();
         });
 
-        // ── 真库 + 一个 video:kling 账号（能力必须是 video.generate）──
+        // ── 真库 + 一个 video 平台、interface_format=kling 的账号（能力必须是 video.generate）──
         let pool = create_memory_pool().await.unwrap();
         run_migrations(&pool).await.unwrap();
         sqlx::query(
             "INSERT INTO route_pool_groups
                (id,platform,name,sort_order,is_internal,is_active,created_at,updated_at)
-             VALUES('video-test','video:kling','Video test',10,0,1,'2026-01-01','2026-01-01')",
+             VALUES('video-test','video','Video test',10,0,1,'2026-01-01','2026-01-01')",
         )
         .execute(&pool)
         .await
@@ -790,14 +840,15 @@ mod tests {
         sqlx::query(
             "INSERT INTO route_credentials
                (id,platform,kind,display_name,status,secret_payload_json,config_json,created_at,updated_at)
-             VALUES('kling-account','video:kling','api','Kling','ok',?,?,'2026-01-01','2026-01-01')",
+             VALUES('kling-account','video','api','Kling','ok',?,?,'2026-01-01','2026-01-01')",
         )
         .bind(r#"{"api_key":"upstream-video-key"}"#)
         .bind(
             json!({
                 // 「模态:协议」落在 `platform` 列（`kind` 只有 official/api 两种取值）。
                 "base_url": format!("http://{address}/v1"),
-                "interface_format": "openai",
+                // 供应商住在账号的 interface_format 里，不在 platform 里
+                "interface_format": "kling",
                 "model_mappings": [{
                     "from": "kling-v1",
                     "to": "kling-v1",
@@ -812,7 +863,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO route_pool_members
                (id,platform,route_credential_id,enabled,group_id,created_at,updated_at)
-             VALUES('video-member','video:kling','kling-account',1,'video-test','2026-01-01','2026-01-01')",
+             VALUES('video-member','video','kling-account',1,'video-test','2026-01-01','2026-01-01')",
         )
         .execute(&pool)
         .await
@@ -824,7 +875,7 @@ mod tests {
         let submitted = VideoGenerationService::submit(
             &state,
             SubmitVideoInput {
-                platform: "video:kling".into(),
+                platform: "video".into(),
                 request: VideoGenerationRequest::parse(
                     json!({
                         "model": "kling-v1",

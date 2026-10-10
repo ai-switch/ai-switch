@@ -20,7 +20,9 @@
 //! （`sk-ai-switch-codex` 等）一样。把自定义头当主路径会让本端点对 OpenAI
 //! 兼容客户端不可用。
 //!
-//! 平台必须形如 `video:kling`（`Provider.kind` 的「模态:协议」语义，G-P1）。
+//! 平台**只有 `video` 一个值**。可灵 / 方舟 / MiniMax / 智谱 / Sora 的差别是线协议，
+//! 住在账号的 `config_json.interface_format` 里，落到哪家由请求里的 `model` 名决定
+//! （谁映射了这个 model 就是谁）——所以调用方**不需要、也不应该**指定供应商。
 //!
 //! **鉴权。** 本模块不自己鉴权：所有请求先经 `shared_fallback`（它已经完成了
 //! API key / 本地 token 校验与 SaaS 分流），到这里时身份已经确定。
@@ -159,16 +161,20 @@ async fn resolve_video_platform(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
                 "A video channel platform is required: authenticate with a video channel key \
-                 (Authorization: Bearer sk-ai-switch-…), or send x-ai-switch-platform: video:kling",
+                 (Authorization: Bearer sk-ai-switch-…), or send x-ai-switch-platform: video",
             ))
         }
     };
-    if crate::videogen::protocol::dialect_from_provider_kind(&platform).is_none() {
+    // 平台只有一个 `video`；供应商由请求里的 `model` 名决定，不由调用方指定。
+    if crate::models::platform::PlatformId::parse(&platform).ok()
+        != Some(crate::models::platform::PlatformId::Video)
+    {
         return Err(error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             &format!(
-                "Video channel platform '{platform}' is not supported; expected a form like video:kling"
+                "Video generation requires the '{}' platform; got '{platform}'",
+                crate::models::platform::VIDEO_PLATFORM
             ),
         ));
     }
@@ -351,21 +357,21 @@ mod tests {
     #[test]
     fn resolves_platform_from_header_then_body() {
         let mut headers = HeaderMap::new();
-        headers.insert(PLATFORM_HEADER, "video:kling".parse().unwrap());
+        headers.insert(PLATFORM_HEADER, "video".parse().unwrap());
         assert_eq!(
             platform_from_request_fields(&headers, b"{}").as_deref(),
-            Some("video:kling")
+            Some("video")
         );
 
         let empty = HeaderMap::new();
         assert_eq!(
-            platform_from_request_fields(&empty, br#"{"platform":"video:seedance"}"#).as_deref(),
-            Some("video:seedance")
+            platform_from_request_fields(&empty, br#"{"platform":"video"}"#).as_deref(),
+            Some("video")
         );
         // 请求头优先于请求体字段
         assert_eq!(
-            platform_from_request_fields(&headers, br#"{"platform":"video:seedance"}"#).as_deref(),
-            Some("video:kling")
+            platform_from_request_fields(&headers, br#"{"platform":"video"}"#).as_deref(),
+            Some("video")
         );
         // 两者都没有 → 没有可用的平台
         assert_eq!(platform_from_request_fields(&empty, b"{}"), None);
@@ -384,13 +390,9 @@ mod tests {
 
         let pool = create_memory_pool().await.expect("pool");
         run_migrations(&pool).await.expect("migrations");
-        let key = RouteProxyKeyRepository::ensure_platform_key(
-            &pool,
-            "video:kling",
-            "sk-ai-switch-video-kling",
-        )
-        .await
-        .expect("mint key");
+        let key = RouteProxyKeyRepository::ensure_platform_key(&pool, "video", "sk-ai-switch-video")
+            .await
+            .expect("mint key");
 
         // 只带 Authorization，不带任何自定义头 —— 这就是 OpenAI 客户端的样子
         let mut headers = HeaderMap::new();
@@ -403,7 +405,7 @@ mod tests {
                 .await
                 .ok()
                 .as_deref(),
-            Some("video:kling")
+            Some("video")
         );
 
         // 文本平台的 key 不该能用来调视频端点

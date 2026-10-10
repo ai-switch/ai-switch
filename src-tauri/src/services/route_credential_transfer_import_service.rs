@@ -61,6 +61,15 @@ mod tests {
     }
 
     fn compatibility_item(platform: &str) -> Map<String, Value> {
+        compatibility_item_with_dialect(platform, "openai", "openai-compatibility")
+    }
+
+    /// 带显式 `interface_format` 与分区的版本：视频账号的供应商住在这个字段里。
+    fn compatibility_item_with_dialect(
+        platform: &str,
+        interface_format: &str,
+        section: &str,
+    ) -> Map<String, Value> {
         object(json!({
             "name": "Compatibility fixture",
             "api-key-entries": [{"api-key": "fixture-key-material"}],
@@ -70,9 +79,9 @@ mod tests {
                 "schema_version": 1,
                 "platform": platform,
                 "kind": "api",
-                "cpa_section": "openai-compatibility",
+                "cpa_section": section,
                 "display_name": "Compatibility fixture",
-                "interface_format": "openai"
+                "interface_format": interface_format
             }
         }))
     }
@@ -1061,23 +1070,23 @@ mod tests {
         assert_eq!(preview.counts.duplicates, 1);
     }
 
-    /// 视频渠道可以走导入进来，平台串会归一成 `PlatformId::as_str()`。
+    /// 视频渠道可以走导入进来：**平台是 `video`，供应商在 `interface_format` 里**。
     ///
-    /// 侧边栏「视频」屏（`VideoChannelsScreen`）也能新增视频渠道，但导入是
-    /// **批量**那条路，且它依赖 `all_with_video()` 参与去重——少了它，
-    /// 同一路视频账号会被重复导入。同时钉住别名归一：`video:seedance` 落库要
-    /// 变成 `video:ark`。
+    /// 侧边栏「视频」屏（`VideoChannelsScreen`）也能新增视频渠道，但导入是**批量**
+    /// 那条路，且它依赖 `all_with_video()` 参与去重——少了它，同一路视频账号会被
+    /// 重复导入。
     #[tokio::test]
-    async fn video_channels_are_importable_and_normalize_to_their_canonical_platform() {
+    async fn video_channels_are_importable_with_their_upstream_dialect() {
         let pool = migrated_pool().await;
 
-        let mut kling = compatibility_item("video:kling");
+        let mut kling = compatibility_item_with_dialect("video", "kling", "openai-compatibility");
         kling.insert(
             "api-key-entries".to_string(),
             json!([{"api-key": "kling-key-material"}]),
         );
-        // `video:seedance` 是 Ark 的别名，落库必须归一成 `video:ark`
-        let mut seedance = compatibility_item("video:seedance");
+        // 别名（`seedance` → Ark）在导入时原样保留，由 `videogen` 的
+        // `dialect_from_interface_format` 认——这样导入不承担归一化的责任。
+        let mut seedance = compatibility_item_with_dialect("video", "seedance", "openai-compatibility");
         seedance.insert(
             "api-key-entries".to_string(),
             json!([{"api-key": "seedance-key-material"}]),
@@ -1114,14 +1123,20 @@ mod tests {
         .await
         .expect("import");
 
-        let platforms: Vec<String> =
-            sqlx::query_scalar("SELECT platform FROM route_credentials ORDER BY platform")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
+        // 平台都是 `video`，两家靠 interface_format 区分
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT platform, json_extract(config_json,'$.interface_format')
+             FROM route_credentials ORDER BY 2",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         assert_eq!(
-            platforms,
-            vec!["video:ark".to_string(), "video:kling".to_string()]
+            rows,
+            vec![
+                ("video".to_string(), "kling".to_string()),
+                ("video".to_string(), "seedance".to_string()),
+            ]
         );
     }
 
@@ -3492,10 +3507,19 @@ fn resolve_api_target(
         .map_err(|issue| (issue, true))?;
 
     let mut cpa_section = section_hint.map(str::to_string);
-    let expected_dialect = cpa_section
-        .as_deref()
-        .and_then(expected_dialect_for_section);
-    if cpa_section.is_some() && expected_dialect.is_none() {
+    // 视频条目复用 `openai-compatibility` 分区（`api-key-entries` / `base-url` 的
+    // 提取都是按分区走的，另造分区就拿不到 key），但**分区隐含的文本线协议对视频
+    // 不适用**：视频账号的 `interface_format` 是上游方言（kling / ark / …）。
+    // 所以平台声明为 video 时，跳过分区→方言的一致性检查。
+    let is_video_item = metadata.platform.is_some_and(|platform| platform.is_video());
+    let expected_dialect = if is_video_item {
+        None
+    } else {
+        cpa_section
+            .as_deref()
+            .and_then(expected_dialect_for_section)
+    };
+    if !is_video_item && cpa_section.is_some() && expected_dialect.is_none() {
         return Err((
             transfer_issue(
                 item_index,
@@ -3507,10 +3531,19 @@ fn resolve_api_target(
         ));
     }
 
-    let metadata_interface = metadata
-        .interface_format
-        .as_deref()
-        .map(|value| ApiDialect::parse(value).map(|dialect| (value.trim().to_string(), dialect)));
+    // `interface_format` 对文本账号是线协议（`ApiDialect`），对视频账号是**上游方言**
+    // （kling / ark / …）。只按文本解析会把视频账号判成非法，整条导入路径走不通。
+    let metadata_interface = metadata.interface_format.as_deref().map(|value| {
+        ApiDialect::parse(value)
+            .map(|dialect| (value.trim().to_string(), dialect))
+            .or_else(|error| {
+                if crate::videogen::protocol::dialect_from_interface_format(value).is_some() {
+                    Ok((value.trim().to_string(), VIDEO_DIALECT_PLACEHOLDER))
+                } else {
+                    Err(error)
+                }
+            })
+    });
     let metadata_interface = match metadata_interface {
         Some(Ok(value)) => Some(value),
         Some(Err(_)) => {
@@ -3983,6 +4016,12 @@ fn fixed_platform_for_section(section: &str) -> Option<PlatformId> {
         _ => None,
     }
 }
+
+/// 视频方言在导入链路里的占位。
+///
+/// 导入只需要一个「不是 Anthropic」的值（用来跳过 Anthropic 专属的
+/// `api_key_field` 处理），真正的方言串在 `interface_format` 里原样搬运。
+const VIDEO_DIALECT_PLACEHOLDER: ApiDialect = ApiDialect::OpenAi;
 
 fn is_supported_api_section(section: &str) -> bool {
     matches!(

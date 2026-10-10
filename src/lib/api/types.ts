@@ -125,11 +125,19 @@ export type ResponseBodyCleanup = {
   reclaimableBytes: number;
 };
 
+import type { VideoDialect } from "../videoPlatforms";
+
+/// 账号声明的线协议。
+///
+/// 文本平台用前四项（`ApiDialect`）；**视频平台用 `VideoDialect`**——视频的
+/// 「供应商」就是线协议（可灵 / 方舟 / … 的请求体形状各不相同），而平台恒为
+/// `video`。后端按平台分别校验，所以这里并成一个联合即可。
 export type InterfaceFormat =
   | "openai"
   | "openai-responses"
   | "anthropic"
-  | "gemini";
+  | "gemini"
+  | VideoDialect;
 
 export type AnthropicApiKeyField = "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN";
 

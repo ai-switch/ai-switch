@@ -79,7 +79,7 @@ pub(crate) async fn reconcile_group_connection(
     let group: Option<(String, bool)> = sqlx::query_as(
         "SELECT platform,is_internal FROM route_pool_groups
          WHERE id=? AND deleted_at IS NULL
-           AND (platform IN ('codex','claude','gemini') OR platform LIKE 'video:%')",
+           AND (platform IN ('codex','claude','gemini','video'))",
     )
     .bind(group_id)
     .fetch_optional(&mut *connection)

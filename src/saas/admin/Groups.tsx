@@ -3,7 +3,7 @@ import { Layers3, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { adminCall } from "../api";
 import type { PageResult, SaasCatalog, SaasGroup } from "../types";
 import { decimalToInteger, formatCount, formatMoney, integerToDecimal } from "../format";
-import { videoProtocolLabel } from "../../lib/videoPlatforms";
+import { VIDEO_PLATFORM } from "../../lib/videoPlatforms";
 import { useSaasLocale } from "../i18n";
 import { ActionFeedback, Button, Card, CheckField, Dialog, Empty, ErrorState, Field, Loading, Notice, Pagination, Table, useAction, useResource } from "../components/ui";
 
@@ -15,7 +15,7 @@ function platformLabel(platform: string): string {
   if (platform === "codex") return "Codex";
   if (platform === "gemini") return "Gemini";
   if (platform === "claude") return "Claude";
-  if (platform.startsWith("video:")) return `Video · ${videoProtocolLabel(platform)}`;
+  if (platform === VIDEO_PLATFORM) return "Video";
   return platform;
 }
 

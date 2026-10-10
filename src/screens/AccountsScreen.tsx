@@ -724,6 +724,13 @@ const interfaceFormatLabels: Record<InterfaceFormat, string> = {
   "openai-responses": "OpenAI Responses",
   anthropic: "Claude Messages",
   gemini: "Gemini",
+  // 视频账号的接口格式是上游方言。这一屏不提供它们作为选项
+  // （`routeInterfaceFormats` 只有文本四项），但账号抽屉可能显示到。
+  kling: "Kling",
+  ark: "Seedance",
+  minimax: "MiniMax",
+  zhipu: "Zhipu",
+  sora: "Sora",
 };
 
 function interfaceFormatLabel(value: InterfaceFormat | string | null | undefined) {

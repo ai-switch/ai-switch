@@ -68,6 +68,12 @@ pub struct VideoTask {
     pub upstream_model: Option<String>,
     pub dialect: String,
     pub status: String,
+    /// **提交这次任务的账号**。
+    ///
+    /// 上游的任务按账号隔离：换个账号的 key 查 `GET .../{id}` 会 404/403。
+    /// 平台统一成 `video` 之后账号数量变多，靠「按平台重选一个」几乎必然选错，
+    /// 所以必须记下来。迁移前的老行为 `None`（退回只钉平台）。
+    pub credential_id: Option<String>,
     pub upstream_task_id: Option<String>,
     pub url: Option<String>,
     pub error_message: Option<String>,
@@ -139,6 +145,7 @@ pub struct NewVideoTask {
     pub model: String,
     pub upstream_model: Option<String>,
     pub dialect: String,
+    pub credential_id: Option<String>,
     pub upstream_task_id: Option<String>,
     pub callback_url: Option<String>,
     /// SaaS 提交时填 principal.user_id；直连网关留 `None`。

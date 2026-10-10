@@ -80,20 +80,30 @@ fn api_fingerprint_material(value: &Value) -> Result<Value, AppError> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default_dialect_for_section(section));
-    let dialect = ApiDialect::parse(dialect_input).map_err(|_| {
-        validation_error(
-            "validation.transfer_fingerprint_api_dialect",
-            "API fingerprint dialect is not supported",
-            None,
-        )
-    })?;
-    if expected_dialect_for_section(section) != Some(dialect) {
-        return Err(validation_error(
-            "validation.transfer_fingerprint_api_dialect",
-            "API fingerprint dialect does not match its CPA section",
-            None,
-        ));
-    }
+    // 视频账号的 `interface_format` 是**上游方言**（kling / ark / …），不是文本的
+    // `ApiDialect`：它自己就是判别符（两家供应商靠它区分），所以不参与
+    // 「方言 vs 分区」的一致性检查，按原串进指纹材料。
+    let dialect_label = if crate::videogen::protocol::dialect_from_interface_format(dialect_input)
+        .is_some()
+    {
+        dialect_input.to_string()
+    } else {
+        let dialect = ApiDialect::parse(dialect_input).map_err(|_| {
+            validation_error(
+                "validation.transfer_fingerprint_api_dialect",
+                "API fingerprint dialect is not supported",
+                None,
+            )
+        })?;
+        if expected_dialect_for_section(section) != Some(dialect) {
+            return Err(validation_error(
+                "validation.transfer_fingerprint_api_dialect",
+                "API fingerprint dialect does not match its CPA section",
+                None,
+            ));
+        }
+        dialect.as_str().to_string()
+    };
     let headers = object.get("headers").cloned().unwrap_or_else(|| json!({}));
     let headers = normalize_headers(&headers);
     let models = input
@@ -117,7 +127,7 @@ fn api_fingerprint_material(value: &Value) -> Result<Value, AppError> {
         "kind": "api",
         "api_key": api_key,
         "endpoint": endpoint,
-        "dialect": dialect.as_str(),
+        "dialect": dialect_label,
         "cpa_section": section,
         "headers": headers,
         "model_mappings": models,

@@ -234,7 +234,7 @@ describe("SaaS administrator", () => {
     expect(payload.models[0]).toEqual(expect.objectContaining({ videoPriceMicros: 0, videoPricePerSecondMicros: 0 }));
   });
 
-  it("labels a video channel group with its protocol instead of Claude", async () => {
+  it("labels a video group as Video instead of Claude", async () => {
     const original = invoke.getMockImplementation()!;
     invoke.mockImplementation(async (command, request) => {
       if (request?.operation === "groups.list") return page([videoGroup]);
@@ -242,8 +242,8 @@ describe("SaaS administrator", () => {
     });
     render(<SaasAdmin />);
     await userEvent.click(screen.getByRole("button", { name: /^groups & pricing$/i }));
-    // 原来的三元表达式会把 `video:kling` 显示成 "Claude"
-    expect(await screen.findByText("Video · Kling")).toBeInTheDocument();
+    // 原来的三元表达式会把视频分组（非 codex/gemini）显示成 "Claude"
+    expect(await screen.findByText("Video")).toBeInTheDocument();
     expect(screen.queryByText("Claude")).not.toBeInTheDocument();
   });
 

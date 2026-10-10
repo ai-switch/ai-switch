@@ -40,41 +40,25 @@ impl VideoDialect {
             "ark" | "seedance" | "volcengine" | "doubao" => Some(VideoDialect::Ark),
             "minimax" | "hailuo" => Some(VideoDialect::MiniMax),
             "zhipu" | "cogvideo" | "bigmodel" => Some(VideoDialect::Zhipu),
-            "sora" | "openai" => Some(VideoDialect::Sora),
+            // 刻意**不**接受 `openai`：那是文本的 `ApiDialect` 名字，视频侧收了
+            // 它会让 `interface_format: "openai"` 变成「Sora」这种惊悚的巧合。
+            "sora" => Some(VideoDialect::Sora),
             _ => None,
         }
     }
 }
 
-/// `PlatformId::VideoProtocol` ↔ `VideoDialect`。
+/// 账号的 `config_json.interface_format` → 上游方言。
 ///
-/// 两张表必须逐字对齐：`PlatformId` 在 `models` 层（不能依赖 `videogen`，
-/// 否则循环依赖），协议解析在 `videogen` 层，所以中间靠这两个 impl 桥接。
-/// 两侧任何一边加了新方言而另一边没跟上，本文件的往返测试就会失败。
-impl From<crate::models::platform::VideoProtocol> for VideoDialect {
-    fn from(protocol: crate::models::platform::VideoProtocol) -> Self {
-        use crate::models::platform::VideoProtocol;
-        match protocol {
-            VideoProtocol::Kling => VideoDialect::Kling,
-            VideoProtocol::Ark => VideoDialect::Ark,
-            VideoProtocol::MiniMax => VideoDialect::MiniMax,
-            VideoProtocol::Zhipu => VideoDialect::Zhipu,
-            VideoProtocol::Sora => VideoDialect::Sora,
-        }
-    }
-}
-
-impl From<VideoDialect> for crate::models::platform::VideoProtocol {
-    fn from(dialect: VideoDialect) -> Self {
-        use crate::models::platform::VideoProtocol;
-        match dialect {
-            VideoDialect::Kling => VideoProtocol::Kling,
-            VideoDialect::Ark => VideoProtocol::Ark,
-            VideoDialect::MiniMax => VideoProtocol::MiniMax,
-            VideoDialect::Zhipu => VideoProtocol::Zhipu,
-            VideoDialect::Sora => VideoProtocol::Sora,
-        }
-    }
+/// **供应商就住在这里**，不在 `platform` 里：`platform` 只有 `video` 一个值
+/// （池身份：一张 key、一个 SaaS 组），可灵 / 方舟 / MiniMax / 智谱 / Sora 之间的
+/// 差别是线协议，所以由账号自己的 `interface_format` 承载——与文本平台同构
+/// （`platform = codex` 的账号可以挂 `interface_format: anthropic`）。
+///
+/// 别名（`seedance` / `hailuo` / `cogvideo` …）由 `VideoDialect::parse` 兜住，
+/// 所以手工填 `seedance` 也能工作，落库前会归一成 `ark`。
+pub fn dialect_from_interface_format(value: &str) -> Option<VideoDialect> {
+    VideoDialect::parse(value)
 }
 
 /// 统一任务状态（new-api 契约的三种取值）
@@ -809,14 +793,13 @@ mod tests {
         assert_eq!(request.callback_url(), None);
     }
 
-    /// `VideoDialect`（本模块）与 `PlatformId::VideoProtocol`（models 层）是两张
-    /// 平行表：分层要求它们不能互相引用，于是只能靠 `From` 桥接。这条测试就是
-    /// 那个桥的**唯一**守卫——任何一边新增方言而另一边漏了，往返立刻失败。
+    /// 方言名与 `interface_format` 的往返。
+    ///
+    /// 账号里存的就是 `as_str()` 的值，所以这条必须成立——改过名的账号会静默变成
+    /// 「方言不认识」，然后在提交时以 `validation.video_interface_format` 报出来，
+    /// 症状离根因很远。
     #[test]
-    fn dialect_and_platform_protocol_round_trip() {
-        use crate::models::platform::{PlatformId, VideoProtocol};
-
-        // 每个方言都要能被平台层解析出来，且字面量一致
+    fn interface_format_round_trips_through_the_dialect_table() {
         for dialect in [
             VideoDialect::Kling,
             VideoDialect::Ark,
@@ -824,28 +807,28 @@ mod tests {
             VideoDialect::Zhipu,
             VideoDialect::Sora,
         ] {
-            let protocol: VideoProtocol = dialect.into();
-            // 平台层的 `as_str()` 是 `Provider.kind` 的实际取值，必须正好是
-            // `video:<方言>`：这是「模态:协议」语义唯一的落地点。
-            let platform = PlatformId::Video(protocol);
-            assert_eq!(platform.as_str(), format!("video:{}", dialect.as_str()));
-            assert_eq!(VideoDialect::from(protocol), dialect);
             assert_eq!(
-                VideoProtocol::parse(dialect.as_str()),
-                Some(protocol),
-                "platform layer cannot parse {}",
+                dialect_from_interface_format(dialect.as_str()),
+                Some(dialect),
+                "{} did not round-trip",
                 dialect.as_str()
             );
-            // `video:<dialect>` 与 `dialect_from_provider_kind` 必须一致
-            assert_eq!(
-                dialect_from_provider_kind(platform.as_str()),
-                Some(dialect),
-                "{} did not resolve back to {:?}",
-                platform.as_str(),
-                dialect
-            );
         }
-        assert_eq!(VideoProtocol::ALL.len(), 5);
+        // 别名要认（手工填 `seedance` 不该失败），落库前由 `as_str()` 归一
+        assert_eq!(
+            dialect_from_interface_format("seedance"),
+            Some(VideoDialect::Ark)
+        );
+        assert_eq!(
+            dialect_from_interface_format("hailuo"),
+            Some(VideoDialect::MiniMax)
+        );
+        // **文本方言不是视频方言**：`openai` / `anthropic` 必须拒绝，否则
+        // 文本账号的 `interface_format` 会被误当成某个视频方言。
+        assert_eq!(dialect_from_interface_format("openai"), None);
+        assert_eq!(dialect_from_interface_format("anthropic"), None);
+        assert_eq!(dialect_from_interface_format("gemini"), None);
+        assert_eq!(dialect_from_interface_format("openai-responses"), None);
     }
 
     /// 回调地址校验（SSRF 兜底）。两种部署口径都要覆盖——策略是参数而不是

@@ -823,6 +823,17 @@ pub(crate) fn known_upstream_models_with_baseline(
     models
 }
 
+/// 能力过滤的判定：`None` 表示不过滤（文本平台）。
+fn mapping_declares(mapping: &ModelMapping, capability: Option<&str>) -> bool {
+    match capability {
+        None => true,
+        Some(capability) => mapping
+            .capabilities
+            .iter()
+            .any(|value| value.trim().eq_ignore_ascii_case(capability)),
+    }
+}
+
 pub(crate) fn advertised_model_ids(
     platform: &str,
     members: &[ModelCatalogMember],
@@ -857,7 +868,7 @@ pub(crate) fn advertised_model_catalog_entries(
     members: &[ModelCatalogMember],
     mode: PoolModelMode,
 ) -> Vec<AdvertisedModel> {
-    advertised_model_catalog_entries_with_baseline(platform, members, mode, None)
+    advertised_model_catalog_entries_with_capability(platform, members, mode, None)
 }
 
 pub(crate) fn advertised_model_catalog_entries_with_baseline(
@@ -865,6 +876,44 @@ pub(crate) fn advertised_model_catalog_entries_with_baseline(
     members: &[ModelCatalogMember],
     mode: PoolModelMode,
     baseline_models: Option<&[String]>,
+) -> Vec<AdvertisedModel> {
+    advertised_model_catalog_entries_with_baseline_and_capability(
+        platform,
+        members,
+        mode,
+        baseline_models,
+        None,
+    )
+}
+
+/// 与 [`advertised_model_catalog_entries`] 相同，但可以只保留**显式声明了某个能力**
+/// 的映射。
+///
+/// 为什么需要：视频端点在选账号时强制要求映射声明 `video.generate`
+/// （`requested_video_capability` → `filter_candidates_for_capability_with_mode`），
+/// 所以 `/v1/models` 若把没声明该能力的模型也列出来，就会出现「列表里有、提交必 400」。
+/// 文本端点没有这一层（能力过滤只对图像/视频生效），那里传 `None` 保持原行为。
+pub(crate) fn advertised_model_catalog_entries_with_capability(
+    platform: &str,
+    members: &[ModelCatalogMember],
+    mode: PoolModelMode,
+    capability_filter: Option<&str>,
+) -> Vec<AdvertisedModel> {
+    advertised_model_catalog_entries_with_baseline_and_capability(
+        platform,
+        members,
+        mode,
+        None,
+        capability_filter,
+    )
+}
+
+pub(crate) fn advertised_model_catalog_entries_with_baseline_and_capability(
+    platform: &str,
+    members: &[ModelCatalogMember],
+    mode: PoolModelMode,
+    baseline_models: Option<&[String]>,
+    capability_filter: Option<&str>,
 ) -> Vec<AdvertisedModel> {
     let mut models = Vec::new();
     let mut seen = HashSet::new();
@@ -880,6 +929,7 @@ pub(crate) fn advertised_model_catalog_entries_with_baseline(
             .mappings
             .iter()
             .find(|mapping| is_fallback_mapping(mapping))
+            .filter(|mapping| mapping_declares(mapping, capability_filter))
             .map(|mapping| mapping.to.trim())
             .filter(|to| !to.is_empty());
         if !capability.mappings.is_empty() && fallback_target.is_none() {
@@ -919,6 +969,9 @@ pub(crate) fn advertised_model_catalog_entries_with_baseline(
             // `FALLBACK_MODEL_ALIAS` in front of users as if it were something
             // they could pick. Its baseline contribution is handled above.
             if is_fallback_mapping(mapping) {
+                continue;
+            }
+            if !mapping_declares(mapping, capability_filter) {
                 continue;
             }
             let from = mapping.from.trim();

@@ -19,7 +19,7 @@ import type {
   RouteCredentialImportPreviewItem,
   TransferPlatformChoice,
 } from "../../lib/api/types";
-import { VIDEO_PROTOCOLS } from "../../lib/videoPlatforms";
+import { VIDEO_PLATFORM } from "../../lib/videoPlatforms";
 
 export type RouteCredentialImportDialogProps = {
   open: boolean;
@@ -38,7 +38,8 @@ const platformOptions: ReadonlyArray<{ value: string; label: string }> = [
   { value: "hermes", label: "Hermes" },
   // 视频渠道（5 个方言）。导入时它和文本平台没有区别——后端按
   // `PlatformId::parse` 认 `video:kling` 这类「模态:协议」串，别名也会归一。
-  ...VIDEO_PROTOCOLS.map((item) => ({ value: item.platform, label: item.label })),
+  // 视频只有一个平台：供应商在 `interface_format` 里，由条目自己声明
+  { value: VIDEO_PLATFORM, label: "Video" },
 ];
 const interfaceOptions = [
   { value: "", label: "自动判断" },

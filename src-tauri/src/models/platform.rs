@@ -1,45 +1,20 @@
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 
-/// 视频渠道方言。与 `videogen::protocol::VideoDialect` 是同一套取值，但放在这里
-/// 是为了让 `PlatformId::Video` 能携带协议段而**不产生循环依赖**
-/// （`videogen` 依赖 `models`，不能反过来）。
+/// 视频渠道的平台标识。
 ///
-/// 两边靠 `parse`/`as_str` 的字面量保持一致；`videogen` 侧有 `From` 互转测试
-/// 兜住这个约束。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum VideoProtocol {
-    Kling,
-    Ark,
-    MiniMax,
-    Zhipu,
-    Sora,
-}
-
-impl VideoProtocol {
-    pub const ALL: [Self; 5] = [
-        Self::Kling,
-        Self::Ark,
-        Self::MiniMax,
-        Self::Zhipu,
-        Self::Sora,
-    ];
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match normalize_identifier(value).as_str() {
-            "kling" | "klingai" | "可灵" => Some(Self::Kling),
-            "ark" | "seedance" | "volcengine" | "doubao" => Some(Self::Ark),
-            "minimax" | "hailuo" => Some(Self::MiniMax),
-            "zhipu" | "cogvideo" | "bigmodel" => Some(Self::Zhipu),
-            "sora" | "openai" => Some(Self::Sora),
-            _ => None,
-        }
-    }
-}
-
-/// 视频平台的统一前缀（`Provider.kind` 的模态段，G-P1）。
-pub const VIDEO_PLATFORM_MODALITY: &str = "video";
+/// **供应商不是平台。** 可灵 / 方舟(Seedance) / MiniMax / 智谱 / Sora 之间差的是
+/// **线协议**——请求体形状、上游路径、状态解析——而线协议属于账号的
+/// `config_json.interface_format`，不属于 `platform`。这与文本平台同构：
+/// 一个 `platform = codex` 的账号完全可以挂 `interface_format: anthropic`。
+///
+/// 视频又没有「给哪个 CLI 用」这回事（codex/claude 的池身份意义在这里不存在），
+/// 所以池身份只有一个 `video`：**一张 key、一个 SaaS 组**，落到哪家由请求里的
+/// `model` 名决定（账号的 `model_mappings` 命中谁就是谁）。
+///
+/// 这也正是「跨供应商路由」不需要任何特殊机制的原因——它本来就是普通的
+/// 「按 model 过滤候选 + 选中的账号自带方言」。
+pub const VIDEO_PLATFORM: &str = "video";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -51,16 +26,14 @@ pub enum PlatformId {
     OpenCode,
     OpenClaw,
     Hermes,
-    /// 视频渠道（G-P1）。**携带协议段**：`video:kling` / `video:seedance` …
-    ///
-    /// 之所以不是无载荷的 `Video`：`Provider.kind` 的语义就是「模态:协议」，
-    /// 协议段（决定了上游路径、请求体、状态解析）必须跟着平台一路走到
-    /// `forward_request`，否则半路还得回头去查一次账号的 `kind`。
-    Video(VideoProtocol),
+    /// 视频渠道。**无载荷**：供应商在账号的 `interface_format` 里，不在平台里
+    /// （见 [`VIDEO_PLATFORM`]）。
+    Video,
 }
 
 impl PlatformId {
-    /// 文本/Agent 平台（无载荷）。视频不在其中——它有 5 个协议变体。
+    /// 文本/Agent 平台。**不含视频**：`agent_launch` 这类按平台遍历的逻辑不该
+    /// 把视频当成一个 agent。需要含视频的遍历用 [`Self::all_with_video`]。
     pub const ALL: [Self; 7] = [
         Self::Codex,
         Self::Claude,
@@ -71,27 +44,27 @@ impl PlatformId {
         Self::Hermes,
     ];
 
-    /// 所有已知平台，含视频的全部协议（用于遍历/导入导出）。
+    /// 所有已知平台，含视频（用于遍历/导入导出/去重）。
     pub fn all_with_video() -> Vec<Self> {
         let mut platforms = Self::ALL.to_vec();
-        platforms.extend(
-            VideoProtocol::ALL
-                .iter()
-                .copied()
-                .map(PlatformId::Video),
-        );
+        platforms.push(Self::Video);
         platforms
     }
 
-    /// 解析 `Provider.kind`：先认「模态:协议」（`video:kling`），再退化到纯文本平台别名。
     pub fn parse(value: &str) -> Result<Self, AppError> {
         let normalized = normalize_identifier(value);
-        // 先看「模态:协议」形式，再退化到纯文本平台别名。
+        // `video:kling` 是旧模型（供应商当平台）。现在供应商在 `interface_format` 里、
+        // 平台统一是 `video`，所以给一条能照着改的提示，而不是笼统的「无法识别」。
         if let Some((modality, protocol)) = normalized.split_once(':') {
-            if modality == VIDEO_PLATFORM_MODALITY {
-                return VideoProtocol::parse(protocol)
-                    .map(PlatformId::Video)
-                    .ok_or_else(|| unknown_platform(value));
+            if modality == VIDEO_PLATFORM {
+                return Err(AppError::Validation {
+                    code: "platform.video_vendor_belongs_to_interface_format",
+                    message: format!(
+                        "'{value}' is not a platform: set platform to '{VIDEO_PLATFORM}' and interface_format to '{protocol}'"
+                    ),
+                    details: Some(value.trim().to_string()),
+                    recoverable: true,
+                });
             }
             return Err(unknown_platform(value));
         }
@@ -103,15 +76,16 @@ impl PlatformId {
             "opencode" | "open_code" => Ok(Self::OpenCode),
             "openclaw" | "open_claw" => Ok(Self::OpenClaw),
             "hermes" => Ok(Self::Hermes),
+            "video" => Ok(Self::Video),
             _ => Err(unknown_platform(value)),
         }
     }
 
-    /// 平台标识字符串。视频还原成 `video:<协议>`。
+    /// 平台标识字符串。
     ///
     /// 返回 `&'static str` 而不是 `String`：这是全仓使用最广的一个方法
     /// （近百处调用把它当 `&str` 传下去），一旦改成 `String`，每个调用点都得加
-    /// `.as_str()`。视频的 5 个协议段用静态字面量表达，代价只是多一张 5 行的表。
+    /// `.as_str()`。
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Codex => "codex",
@@ -121,11 +95,7 @@ impl PlatformId {
             Self::OpenCode => "opencode",
             Self::OpenClaw => "openclaw",
             Self::Hermes => "hermes",
-            Self::Video(VideoProtocol::Kling) => "video:kling",
-            Self::Video(VideoProtocol::Ark) => "video:ark",
-            Self::Video(VideoProtocol::MiniMax) => "video:minimax",
-            Self::Video(VideoProtocol::Zhipu) => "video:zhipu",
-            Self::Video(VideoProtocol::Sora) => "video:sora",
+            Self::Video => VIDEO_PLATFORM,
         }
     }
 
@@ -138,25 +108,13 @@ impl PlatformId {
             Self::OpenCode => "OpenCode",
             Self::OpenClaw => "OpenClaw",
             Self::Hermes => "Hermes",
-            Self::Video(VideoProtocol::Kling) => "视频 · Kling",
-            Self::Video(VideoProtocol::Ark) => "视频 · Seedance",
-            Self::Video(VideoProtocol::MiniMax) => "视频 · MiniMax",
-            Self::Video(VideoProtocol::Zhipu) => "视频 · Zhipu",
-            Self::Video(VideoProtocol::Sora) => "视频 · Sora",
+            Self::Video => "视频",
         }
     }
 
     /// 是否为视频渠道。
     pub fn is_video(self) -> bool {
-        matches!(self, Self::Video(_))
-    }
-
-    /// 视频协议段（仅视频平台有值）。
-    pub fn video_protocol(self) -> Option<VideoProtocol> {
-        match self {
-            Self::Video(protocol) => Some(protocol),
-            _ => None,
-        }
+        matches!(self, Self::Video)
     }
 
     pub fn default_api_credential_dialect(self) -> Option<ApiDialect> {
@@ -166,7 +124,10 @@ impl PlatformId {
             Self::Gemini => Some(ApiDialect::Gemini),
             // 视频方言不走 `ApiDialect`（那是文本协议）：上游请求体由
             // `videogen::protocol::upstream_body` 自己构造。
-            Self::OpenCode | Self::OpenClaw | Self::Hermes | Self::Video(_) => None,
+            // 视频的线协议不走 `ApiDialect`（那是文本协议）：方言由账号的
+            // `interface_format` 给出，上游请求体由 `videogen::protocol::upstream_body`
+            // 自己构造。
+            Self::OpenCode | Self::OpenClaw | Self::Hermes | Self::Video => None,
         }
     }
 }
@@ -347,7 +308,7 @@ fn normalize_identifier(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiDialect, PlatformId, VideoProtocol};
+    use super::{ApiDialect, PlatformId, VIDEO_PLATFORM};
 
     #[test]
     fn parses_only_explicit_platform_aliases() {
@@ -361,53 +322,43 @@ mod tests {
         assert!(PlatformId::parse("unknown-provider").is_err());
     }
 
+    /// 视频只有一个平台 `video`；供应商在账号的 `interface_format` 里。
     #[test]
-    fn video_channel_round_trips_through_its_protocol_suffix() {
+    fn video_is_a_single_platform_without_a_vendor_suffix() {
+        assert_eq!(PlatformId::parse("video").unwrap(), PlatformId::Video);
+        assert_eq!(PlatformId::parse("VIDEO").unwrap(), PlatformId::Video);
+        assert_eq!(PlatformId::Video.as_str(), VIDEO_PLATFORM);
+        assert!(PlatformId::Video.is_video());
+        // 往返
         assert_eq!(
-            PlatformId::parse("video:kling").unwrap(),
-            PlatformId::Video(VideoProtocol::Kling)
+            PlatformId::parse(PlatformId::Video.as_str()).unwrap(),
+            PlatformId::Video
         );
-        assert_eq!(
-            PlatformId::parse("video:seedance").unwrap(),
-            PlatformId::Video(VideoProtocol::Ark)
-        );
-        // 别名与大小写都要能吃
-        assert_eq!(
-            PlatformId::parse("VIDEO:Hailuo").unwrap(),
-            PlatformId::Video(VideoProtocol::MiniMax)
-        );
-        // 往返不能丢协议段
-        for protocol in VideoProtocol::ALL {
-            let platform = PlatformId::Video(protocol);
-            assert_eq!(PlatformId::parse(platform.as_str()).unwrap(), platform);
-            assert_eq!(platform.video_protocol(), Some(protocol));
-            assert!(platform.is_video());
-        }
-        assert_eq!(PlatformId::Video(VideoProtocol::Ark).as_str(), "video:ark");
+        // 视频不是文本平台，没有 API 方言
+        assert_eq!(PlatformId::Video.default_api_credential_dialect(), None);
     }
 
+    /// 旧模型（`video:kling`，供应商当平台）必须被**明确拒绝**，并给出可照做的提示。
+    ///
+    /// 静默接受会更糟：账号会落到一个永远不会被选中的平台值上。
     #[test]
-    fn video_channel_rejects_unknown_or_mismatched_modality() {
-        // 未知协议段
-        assert!(PlatformId::parse("video:nope").is_err());
-        // 已知协议段但模态不是 video
+    fn video_vendor_suffix_is_rejected_with_a_migration_hint() {
+        let error = PlatformId::parse("video:kling").expect_err("old model must be rejected");
+        assert_eq!(error.code(), "platform.video_vendor_belongs_to_interface_format");
+        let message = error.to_string();
+        assert!(message.contains("'video'"), "{message}");
+        assert!(message.contains("'kling'"), "{message}");
+        // 模态不是 video 的同样拒绝
         assert!(PlatformId::parse("text:kling").is_err());
         assert!(PlatformId::parse("audio:kling").is_err());
-        // 裸 `video` 没有协议段，无法确定方言
-        assert!(PlatformId::parse("video").is_err());
-        // 视频不是文本平台，不能带 API 方言
-        assert_eq!(
-            PlatformId::Video(VideoProtocol::Kling).default_api_credential_dialect(),
-            None
-        );
     }
 
     #[test]
-    fn all_with_video_covers_every_protocol() {
+    fn all_with_video_adds_exactly_one_video_platform() {
         let all = PlatformId::all_with_video();
-        assert_eq!(all.len(), PlatformId::ALL.len() + VideoProtocol::ALL.len());
-        assert_eq!(all.iter().filter(|item| item.is_video()).count(), 5);
-        // `ALL` 保持「不含视频」，能力矩阵与既有遍历依赖这一点
+        assert_eq!(all.len(), PlatformId::ALL.len() + 1);
+        assert_eq!(all.iter().filter(|item| item.is_video()).count(), 1);
+        // `ALL` 保持「不含视频」：agent_launch 这类按平台遍历的逻辑依赖这一点
         assert!(PlatformId::ALL.iter().all(|item| !item.is_video()));
     }
 

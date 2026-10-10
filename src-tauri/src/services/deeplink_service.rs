@@ -251,7 +251,7 @@ fn default_deeplink_dialect(platform: PlatformId) -> ApiDialect {
         }
         // 视频渠道不支持 deeplink 导入（能力矩阵已声明 Unavailable），
         // 上面的 `require` 会先拒绝；这里只是让 match 穷尽。
-        PlatformId::Video(_) => {
+        PlatformId::Video => {
             unreachable!("capability guard rejects Deeplink for video channels")
         }
     }
@@ -298,7 +298,7 @@ fn build_model_query_pairs<'a>(
             unreachable!("handled or rejected before model serialization")
         }
         // 视频渠道没有 deeplink 形态；能力守卫在此之前已拒绝。
-        PlatformId::Video(_) => {
+        PlatformId::Video => {
             unreachable!("handled or rejected before model serialization")
         }
     };

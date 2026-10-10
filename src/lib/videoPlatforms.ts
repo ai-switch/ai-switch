@@ -1,45 +1,48 @@
 /**
- * 视频渠道的方言表（G-P1）。
+ * 视频渠道的方言表。
  *
- * 与后端 `models::platform::VideoProtocol` 一一对应：`platform` 是
- * `Provider.kind` 的「模态:协议」取值（`PlatformId::as_str()`），账号的
- * `platform` 列写的就是它。所以这里既是「可选协议」列表，也是
- * 「账号 platform → 展示名」的映射表。
+ * **视频只有一个平台 `video`。** 可灵 / 方舟(Seedance) / MiniMax / 智谱 / Sora
+ * 之间差的是**线协议**（请求体形状、上游路径、状态解析），而线协议属于账号的
+ * `config_json.interface_format`，不属于 `platform`——与文本平台同构：一个
+ * `platform = codex` 的账号可以挂 `interface_format: anthropic`。
  *
- * 注意只有 5 个**规范值**：后端还认一些别名（`klingai` / `seedance` / `可灵` …），
- * 但落库前都会被归一成规范值，所以前端只需要认规范值。
+ * 所以：
+ *   - `platform` 列永远写 `video`（`VIDEO_PLATFORM`）；
+ *   - 供应商写在 `interface_format` 里（`VIDEO_DIALECTS[].dialect`）；
+ *   - 客户端**不指定**供应商：请求里的 `model` 名决定落到哪家。
+ *
+ * 只有 5 个**规范值**：后端还认一些别名（`seedance` / `hailuo` / `可灵` …），
+ * 但界面只需要认规范值。
  */
-export type VideoProtocol = "kling" | "ark" | "minimax" | "zhipu" | "sora";
 
-/// 账号/分组 `platform` 列里的视频取值，形如 `video:kling`。
-export type VideoPlatform = `video:${VideoProtocol}`;
+/// 视频的平台值（`route_credentials.platform` 与 SaaS 分组都写它）。
+export const VIDEO_PLATFORM = "video";
 
-export const VIDEO_PROTOCOLS: ReadonlyArray<{
-  protocol: VideoProtocol;
-  platform: string;
+export type VideoDialect = "kling" | "ark" | "minimax" | "zhipu" | "sora";
+
+export const VIDEO_DIALECTS: ReadonlyArray<{
+  dialect: VideoDialect;
   label: string;
 }> = [
-  { protocol: "kling", platform: "video:kling", label: "Kling" },
+  { dialect: "kling", label: "Kling" },
   // 方舟（Ark）上的视频模型是 Seedance，展示名用用户更认的那个
-  { protocol: "ark", platform: "video:ark", label: "Seedance" },
-  { protocol: "minimax", platform: "video:minimax", label: "MiniMax" },
-  { protocol: "zhipu", platform: "video:zhipu", label: "Zhipu" },
-  { protocol: "sora", platform: "video:sora", label: "Sora" },
+  { dialect: "ark", label: "Seedance" },
+  { dialect: "minimax", label: "MiniMax" },
+  { dialect: "zhipu", label: "Zhipu" },
+  { dialect: "sora", label: "Sora" },
 ];
 
-export const VIDEO_PLATFORMS: readonly string[] = VIDEO_PROTOCOLS.map(
-  (item) => item.platform,
+export const VIDEO_DIALECT_VALUES: readonly string[] = VIDEO_DIALECTS.map(
+  (item) => item.dialect,
 );
 
-/** 账号的 `platform` 串 → 展示用的协议名（认不出就退回去掉前缀的原串）。 */
-export function videoProtocolLabel(platform: string): string {
-  return (
-    VIDEO_PROTOCOLS.find((item) => item.platform === platform)?.label ??
-    platform.replace(/^video:/i, "")
-  );
+/** 账号的 `interface_format` → 展示用的供应商名（认不出就原样返回）。 */
+export function videoDialectLabel(dialect: string): string {
+  const trimmed = dialect.trim().toLowerCase();
+  return VIDEO_DIALECTS.find((item) => item.dialect === trimmed)?.label ?? dialect;
 }
 
 /** 该账号是不是视频渠道。 */
 export function isVideoPlatform(platform: string): boolean {
-  return VIDEO_PROTOCOLS.some((item) => item.platform === platform);
+  return platform.trim().toLowerCase() === VIDEO_PLATFORM;
 }

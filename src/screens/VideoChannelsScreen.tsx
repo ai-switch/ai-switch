@@ -13,7 +13,12 @@ import {
 } from "../lib/api/client";
 import type { AccountStatus, RouteCredential } from "../lib/api/types";
 import { useI18n } from "../lib/i18n";
-import { VIDEO_PLATFORMS, videoProtocolLabel } from "../lib/videoPlatforms";
+import {
+  VIDEO_DIALECTS,
+  VIDEO_PLATFORM,
+  videoDialectLabel,
+  type VideoDialect,
+} from "../lib/videoPlatforms";
 
 /// 视频账号必须声明这个能力，网关才会在账号池里选到它
 /// （对应后端 `requested_video_capability` → `video.generate`）。
@@ -113,18 +118,17 @@ export function VideoChannelsScreen() {
   const [pendingDelete, setPendingDelete] = useState<RouteCredential | null>(null);
   const [connectOpen, setConnectOpen] = useState(false);
 
+  // 视频只有一个平台：供应商在账号的 `interface_format` 里，所以一次查询就够。
   const channelsQuery = useQuery({
     queryKey: ["video-channels"],
     queryFn: async () => {
-      const lists = await Promise.all(
-        VIDEO_PLATFORMS.map((platform) => listRouteCredentials(platform)),
+      const list = await listRouteCredentials(VIDEO_PLATFORM);
+      return list.sort(
+        (left, right) =>
+          readStringField(left.config_json, "interface_format").localeCompare(
+            readStringField(right.config_json, "interface_format"),
+          ) || left.sort_order - right.sort_order,
       );
-      return lists
-        .flat()
-        .sort(
-          (left, right) =>
-            left.platform.localeCompare(right.platform) || left.sort_order - right.sort_order,
-        );
     },
   });
 
@@ -201,9 +205,9 @@ export function VideoChannelsScreen() {
                   <h2 className="text-[14px] font-semibold text-stone-950">
                     {channel.display_name}
                   </h2>
-                  {/* TAG：这个账号走的是哪个上游协议 */}
+                  {/* TAG：这个账号走的是哪个上游（供应商 = interface_format） */}
                   <span className="inline-flex border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-800">
-                    {videoProtocolLabel(channel.platform)}
+                    {videoDialectLabel(readStringField(channel.config_json, "interface_format"))}
                   </span>
                   <span
                     className={`inline-flex border px-2 py-0.5 text-[10px] font-semibold ${
@@ -299,14 +303,10 @@ function VideoConnectDialog({ onClose }: { onClose: () => void }) {
     queryKey: ["route-proxy-status"],
     queryFn: getRouteProxyStatus,
   });
+  // 视频只有一张 key：平台是 `video`，落到哪家由请求里的 `model` 名决定。
   const keysQuery = useQuery({
-    queryKey: ["video-channel-keys"],
-    queryFn: async () =>
-      Promise.all(
-        VIDEO_PLATFORMS.map(
-          async (platform) => [platform, await getRouteProxyKey(platform)] as const,
-        ),
-      ),
+    queryKey: ["video-channel-key"],
+    queryFn: () => getRouteProxyKey(VIDEO_PLATFORM),
   });
 
   const status = proxyQuery.data;
@@ -349,19 +349,11 @@ function VideoConnectDialog({ onClose }: { onClose: () => void }) {
               {t("video.loadFailed")}
             </p>
           ) : null}
-          <div className="grid gap-2">
-            {VIDEO_PLATFORMS.map((platform) => {
-              const entry = keysQuery.data?.find(([value]) => value === platform);
-              return (
-                <EndpointRow
-                  key={platform}
-                  label={`${videoProtocolLabel(platform)} · ${platform}`}
-                  secret
-                  value={entry ? entry[1] : null}
-                />
-              );
-            })}
-          </div>
+          <EndpointRow
+            label={t("video.connectKey")}
+            secret
+            value={keysQuery.data ?? null}
+          />
         </div>
       </div>
     </div>
@@ -379,7 +371,14 @@ function VideoChannelDialog({
 }) {
   const { t } = useI18n();
   const editing = credential !== null;
-  const [platform, setPlatform] = useState(credential?.platform ?? VIDEO_PLATFORMS[0]);
+  // 供应商住在 `interface_format` 里（平台恒为 `video`）。
+  const [dialect, setDialect] = useState<VideoDialect>(() => {
+    const stored = credential
+      ? readStringField(credential.config_json, "interface_format").toLowerCase()
+      : "";
+    const known = VIDEO_DIALECTS.find((item) => item.dialect === stored);
+    return known?.dialect ?? VIDEO_DIALECTS[0].dialect;
+  });
   const [name, setName] = useState(credential?.display_name ?? "");
   const [baseUrl, setBaseUrl] = useState(
     credential ? readStringField(credential.config_json, "base_url") : "",
@@ -415,7 +414,8 @@ function VideoChannelDialog({
       // 保留 config 里我们不认识的字段，只改我们负责的三项。
       const config = credential ? parseJsonObject(credential.config_json) : {};
       config.base_url = trimmedBaseUrl;
-      config.interface_format = "openai";
+      // 供应商就是接口格式：上游请求体形状、路径、状态解析全由它决定。
+      config.interface_format = dialect;
       config.model_mappings = parsed.rows;
       const configJson = JSON.stringify(config, null, 2);
 
@@ -438,12 +438,12 @@ function VideoChannelDialog({
       }
 
       await createApiRouteCredential({
-        platform,
+        // 平台恒为 video；供应商由 `interface_format` 承载。
+        platform: VIDEO_PLATFORM,
         display_name: trimmedName,
         api_key: trimmedKey,
         base_url: trimmedBaseUrl,
-        // 五家上游都用 `Authorization: Bearer`，所以统一 openai 格式
-        interface_format: "openai",
+        interface_format: dialect,
         model_mappings_json: JSON.stringify(parsed.rows),
       });
     },
@@ -501,21 +501,23 @@ function VideoChannelDialog({
               被算进可访问名（读屏会念成「协议 决定上游请求体形状…」），
               测试里也没法按精确名字定位。 */}
           <div className="grid gap-1">
-            <label className={labelClass} htmlFor="video-protocol">
+            <label className={labelClass} htmlFor="video-dialect">
               {t("video.protocol")}
             </label>
             <select
               className={fieldClass}
-              // 账号的平台不可改：`update_route_credential` 没有 platform 字段，
-              // 改了会得到一个「看起来改了其实没改」的界面。
-              disabled={editing}
-              id="video-protocol"
-              onChange={(event) => setPlatform(event.target.value)}
-              value={platform}
+              id="video-dialect"
+              onChange={(event) => {
+                const next = VIDEO_DIALECTS.find(
+                  (item) => item.dialect === event.target.value,
+                );
+                if (next) setDialect(next.dialect);
+              }}
+              value={dialect}
             >
-              {VIDEO_PLATFORMS.map((value) => (
-                <option key={value} value={value}>
-                  {videoProtocolLabel(value)}
+              {VIDEO_DIALECTS.map((item) => (
+                <option key={item.dialect} value={item.dialect}>
+                  {item.label}
                 </option>
               ))}
             </select>

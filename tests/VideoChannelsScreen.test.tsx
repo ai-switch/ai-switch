@@ -26,8 +26,11 @@ vi.mock("../src/lib/api/client", () => ({
   updateRouteCredential: vi.fn(),
 }));
 
-function credential(overrides: Partial<RouteCredential> & { id: string; platform: string }) {
+/// 视频账号：**平台恒为 `video`，供应商在 `interface_format` 里**。
+function credential(overrides: Partial<RouteCredential> & { id: string; dialect: string }) {
+  const { dialect, ...rest } = overrides;
   return {
+    platform: "video",
     kind: "api",
     display_name: overrides.id,
     status: "ok",
@@ -37,15 +40,13 @@ function credential(overrides: Partial<RouteCredential> & { id: string; platform
     secret_payload_json: JSON.stringify({ api_key: "sk-upstream" }),
     config_json: JSON.stringify({
       base_url: "https://api.example.com/v1",
-      interface_format: "openai",
-      model_mappings: [
-        { from: "kling-v1", to: "kling-v1", capabilities: ["video.generate"] },
-      ],
+      interface_format: dialect,
+      model_mappings: [{ from: "kling-v1", to: "kling-v1", capabilities: ["video.generate"] }],
     }),
     preview_json: "{}",
     created_at: "2026-01-01",
     updated_at: "2026-01-01",
-    ...overrides,
+    ...rest,
   } as RouteCredential;
 }
 
@@ -56,13 +57,6 @@ function renderScreen() {
         <VideoChannelsScreen />
       </I18nProvider>
     </QueryClientProvider>,
-  );
-}
-
-/** `listRouteCredentials` 会按 5 个方言各调一次，这里按 platform 分别给数据。 */
-function mockLists(byPlatform: Record<string, RouteCredential[]>) {
-  vi.mocked(listRouteCredentials).mockImplementation(async (platform: string) =>
-    byPlatform[platform] ?? [],
   );
 }
 
@@ -79,175 +73,142 @@ describe("VideoChannelsScreen", () => {
     });
   });
 
-  it("merges every video dialect into one list and tags each row with its protocol", async () => {
-    mockLists({
-      "video:kling": [credential({ id: "kling-a", platform: "video:kling", display_name: "可灵主号" })],
-      "video:ark": [credential({ id: "ark-a", platform: "video:ark", display_name: "方舟号" })],
-    });
+  it("lists the one video platform and tags each row with its provider", async () => {
+    vi.mocked(listRouteCredentials).mockResolvedValue([
+      credential({ id: "kling-a", dialect: "kling", display_name: "可灵主号" }),
+      credential({ id: "ark-a", dialect: "ark", display_name: "方舟号" }),
+    ]);
 
     renderScreen();
 
-    expect(await screen.findByText("可灵主号")).toBeTruthy();
-    expect(screen.getByText("方舟号")).toBeTruthy();
-
-    // 5 个方言都要查一次（合并成一屏的前提）
-    expect(listRouteCredentials).toHaveBeenCalledTimes(5);
-
-    // 每行的 TAG 显示它自己的上游协议，而不是笼统的「视频」
-    const klingRow = screen.getByText("可灵主号").closest("article")!;
-    expect(within(klingRow).getByText("Kling")).toBeTruthy();
-    const arkRow = screen.getByText("方舟号").closest("article")!;
-    expect(within(arkRow).getByText("Seedance")).toBeTruthy();
+    expect(await screen.findByText("可灵主号")).toBeInTheDocument();
+    expect(screen.getByText("方舟号")).toBeInTheDocument();
+    // 供应商来自 interface_format：ark 显示成 Seedance
+    expect(screen.getByText("Kling")).toBeInTheDocument();
+    expect(screen.getByText("Seedance")).toBeInTheDocument();
+    // 只查一个平台
+    expect(vi.mocked(listRouteCredentials)).toHaveBeenCalledWith("video");
+    expect(vi.mocked(listRouteCredentials)).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the empty state when no video channel exists", async () => {
-    mockLists({});
+  it("shows an empty state when there are no channels", async () => {
+    vi.mocked(listRouteCredentials).mockResolvedValue([]);
     renderScreen();
-    expect(await screen.findByText("还没有视频渠道")).toBeTruthy();
+    expect(await screen.findByText("还没有视频渠道")).toBeInTheDocument();
   });
 
   it("refuses to save model mappings without the video.generate capability", async () => {
-    mockLists({});
+    vi.mocked(listRouteCredentials).mockResolvedValue([]);
     renderScreen();
-    const user = userEvent.setup();
+    await userEvent.click(await screen.findByRole("button", { name: /新增渠道/ }));
 
-    await user.click(await screen.findByRole("button", { name: "新增渠道" }));
-
-    const nameField = screen.getByLabelText("名称");
-    await user.type(nameField, "新渠道");
-    await user.type(screen.getByLabelText("Base URL"), "https://api.example.com/v1");
-    await user.type(screen.getByLabelText("API Key"), "sk-new");
-
+    await userEvent.type(screen.getByLabelText("名称"), "可灵主号");
+    await userEvent.type(screen.getByLabelText("Base URL"), "https://api.example.com/v1");
+    await userEvent.type(screen.getByLabelText("API Key"), "sk-upstream");
     // 少了 video.generate：网关在账号池里根本选不到这个账号，必须在界面上拦住
     fireEvent.change(screen.getByLabelText("模型映射"), {
       target: {
-        value:
-          '[{"from":"kling-v1","to":"kling-v1","capabilities":["image.generate"]}]',
+        value: '[{"from":"kling-v1","to":"kling-v1","capabilities":["image.generate"]}]',
       },
     });
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
 
-    await user.click(screen.getByRole("button", { name: "保存" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "每条映射都必须声明 video.generate 能力",
-    );
-    expect(createApiRouteCredential).not.toHaveBeenCalled();
+    // 用错误文案本身（帮助文案里也含 video.generate，泛匹配会撞上两个元素）
+    expect(
+      await screen.findByText("每条映射都必须声明 video.generate 能力"),
+    ).toBeInTheDocument();
+    expect(vi.mocked(createApiRouteCredential)).not.toHaveBeenCalled();
   });
 
-  it("creates a channel with the chosen protocol and a bearer interface format", async () => {
-    mockLists({});
-    vi.mocked(createApiRouteCredential).mockResolvedValue(
-      credential({ id: "new", platform: "video:sora" }),
-    );
+  it("creates a channel on the video platform with the chosen provider as interface_format", async () => {
+    vi.mocked(listRouteCredentials).mockResolvedValue([]);
+    vi.mocked(createApiRouteCredential).mockResolvedValue({} as RouteCredential);
     renderScreen();
-    const user = userEvent.setup();
+    await userEvent.click(await screen.findByRole("button", { name: /新增渠道/ }));
 
-    await user.click(await screen.findByRole("button", { name: "新增渠道" }));
-    await user.selectOptions(screen.getByLabelText("协议"), "video:sora");
-    await user.type(screen.getByLabelText("名称"), "Sora 号");
-    await user.type(screen.getByLabelText("Base URL"), "https://api.openai.com/v1");
-    await user.type(screen.getByLabelText("API Key"), "sk-sora");
-
+    await userEvent.selectOptions(screen.getByLabelText("供应商"), "ark");
+    await userEvent.type(screen.getByLabelText("名称"), "方舟号");
+    await userEvent.type(screen.getByLabelText("Base URL"), "https://ark.example.com/v1");
+    await userEvent.type(screen.getByLabelText("API Key"), "sk-ark");
     fireEvent.change(screen.getByLabelText("模型映射"), {
-      target: { value: '[{"from":"sora-2","capabilities":["video.generate"]}]' },
+      target: {
+        value:
+          '[{"from":"doubao-seedance","to":"doubao-seedance","capabilities":["video.generate"]}]',
+      },
     });
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
 
-    await user.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(vi.mocked(createApiRouteCredential)).toHaveBeenCalled());
+    expect(vi.mocked(createApiRouteCredential)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        // 平台恒为 video；供应商由 interface_format 承载
+        platform: "video",
+        interface_format: "ark",
+        display_name: "方舟号",
+      }),
+    );
+  });
 
-    await waitFor(() => expect(createApiRouteCredential).toHaveBeenCalledTimes(1));
-    const input = vi.mocked(createApiRouteCredential).mock.calls[0][0];
-    expect(input.platform).toBe("video:sora");
-    expect(input.display_name).toBe("Sora 号");
-    expect(input.base_url).toBe("https://api.openai.com/v1");
-    // 五家上游都用 Authorization: Bearer
-    expect(input.interface_format).toBe("openai");
-    // `to` 缺省时补成 `from`，能力原样保留
-    expect(JSON.parse(input.model_mappings_json)).toEqual([
-      { from: "sora-2", to: "sora-2", capabilities: ["video.generate"] },
+  it("edits an existing channel and writes the provider back into interface_format", async () => {
+    vi.mocked(listRouteCredentials).mockResolvedValue([
+      credential({ id: "kling-a", dialect: "kling", display_name: "可灵主号" }),
     ]);
+    vi.mocked(updateRouteCredential).mockResolvedValue({} as RouteCredential);
+    renderScreen();
+
+    await userEvent.click(await screen.findByRole("button", { name: "编辑" }));
+    // 已存的供应商要回填
+    expect(screen.getByLabelText("供应商")).toHaveValue("kling");
+    await userEvent.selectOptions(screen.getByLabelText("供应商"), "sora");
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(vi.mocked(updateRouteCredential)).toHaveBeenCalled());
+    const [, payload] = vi.mocked(updateRouteCredential).mock.calls[0];
+    expect(JSON.parse(payload.config_json).interface_format).toBe("sora");
+    // key 留空 = 不改动，不能误清
+    expect(JSON.parse(payload.secret_payload_json).api_key).toBe("sk-upstream");
   });
 
   it("toggles a channel between paused and ok", async () => {
-    mockLists({
-      "video:kling": [credential({ id: "kling-a", platform: "video:kling", display_name: "可灵主号" })],
-    });
+    vi.mocked(listRouteCredentials).mockResolvedValue([
+      credential({ id: "kling-a", dialect: "kling", display_name: "可灵主号" }),
+    ]);
     renderScreen();
-    const user = userEvent.setup();
 
-    const row = (await screen.findByText("可灵主号")).closest("article")!;
-    await user.click(within(row).getByRole("button", { name: "已停用" }));
-
+    await userEvent.click(await screen.findByRole("button", { name: "已停用" }));
     await waitFor(() =>
-      expect(setRouteCredentialStatuses).toHaveBeenCalledWith(["kling-a"], "paused"),
+      expect(vi.mocked(setRouteCredentialStatuses)).toHaveBeenCalledWith(["kling-a"], "paused"),
     );
   });
 
-  it("edits an existing channel without touching its platform", async () => {
-    const existing = credential({
-      id: "kling-a",
-      platform: "video:kling",
-      display_name: "可灵主号",
-    });
-    mockLists({ "video:kling": [existing] });
-    vi.mocked(updateRouteCredential).mockResolvedValue(existing);
-    renderScreen();
-    const user = userEvent.setup();
-
-    const row = (await screen.findByText("可灵主号")).closest("article")!;
-    await user.click(within(row).getByRole("button", { name: "编辑" }));
-
-    // 平台不可改：`update_route_credential` 没有 platform 字段
-    expect(screen.getByLabelText("协议")).toBeDisabled();
-
-    await user.clear(screen.getByLabelText("名称"));
-    await user.type(screen.getByLabelText("名称"), "可灵备用");
-    await user.click(screen.getByRole("button", { name: "保存" }));
-
-    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalledTimes(1));
-    const [id, input] = vi.mocked(updateRouteCredential).mock.calls[0];
-    expect(id).toBe("kling-a");
-    expect(input.display_name).toBe("可灵备用");
-    // 没动 key 就不能把它清掉
-    expect(JSON.parse(input.secret_payload_json).api_key).toBe("sk-upstream");
-  });
-
-  it("hands out the endpoint and one key per protocol, so no custom header is needed", async () => {
-    mockLists({});
+  it("hands out the endpoint and the single channel key", async () => {
+    vi.mocked(listRouteCredentials).mockResolvedValue([]);
     vi.mocked(getRouteProxyStatus).mockResolvedValue({
       running: true,
       route_access_enabled: true,
       bind_host: "127.0.0.1",
       base_url: "http://127.0.0.1:8787",
     });
-    vi.mocked(getRouteProxyKey).mockImplementation(
-      async (platform: string) => `sk-ai-switch-${platform}`,
-    );
+    vi.mocked(getRouteProxyKey).mockResolvedValue("sk-ai-switch-video");
 
     renderScreen();
     await userEvent.click(screen.getByRole("button", { name: "接入信息" }));
 
     const dialog = await screen.findByRole("dialog");
-    // 端点：客户端只需要 baseUrl + Authorization，没有自定义头
     expect(within(dialog).getByLabelText("端点")).toHaveValue(
       "http://127.0.0.1:8787/v1/video/generations",
     );
-    // 每个协议一个 key，按协议签发
+    // 一张 key 覆盖全部供应商 —— 不再是每个协议一张
     await waitFor(() =>
-      expect(within(dialog).getByLabelText("Kling · video:kling")).toHaveValue(
-        "sk-ai-switch-video:kling",
-      ),
+      expect(within(dialog).getByLabelText("渠道密钥")).toHaveValue("sk-ai-switch-video"),
     );
-    expect(within(dialog).getByLabelText("Seedance · video:ark")).toHaveValue(
-      "sk-ai-switch-video:ark",
-    );
-    expect(vi.mocked(getRouteProxyKey)).toHaveBeenCalledWith("video:kling");
+    expect(vi.mocked(getRouteProxyKey)).toHaveBeenCalledWith("video");
+    expect(vi.mocked(getRouteProxyKey)).toHaveBeenCalledTimes(1);
   });
 
   it("asks the user to start the route proxy when it is not running yet", async () => {
-    mockLists({});
-    vi.mocked(getRouteProxyKey).mockImplementation(
-      async (platform: string) => `sk-ai-switch-${platform}`,
-    );
+    vi.mocked(listRouteCredentials).mockResolvedValue([]);
+    vi.mocked(getRouteProxyKey).mockResolvedValue("sk-ai-switch-video");
 
     renderScreen();
     await userEvent.click(screen.getByRole("button", { name: "接入信息" }));

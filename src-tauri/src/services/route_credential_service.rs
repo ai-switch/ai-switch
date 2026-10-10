@@ -136,11 +136,12 @@ impl RouteCredentialService {
     ) -> Result<RouteCredential, AppError> {
         let platform = PlatformId::parse(&input.platform)?;
         PlatformCapabilityService::require(platform, PlatformOperation::RouteCredentials)?;
-        let platform = platform.as_str();
         validate_required("display_name", &input.display_name)?;
         validate_required("api_key", &input.api_key)?;
         validate_required("base_url", &input.base_url)?;
-        validate_interface_format(&input.interface_format)?;
+        // 在 `platform` 被 shadow 成 `&str` 之前校验：合法取值**按平台分**。
+        validate_interface_format(platform, &input.interface_format)?;
+        let platform = platform.as_str();
         crate::services::responses_plaintext_reasoning::validate(
             input
                 .responses_plaintext_reasoning_compat
@@ -815,9 +816,27 @@ fn copied_api_payload(
         .ok_or_else(|| {
             copy_source_error("interface_format", "API account has no interface format")
         })?;
-    let source_dialect = ApiDialect::parse(source_interface_format)?;
-    let target_default_dialect = target_platform.default_api_credential_dialect();
-    let target_dialect = target_default_dialect.unwrap_or(source_dialect);
+    // 视频的 `interface_format` 是**上游方言**（kling / ark / …），不是文本的
+    // `ApiDialect`，所以视频账号原样搬运：不解析成 `ApiDialect`，也不改写 Base URL
+    // （改写是文本侧换线协议时才需要的事）。
+    let (target_interface_format, target_default_dialect) = if target_platform.is_video() {
+        if crate::videogen::protocol::dialect_from_interface_format(source_interface_format)
+            .is_none()
+        {
+            return Err(copy_source_error(
+                "interface_format",
+                "Video account has an unsupported upstream dialect",
+            ));
+        }
+        (source_interface_format.to_string(), None)
+    } else {
+        let source_dialect = ApiDialect::parse(source_interface_format)?;
+        let default = target_platform.default_api_credential_dialect();
+        (
+            default.unwrap_or(source_dialect).as_str().to_string(),
+            default,
+        )
+    };
     let source_base_url = source_config
         .get("base_url")
         .and_then(Value::as_str)
@@ -831,7 +850,7 @@ fn copied_api_payload(
         ("base_url".to_string(), json!(base_url)),
         (
             "interface_format".to_string(),
-            json!(target_dialect.as_str()),
+            json!(target_interface_format),
         ),
     ]);
     for key in [
@@ -1041,7 +1060,28 @@ fn validate_failure_policy_config(config_json: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_interface_format(value: &str) -> Result<(), AppError> {
+/// `interface_format` 的合法取值**按平台分**。
+///
+///   - 文本平台：`openai` / `openai-responses` / `anthropic` / `gemini`（即 `ApiDialect`）；
+///   - 视频平台：上游方言 `kling` / `ark` / `minimax` / `zhipu` / `sora`。
+///
+/// 必须分开校验，两个方向都是错的：
+///   - 视频方言塞进 `ApiDialect` 会污染文本侧的路径规范化（`normalize_api_upstream_path`）；
+///   - 文本方言出现在视频账号上，意味着这个账号永远不会被 `videogen` 选中（静默死数据）。
+fn validate_interface_format(platform: PlatformId, value: &str) -> Result<(), AppError> {
+    if platform.is_video() {
+        if crate::videogen::protocol::dialect_from_interface_format(value).is_some() {
+            return Ok(());
+        }
+        return Err(AppError::Validation {
+            code: "validation.interface_format",
+            message: "Video accounts must declare an upstream dialect".to_string(),
+            details: Some(format!(
+                "{value} (expected kling / ark / minimax / zhipu / sora)"
+            )),
+            recoverable: true,
+        });
+    }
     match value {
         "openai" | "openai-responses" | "anthropic" | "gemini" => Ok(()),
         _ => Err(AppError::Validation {
@@ -1636,8 +1676,8 @@ mod tests {
     #[test]
     fn validate_interface_format_rejects_legacy_anthropic_alias() {
         let legacy = ["anthropic", "messages"].join("-");
-        assert!(validate_interface_format("anthropic").is_ok());
-        assert!(validate_interface_format(&legacy).is_err());
+        assert!(validate_interface_format(PlatformId::Claude, "anthropic").is_ok());
+        assert!(validate_interface_format(PlatformId::Claude, &legacy).is_err());
     }
 
     #[test]

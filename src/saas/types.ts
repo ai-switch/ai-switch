@@ -1,8 +1,8 @@
 export type SaasLocale = "zh" | "en";
-import type { VideoPlatform } from "../lib/videoPlatforms";
+import { VIDEO_PLATFORM } from "../lib/videoPlatforms";
 
 /// SaaS 能服务的平台。与后端 `supported_platforms()` 对齐：3 个文本平台 + 全部视频渠道。
-export type SaasEndpoint = "codex" | "claude" | "gemini" | VideoPlatform;
+export type SaasEndpoint = "codex" | "claude" | "gemini" | typeof VIDEO_PLATFORM;
 export interface SaasHostProps { onConfigChanged?: () => void }
 export interface PageResult<Item> { items: Item[]; total: number; page?: number; pageSize?: number }
 export interface SaasErrorEnvelope { code: string; message: string; details?: unknown }

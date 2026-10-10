@@ -111,7 +111,8 @@ impl StoredReservation {
 /// 少放一处，视频组的 key 就认证不过，后面所有计费代码都是死代码
 /// （见 `reserve_video` 的注释与计划文档「遗留 0」）。
 ///
-/// 用 `LIKE 'video:%'` 而不是列 5 个方言字面量：`Provider.kind` 是
+/// 视频只列 `'video'` 一项（供应商在账号的 `interface_format` 里，不是平台）。
+/// 早先的写法是 `LIKE 'video:%'`：`Provider.kind` 曾是
 /// 「模态:协议」，新方言不该再改一次 SQL。协议段本身的合法性由
 /// `PlatformId::parse` 在凭据/导入边界把关，`video:<未知>` 到不了这里。
 pub async fn authenticate_key(
@@ -123,7 +124,7 @@ pub async fn authenticate_key(
     }
     let mut transaction = pool.begin().await.map_err(db_error)?;
     config::require_enabled(&mut transaction).await?;
-    let principal: Option<ApiPrincipal> = sqlx::query_as("SELECT keys.user_id,keys.id AS key_id,keys.group_id,groups.platform FROM saas_api_keys keys JOIN saas_users users ON users.id=keys.user_id JOIN route_pool_groups groups ON groups.id=keys.group_id WHERE keys.token_hash=? AND keys.status='active' AND (keys.expires_at IS NULL OR keys.expires_at>?) AND users.status='active' AND (groups.platform IN ('codex','claude','gemini') OR groups.platform LIKE 'video:%') AND groups.is_internal=0 AND groups.deleted_at IS NULL")
+    let principal: Option<ApiPrincipal> = sqlx::query_as("SELECT keys.user_id,keys.id AS key_id,keys.group_id,groups.platform FROM saas_api_keys keys JOIN saas_users users ON users.id=keys.user_id JOIN route_pool_groups groups ON groups.id=keys.group_id WHERE keys.token_hash=? AND keys.status='active' AND (keys.expires_at IS NULL OR keys.expires_at>?) AND users.status='active' AND (groups.platform IN ('codex','claude','gemini','video')) AND groups.is_internal=0 AND groups.deleted_at IS NULL")
         .bind(repository::hash_secret(plaintext_key)).bind(repository::now()).fetch_optional(&mut *transaction).await.map_err(db_error)?;
     transaction.commit().await.map_err(db_error)?;
     principal.ok_or_else(|| {

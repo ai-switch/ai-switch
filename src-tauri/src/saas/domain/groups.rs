@@ -1,5 +1,5 @@
 use crate::error::AppError;
-use crate::models::platform::{PlatformId, VideoProtocol};
+use crate::models::platform::PlatformId;
 use crate::saas::repository::{self, db_error, invalid};
 use crate::services::route_model_capability::{
     advertised_model_ids_with_baseline, catalog_members, model_state_key,
@@ -13,21 +13,20 @@ use serde_json::{json, Value};
 use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use std::collections::BTreeSet;
 
-/// SaaS 能服务的平台：3 个文本平台 + **全部视频渠道方言**。
+/// SaaS 能服务的平台：3 个文本平台 + 视频。
 ///
 /// 这是 SaaS 侧平台白名单的单一来源（Rust 侧）。历史教训：它原来只是
 /// `["codex","claude","gemini"]`，而各处 SQL 又各写一遍同样的字面量，
 /// 于是视频渠道被**每一处各自**挡掉，直到集成测试才发现整条链路不可达
-/// （见计划文档「遗留 0」）。视频方言从 `VideoProtocol::ALL` 推导，
-/// 以后新增方言不用改这里，但要记得同步各处 SQL 的 `LIKE 'video:%'`。
+/// （见计划文档「遗留 0」）。
+///
+/// 视频只有一个平台 `video`（供应商在账号的 `interface_format` 里），
+/// 所以这里也只需要一项，不再随方言数量增长。
 fn supported_platforms() -> Vec<&'static str> {
-    let mut platforms: Vec<&'static str> = vec!["codex", "claude", "gemini"];
-    platforms.extend(
-        VideoProtocol::ALL
-            .iter()
-            .map(|protocol| PlatformId::Video(*protocol).as_str()),
-    );
-    platforms
+    PlatformId::all_with_video()
+        .iter()
+        .map(|platform| platform.as_str())
+        .collect()
 }
 
 async fn codex_baseline_models(
@@ -169,7 +168,7 @@ async fn core_group(
         "SELECT id,name,platform,is_internal,is_active
          FROM route_pool_groups
          WHERE id=? AND deleted_at IS NULL
-           AND (platform IN ('codex','claude','gemini') OR platform LIKE 'video:%')",
+           AND (platform IN ('codex','claude','gemini','video'))",
     )
     .bind(group_id)
     .fetch_optional(&mut *connection)
@@ -334,6 +333,22 @@ pub(crate) async fn permitted_accounts_connection(
     Ok(permitted)
 }
 
+/// 与 [`permitted_accounts_for_model`] 相同，但额外要求命中的映射声明了 `capability`。
+///
+/// 存在的理由：`/v1/models` 的列表判定必须与提交时一致。视频提交走的是
+/// `permitted_accounts_for_capability_connection(..., "video.generate")`，
+/// 列表若只用 `permitted_accounts_for_model`（不校验能力），就会列出
+/// 「看得见、提交必失败」的模型。
+pub async fn permitted_accounts_for_capability(
+    pool: &SqlitePool,
+    group_id: &str,
+    model: &str,
+    capability: &str,
+) -> Result<Vec<String>, AppError> {
+    let mut connection = pool.acquire().await.map_err(db_error)?;
+    permitted_accounts_for_capability_connection(&mut *connection, group_id, model, capability).await
+}
+
 pub(crate) async fn permitted_accounts_for_capability_connection(
     connection: &mut SqliteConnection,
     group_id: &str,
@@ -483,7 +498,7 @@ pub async fn list(pool: &SqlitePool, payload: Value, user_only: bool) -> Result<
         sqlx::query_as(
             "SELECT id,name,platform,is_internal,is_active
              FROM route_pool_groups
-             WHERE (platform IN ('codex','claude','gemini') OR platform LIKE 'video:%')
+             WHERE (platform IN ('codex','claude','gemini','video'))
                AND deleted_at IS NULL
              ORDER BY platform,sort_order,created_at,id",
         )
@@ -526,7 +541,7 @@ pub async fn available(pool: &SqlitePool, payload: Value) -> Result<Value, AppEr
     let rows: Vec<CoreGroup> = sqlx::query_as(
         "SELECT groups.id,groups.name,groups.platform,groups.is_internal,groups.is_active
          FROM route_pool_groups groups
-         WHERE (groups.platform IN ('codex','claude','gemini') OR groups.platform LIKE 'video:%')
+         WHERE (groups.platform IN ('codex','claude','gemini','video'))
            AND groups.deleted_at IS NULL
            AND groups.is_internal=0
            AND NOT EXISTS (SELECT 1 FROM saas_group_models models WHERE models.group_id=groups.id)

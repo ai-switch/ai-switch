@@ -66,12 +66,29 @@ async fn execute(
         .fetch_all(pool)
         .await
         .map_err(repository::db_error)?;
+        // 列表判定必须与提交时一致。视频提交走
+        // `permitted_accounts_for_capability_connection(..., "video.generate")`，
+        // 列表若只看 `permitted_accounts_for_model`（不校验能力），就会列出
+        // 「看得见、提交必失败」的模型。
+        let capability =
+            crate::services::route_proxy_service::models_list_capability(&principal.platform);
         let mut available = Vec::new();
         for model in models {
-            if !groups::permitted_accounts_for_model(pool, &principal.group_id, &model)
-                .await?
-                .is_empty()
-            {
+            let permitted = match capability {
+                Some(capability) => {
+                    groups::permitted_accounts_for_capability(
+                        pool,
+                        &principal.group_id,
+                        &model,
+                        capability,
+                    )
+                    .await?
+                }
+                None => {
+                    groups::permitted_accounts_for_model(pool, &principal.group_id, &model).await?
+                }
+            };
+            if !permitted.is_empty() {
                 available.push(json!({"id":model,"object":"model","owned_by":"ai-switch"}));
             }
         }
@@ -100,7 +117,7 @@ async fn execute(
         // 视频 key 只能打视频端点。不加这条的话它会一路走到文本预留，
         // 由 `reserve` 的 `groups.platform IN (...)` 挡下，报出来的是
         // `saas.invalid_key`（「key 无效」）——而真正的原因是端点不对。
-        || (principal.platform.starts_with("video:") && !videos)
+        || (principal.platform == crate::models::platform::VIDEO_PLATFORM && !videos)
     {
         return Err(repository::invalid(
             "saas.endpoint_not_allowed",
