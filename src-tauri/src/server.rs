@@ -434,6 +434,16 @@ pub async fn run_from_env() -> Result<(), String> {
         });
     }
 
+    // Video generation poller (G-P3). Video is an async task-based API, so the
+    // gateway has to advance tasks itself; the loop idles for free when no task
+    // is in flight.
+    {
+        let video_state = (*state).clone();
+        tokio::spawn(async move {
+            crate::videogen::VideoGenerationService::run_loop(video_state).await;
+        });
+    }
+
     // Lift the upstream response id out of legacy rows' stored previews into its
     // own column, mirroring the desktop app, so the cache-cleanup feature can
     // later delete those previews without losing the CLI-transcript join.

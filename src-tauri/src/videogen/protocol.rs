@@ -46,6 +46,37 @@ impl VideoDialect {
     }
 }
 
+/// `PlatformId::VideoProtocol` ↔ `VideoDialect`。
+///
+/// 两张表必须逐字对齐：`PlatformId` 在 `models` 层（不能依赖 `videogen`，
+/// 否则循环依赖），协议解析在 `videogen` 层，所以中间靠这两个 impl 桥接。
+/// 两侧任何一边加了新方言而另一边没跟上，本文件的往返测试就会失败。
+impl From<crate::models::platform::VideoProtocol> for VideoDialect {
+    fn from(protocol: crate::models::platform::VideoProtocol) -> Self {
+        use crate::models::platform::VideoProtocol;
+        match protocol {
+            VideoProtocol::Kling => VideoDialect::Kling,
+            VideoProtocol::Ark => VideoDialect::Ark,
+            VideoProtocol::MiniMax => VideoDialect::MiniMax,
+            VideoProtocol::Zhipu => VideoDialect::Zhipu,
+            VideoProtocol::Sora => VideoDialect::Sora,
+        }
+    }
+}
+
+impl From<VideoDialect> for crate::models::platform::VideoProtocol {
+    fn from(dialect: VideoDialect) -> Self {
+        use crate::models::platform::VideoProtocol;
+        match dialect {
+            VideoDialect::Kling => VideoProtocol::Kling,
+            VideoDialect::Ark => VideoProtocol::Ark,
+            VideoDialect::MiniMax => VideoProtocol::MiniMax,
+            VideoDialect::Zhipu => VideoProtocol::Zhipu,
+            VideoDialect::Sora => VideoProtocol::Sora,
+        }
+    }
+}
+
 /// 统一任务状态（new-api 契约的三种取值）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -245,6 +276,22 @@ pub fn upstream_status_path(dialect: VideoDialect, upstream_task_id: &str) -> St
 // ─────────────── 上游请求体 ───────────────
 
 /// 把统一的 new-api 请求体转成某方言的上游请求体
+/// 客户端没给时长时的缺省值（秒）。
+///
+/// 计费与上游体**必须**共用这一个值：否则「按秒计价」收的秒数和实际发给
+/// 上游的秒数会对不上（见迁移 0008 的计价口径）。
+pub const DEFAULT_VIDEO_DURATION_SECONDS: f64 = 5.0;
+
+/// 这次请求实际生效的时长（取整到秒），计价与上游体共用。
+pub fn effective_duration_seconds(request: &VideoGenerationRequest) -> i64 {
+    let seconds = request.duration.unwrap_or(DEFAULT_VIDEO_DURATION_SECONDS);
+    if seconds.is_finite() {
+        (seconds.round() as i64).max(1)
+    } else {
+        DEFAULT_VIDEO_DURATION_SECONDS as i64
+    }
+}
+
 pub fn upstream_body(
     dialect: VideoDialect,
     model: &str,
@@ -252,7 +299,7 @@ pub fn upstream_body(
 ) -> Result<Vec<u8>, String> {
     let prompt = request.prompt.trim();
     let negative_prompt = request.metadata_str("negative_prompt");
-    let duration = request.duration.unwrap_or(5.0);
+    let duration = request.duration.unwrap_or(DEFAULT_VIDEO_DURATION_SECONDS);
     let ratio = request.aspect_ratio();
 
     let body = match dialect {
@@ -330,11 +377,18 @@ pub fn upstream_body(
 
 // ─────────────── 上游响应解析 ───────────────
 
-/// 按点号路径取值（`data.task_id` → `/data/task_id`）
+/// 按点号路径取值（`data.task_id` → `/data/task_id`）。
+///
+/// 段名是数字时按**数组下标**取值：可灵 / 智谱 / Sora 的视频地址都在数组里
+/// （`data.task_result.videos.0.url`、`video_result.0.url`、`output.0.url`）。
+/// `Value::get(&str)` 只能索引对象，不处理这一层就会静默取不到 url。
 fn dig<'a>(value: &'a Value, dotted: &str) -> Option<&'a Value> {
     let mut current = value;
     for segment in dotted.split('.') {
-        current = current.get(segment)?;
+        current = match current {
+            Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?,
+            _ => current.get(segment)?,
+        };
     }
     Some(current)
 }
@@ -443,6 +497,90 @@ mod tests {
         assert_eq!(ark["content"][1]["image_url"]["url"], "https://img/1.png");
     }
 
+    /// MiniMax / 智谱 / Sora 的上游体、提交响应取值路径、提交与状态路径。
+    ///
+    /// 这三家的字段名与 Kling / Ark 完全不同（`first_frame_image` vs `image`、
+    /// `seconds` vs `duration`、`id` vs `data.task_id`），而各家又各自有一个
+    /// 不同的响应外壳——只有把五家都钉住，改一家时才不会静默带坏另一家。
+    #[test]
+    fn builds_the_remaining_three_dialects_and_their_paths() {
+        let request = VideoGenerationRequest::parse(
+            br#"{"model":"m","prompt":"a fox","duration":10,"image":"https://img/1.png",
+                 "metadata":{"resolution":"720P","size":"1920x1080","with_audio":true,
+                             "callback_url":"https://cb/hook"}}"#,
+        )
+        .expect("request");
+
+        let minimax = upstream_body(VideoDialect::MiniMax, "minimax-hailuo", &request)
+            .expect("minimax");
+        let minimax: Value = serde_json::from_slice(&minimax).expect("json");
+        assert_eq!(minimax["model"], "minimax-hailuo");
+        assert_eq!(minimax["resolution"], "720P");
+        assert_eq!(minimax["first_frame_image"], "https://img/1.png");
+        assert_eq!(minimax["callback_url"], "https://cb/hook");
+
+        let zhipu = upstream_body(VideoDialect::Zhipu, "cogvideo", &request).expect("zhipu");
+        let zhipu: Value = serde_json::from_slice(&zhipu).expect("json");
+        assert_eq!(zhipu["model"], "cogvideo");
+        assert_eq!(zhipu["with_audio"], true);
+        assert_eq!(zhipu["image_url"], "https://img/1.png");
+
+        let sora = upstream_body(VideoDialect::Sora, "sora-2", &request).expect("sora");
+        let sora: Value = serde_json::from_slice(&sora).expect("json");
+        assert_eq!(sora["model"], "sora-2");
+        // Sora 用的是 `seconds` / `size`，不是 `duration` / `aspect_ratio`
+        assert_eq!(sora["seconds"], 10);
+        assert_eq!(sora["size"], "1920x1080");
+        assert_eq!(sora["input_reference"], "https://img/1.png");
+
+        // 提交响应：五家的 task_id 路径各不相同
+        for (dialect, body, expected) in [
+            (VideoDialect::Kling, r#"{"data":{"task_id":"k"}}"#, "k"),
+            (VideoDialect::Ark, r#"{"id":"a"}"#, "a"),
+            (VideoDialect::MiniMax, r#"{"task_id":"m"}"#, "m"),
+            (VideoDialect::Zhipu, r#"{"id":"z"}"#, "z"),
+            (VideoDialect::Sora, r#"{"id":"s"}"#, "s"),
+        ] {
+            assert_eq!(
+                parse_upstream_submit(dialect, body.as_bytes()).unwrap_or_else(|error| panic!(
+                    "{} submit: {error}",
+                    dialect.as_str()
+                )),
+                expected,
+                "{dialect:?}"
+            );
+        }
+
+        // 提交路径：可灵按有无首帧图分 text2video / image2video，其余固定
+        assert_eq!(
+            upstream_submit_path(VideoDialect::Kling, false),
+            "/v1/videos/text2video"
+        );
+        assert_eq!(
+            upstream_submit_path(VideoDialect::Ark, false),
+            "/api/v3/contents/generations/tasks"
+        );
+        assert_eq!(upstream_submit_path(VideoDialect::MiniMax, false), "/v1/video_generation");
+        assert_eq!(upstream_submit_path(VideoDialect::Zhipu, false), "/v4/videos/generations");
+        assert_eq!(upstream_submit_path(VideoDialect::Sora, false), "/v1/videos");
+
+        // 状态路径：MiniMax 不带 task_id（它走 query string，由 `query_path` 拼）
+        assert_eq!(
+            upstream_status_path(VideoDialect::Kling, "t"),
+            "/v1/videos/text2video/t"
+        );
+        assert_eq!(
+            upstream_status_path(VideoDialect::Ark, "t"),
+            "/api/v3/contents/generations/tasks/t"
+        );
+        assert_eq!(
+            upstream_status_path(VideoDialect::MiniMax, "t"),
+            "/v1/query/video_generation"
+        );
+        assert_eq!(upstream_status_path(VideoDialect::Zhipu, "t"), "/v4/async-result/t");
+        assert_eq!(upstream_status_path(VideoDialect::Sora, "t"), "/v1/videos/t");
+    }
+
     #[test]
     fn parses_upstream_submit_and_status() {
         let kling_task = parse_upstream_submit(
@@ -474,6 +612,48 @@ mod tests {
         assert_eq!(sora_processing.status, VideoTaskStatus::Processing);
     }
 
+    /// 五家方言的「成功」响应都必须能取到视频地址。
+    ///
+    /// 可灵 / 智谱 / Sora 把地址放在**数组**里（`…videos.0.url`），而
+    /// `Value::get(&str)` 不能索引数组；这条测试专门盯住那一层，
+    /// 因为取不到 url 时 `poll_once` 会把任务判成失败，症状离根因很远。
+    #[test]
+    fn every_dialect_extracts_the_video_url_from_a_success_response() {
+        let cases: [(VideoDialect, &str, &str); 5] = [
+            (
+                VideoDialect::Kling,
+                r#"{"code":0,"data":{"task_id":"k-1","task_status":"succeed","task_result":{"videos":[{"id":"v1","url":"https://cdn.example/kling.mp4"}]}}}"#,
+                "https://cdn.example/kling.mp4",
+            ),
+            (
+                VideoDialect::Ark,
+                r#"{"id":"a-1","status":"succeeded","content":{"video_url":"https://cdn.example/ark.mp4"}}"#,
+                "https://cdn.example/ark.mp4",
+            ),
+            (
+                VideoDialect::MiniMax,
+                r#"{"task_id":"m-1","status":"Success","file":{"download_url":"https://cdn.example/minimax.mp4"}}"#,
+                "https://cdn.example/minimax.mp4",
+            ),
+            (
+                VideoDialect::Zhipu,
+                r#"{"task_status":"SUCCESS","video_result":[{"url":"https://cdn.example/zhipu.mp4"}]}"#,
+                "https://cdn.example/zhipu.mp4",
+            ),
+            (
+                VideoDialect::Sora,
+                r#"{"id":"s-1","status":"completed","output":[{"url":"https://cdn.example/sora.mp4"}]}"#,
+                "https://cdn.example/sora.mp4",
+            ),
+        ];
+        for (dialect, body, expected) in cases {
+            let status = parse_upstream_status(dialect, body.as_bytes())
+                .unwrap_or_else(|error| panic!("{} status: {error}", dialect.as_str()));
+            assert_eq!(status.status, VideoTaskStatus::Succeeded, "{dialect:?}");
+            assert_eq!(status.url.as_deref(), Some(expected), "{dialect:?} url");
+        }
+    }
+
     #[test]
     fn emits_new_api_contract_responses() {
         let submit: Value = serde_json::from_slice(&submit_response("kling-v2-6", "t-1")).expect("json");
@@ -501,5 +681,44 @@ mod tests {
                 .expect("request");
         assert_eq!(request.aspect_ratio(), "16:9");
         assert_eq!(request.callback_url(), None);
+    }
+
+    /// `VideoDialect`（本模块）与 `PlatformId::VideoProtocol`（models 层）是两张
+    /// 平行表：分层要求它们不能互相引用，于是只能靠 `From` 桥接。这条测试就是
+    /// 那个桥的**唯一**守卫——任何一边新增方言而另一边漏了，往返立刻失败。
+    #[test]
+    fn dialect_and_platform_protocol_round_trip() {
+        use crate::models::platform::{PlatformId, VideoProtocol};
+
+        // 每个方言都要能被平台层解析出来，且字面量一致
+        for dialect in [
+            VideoDialect::Kling,
+            VideoDialect::Ark,
+            VideoDialect::MiniMax,
+            VideoDialect::Zhipu,
+            VideoDialect::Sora,
+        ] {
+            let protocol: VideoProtocol = dialect.into();
+            // 平台层的 `as_str()` 是 `Provider.kind` 的实际取值，必须正好是
+            // `video:<方言>`：这是「模态:协议」语义唯一的落地点。
+            let platform = PlatformId::Video(protocol);
+            assert_eq!(platform.as_str(), format!("video:{}", dialect.as_str()));
+            assert_eq!(VideoDialect::from(protocol), dialect);
+            assert_eq!(
+                VideoProtocol::parse(dialect.as_str()),
+                Some(protocol),
+                "platform layer cannot parse {}",
+                dialect.as_str()
+            );
+            // `video:<dialect>` 与 `dialect_from_provider_kind` 必须一致
+            assert_eq!(
+                dialect_from_provider_kind(platform.as_str()),
+                Some(dialect),
+                "{} did not resolve back to {:?}",
+                platform.as_str(),
+                dialect
+            );
+        }
+        assert_eq!(VideoProtocol::ALL.len(), 5);
     }
 }

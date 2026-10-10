@@ -1,0 +1,17 @@
+-- 视频按秒计价（G-P4 的后续档）
+--
+-- 0007 只做了「每条视频」一档，并诚实声明它覆盖不了用户自选 5s/10s 的成本差。
+-- 这一列补上时长维度。
+--
+-- 计价口径是**相加**而不是二选一：
+--     单条价格 = video_price_micros + video_price_per_second_micros * 时长秒数
+--
+-- 相加能同时表达三种配置，且不必额外加开关：
+--   - 只配 `video_price_micros`        → 退化成 0007 的行为（per_second 默认 0，
+--                                        既有行一分钱都不会变，向后兼容）；
+--   - 只配 `video_price_per_second_micros` → 纯按秒；
+--   - 两个都配                          → 起步价 + 按秒，真实世界里最常见的那种。
+--
+-- 单价在**预留时**就算成最终值并写进预留快照（`unitPriceMicros`），
+-- 所以 `settle_video` 不需要任何改动——它本来就只按快照里的单价乘条数。
+ALTER TABLE saas_group_models ADD COLUMN video_price_per_second_micros INTEGER NOT NULL DEFAULT 0 CHECK(video_price_per_second_micros>=0);

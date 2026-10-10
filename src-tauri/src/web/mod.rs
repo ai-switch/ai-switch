@@ -5,4 +5,5 @@ pub mod router;
 pub mod static_assets;
 pub mod terminal_hub;
 pub mod terminal_ws;
+pub mod video_routes;
 pub mod ws;

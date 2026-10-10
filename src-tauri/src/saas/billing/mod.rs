@@ -12,6 +12,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
+/// 一次视频请求最多生成几条。与 `videogen::service::MAX_VIDEO_COUNT` 保持一致，
+/// 这里单独定义是为了让计费侧不依赖 videogen 模块（计费只管数量上下界）。
+const MAX_VIDEO_COUNT: i64 = 4;
+/// 一次视频请求可接受的时长上界（秒）。防呆用，不是产品限制：
+/// 各家方言的最长时长由上游自己拒绝，这里只挡明显异常的输入。
+const MAX_VIDEO_DURATION_SECONDS: i64 = 600;
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiPrincipal {
@@ -98,6 +105,15 @@ impl StoredReservation {
     }
 }
 
+/// 认证一把 `sk-saas-` key，返回它所属的组与平台。
+///
+/// 这里的平台白名单是「SaaS 能服务哪些平台」的总闸。**视频渠道必须在内**：
+/// 少放一处，视频组的 key 就认证不过，后面所有计费代码都是死代码
+/// （见 `reserve_video` 的注释与计划文档「遗留 0」）。
+///
+/// 用 `LIKE 'video:%'` 而不是列 5 个方言字面量：`Provider.kind` 是
+/// 「模态:协议」，新方言不该再改一次 SQL。协议段本身的合法性由
+/// `PlatformId::parse` 在凭据/导入边界把关，`video:<未知>` 到不了这里。
 pub async fn authenticate_key(
     pool: &SqlitePool,
     plaintext_key: &str,
@@ -107,7 +123,7 @@ pub async fn authenticate_key(
     }
     let mut transaction = pool.begin().await.map_err(db_error)?;
     config::require_enabled(&mut transaction).await?;
-    let principal: Option<ApiPrincipal> = sqlx::query_as("SELECT keys.user_id,keys.id AS key_id,keys.group_id,groups.platform FROM saas_api_keys keys JOIN saas_users users ON users.id=keys.user_id JOIN route_pool_groups groups ON groups.id=keys.group_id WHERE keys.token_hash=? AND keys.status='active' AND (keys.expires_at IS NULL OR keys.expires_at>?) AND users.status='active' AND groups.platform IN ('codex','claude','gemini') AND groups.is_internal=0 AND groups.deleted_at IS NULL")
+    let principal: Option<ApiPrincipal> = sqlx::query_as("SELECT keys.user_id,keys.id AS key_id,keys.group_id,groups.platform FROM saas_api_keys keys JOIN saas_users users ON users.id=keys.user_id JOIN route_pool_groups groups ON groups.id=keys.group_id WHERE keys.token_hash=? AND keys.status='active' AND (keys.expires_at IS NULL OR keys.expires_at>?) AND users.status='active' AND (groups.platform IN ('codex','claude','gemini') OR groups.platform LIKE 'video:%') AND groups.is_internal=0 AND groups.deleted_at IS NULL")
         .bind(repository::hash_secret(plaintext_key)).bind(repository::now()).fetch_optional(&mut *transaction).await.map_err(db_error)?;
     transaction.commit().await.map_err(db_error)?;
     principal.ok_or_else(|| {
@@ -176,6 +192,102 @@ pub async fn reserve_image(
         reserved_micros,
         limits,
         serde_json::json!({"kind":"image","unitPriceMicros":image_price_micros,"count":image_count}).to_string(),
+    )
+    .await?;
+    transaction.commit().await.map_err(db_error)?;
+    Ok(reservation)
+}
+
+/// 视频生成的预留（G-P4）。计量单位是「每条视频」。
+///
+/// 与 `reserve_image` 的三点差异，都是视频这个模态本身带来的：
+///   1. 计价列是 `video_price_micros`，不是 `image_price_micros`；
+///   2. 账号筛选走 `video.generate` 能力，不是 `image.generate`；
+///   3. `platform` 不再是 `codex`/`gemini` 这类**文本**池，而是
+///      `video:kling` 这类**视频渠道**。上面那条 `Limits` 查询里的
+///      `groups.platform IN (...)` 和 `groups.platform=?` 会直接把它挡掉，
+///      所以视频必须有自己的 key/组校验查询。
+pub async fn reserve_video(
+    pool: &SqlitePool,
+    principal: &ApiPrincipal,
+    model: &str,
+    video_count: i64,
+    duration_seconds: i64,
+) -> Result<Reservation, AppError> {
+    if !(1..=MAX_VIDEO_COUNT).contains(&video_count)
+        || model.is_empty()
+        || model.len() > 256
+        // 时长上界只是防呆：真正发到上游的时长由方言体自己决定
+        // （`upstream_body` 用 `duration.unwrap_or(5.0)`，Sora 还会 clamp 到 1..20）。
+        // 计价跟着客户端**请求**的时长走，与上游体保持同一口径。
+        || !(1..=MAX_VIDEO_DURATION_SECONDS).contains(&duration_seconds)
+    {
+        return Err(invalid(
+            "saas.request_limits",
+            "Invalid video model, count or duration",
+        ));
+    }
+    let mut transaction = repository::begin(pool).await?;
+    config::require_enabled(&mut transaction).await?;
+    // 这里刻意不限定 `groups.platform`：视频渠道的 platform 值由谁配置决定
+    // （`video:kling` / `video:seedance` …），硬编码白名单会把新方言漏在门外。
+    // 平台一致性由下面的 `permitted_accounts_for_capability_connection` 收窄：
+    // 它按组的 platform 去账号池里找支持 `video.generate` 的账号。
+    let limits: Option<Limits> = sqlx::query_as("SELECT users.balance_micros,users.frozen_micros AS user_frozen,keys.spent_micros,keys.frozen_micros AS key_frozen,keys.limit_micros,settings.multiplier_micros,settings.max_output_tokens,settings.timeout_seconds,settings.max_concurrency,settings.allow_subscription,settings.allow_balance FROM saas_api_keys keys JOIN saas_users users ON users.id=keys.user_id JOIN route_pool_groups groups ON groups.id=keys.group_id JOIN saas_group_settings settings ON settings.group_id=groups.id WHERE keys.id=? AND keys.user_id=? AND keys.group_id=? AND groups.platform=? AND keys.status='active' AND (keys.expires_at IS NULL OR keys.expires_at>?) AND users.status='active' AND groups.is_internal=0 AND groups.deleted_at IS NULL")
+        .bind(&principal.key_id).bind(&principal.user_id).bind(&principal.group_id).bind(&principal.platform).bind(repository::now()).fetch_optional(&mut *transaction).await.map_err(db_error)?;
+    let limits =
+        limits.ok_or_else(|| invalid("saas.invalid_key", "API key is no longer available"))?;
+    crate::saas::domain::model_sync::reconcile_group_connection(
+        &mut *transaction,
+        &principal.group_id,
+    )
+    .await?;
+    // 单价 = 起步价 + 按秒价 × 时长（相加，见迁移 0008）。只配起步价的行
+    // `per_second` 是 0，行为与 0007 完全一致。
+    let priced: Option<(i64, i64, String)> = sqlx::query_as("SELECT video_price_micros,video_price_per_second_micros,upstream_model FROM saas_group_models WHERE group_id=? AND model=? AND sync_state='active' AND enabled=1")
+        .bind(&principal.group_id).bind(model).fetch_optional(&mut *transaction).await.map_err(db_error)?;
+    let (video_price_micros, video_price_per_second_micros, upstream_model) =
+        priced.ok_or_else(|| {
+            invalid(
+                "saas.model_not_allowed",
+                "Video model is not priced and allowed by this group",
+            )
+        })?;
+    let unit_price = video_price_micros
+        .checked_add(video_price_per_second_micros.saturating_mul(duration_seconds))
+        .filter(|price| *price > 0)
+        .ok_or_else(|| {
+            invalid(
+                "saas.model_not_allowed",
+                "Video model has no usable price",
+            )
+        })?;
+    let credential_ids = groups::permitted_accounts_for_capability_connection(
+        &mut transaction,
+        &principal.group_id,
+        model,
+        "video.generate",
+    )
+    .await?;
+    if credential_ids.is_empty() {
+        return Err(invalid(
+            "saas.empty_pool",
+            "No permitted account currently supports video generation",
+        ));
+    }
+    let reserved_micros = repository::money(
+        unit_price as i128 * video_count as i128 * limits.multiplier_micros as i128
+            / 1_000_000_i128,
+    )?;
+    let reservation = reserve_fixed(
+        &mut transaction,
+        principal,
+        model,
+        upstream_model,
+        credential_ids,
+        reserved_micros,
+        limits,
+        serde_json::json!({"kind":"video","unitPriceMicros":unit_price,"count":video_count,"durationSeconds":duration_seconds}).to_string(),
     )
     .await?;
     transaction.commit().await.map_err(db_error)?;
@@ -482,6 +594,70 @@ pub async fn settle_image(
         status,
         "proxy",
         Some(&format!("image_count={count};unit={unit}")),
+    )
+    .await?;
+    transaction.commit().await.map_err(db_error)?;
+    Ok(result)
+}
+
+/// 视频的结算（G-P4）。与 `settle_image` 同构，差异只有快照 `kind` 与审计原因。
+///
+/// **诚实声明：** 与图像不同，视频的成本高峰在「提交之后、出片之前」——
+/// 上游已经开始烧算了。所以上游 2xx 就代表「这单要收」，哪怕客户端随后
+/// 一直没来查状态（任务超时失败由轮询器的 `MAX_POLL_ATTEMPTS` 兜底，
+/// 那时才走 `settle_video(count=0)` 退款）。
+pub async fn settle_video(
+    pool: &SqlitePool,
+    request_id: &str,
+    success_count: Option<i64>,
+    success: bool,
+) -> Result<Settlement, AppError> {
+    let mut transaction = repository::begin(pool).await?;
+    let mut reservation = load_reservation(&mut transaction, request_id).await?;
+    if ["settled", "refunded"].contains(&reservation.status.as_str()) {
+        return Ok(reservation.result());
+    }
+    if success_count.is_none() && success {
+        sqlx::query("UPDATE saas_billing_reservations SET status='pending_review',updated_at=? WHERE request_id=?").bind(repository::now()).bind(request_id).execute(&mut *transaction).await.map_err(db_error)?;
+        reservation.status = "pending_review".into();
+        transaction.commit().await.map_err(db_error)?;
+        return Ok(reservation.result());
+    }
+    let snapshot: serde_json::Value = serde_json::from_str(&reservation.price_json)
+        .map_err(|_| invalid("saas.pricing_snapshot", "Invalid video price snapshot"))?;
+    if snapshot.get("kind").and_then(serde_json::Value::as_str) != Some("video") {
+        return Err(invalid(
+            "saas.pricing_snapshot",
+            "Reservation is not video billing",
+        ));
+    }
+    let count = success_count.unwrap_or(0);
+    let unit = snapshot
+        .get("unitPriceMicros")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| invalid("saas.pricing_snapshot", "Invalid video unit price"))?;
+    let requested = snapshot
+        .get("count")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    if count < 0 || count > requested {
+        return Err(invalid(
+            "saas.pricing_snapshot",
+            "Invalid successful video count",
+        ));
+    }
+    let cost = repository::money(
+        reservation.reserved_micros as i128 * count as i128 / requested.max(1) as i128,
+    )?;
+    let status = if count == 0 { "refunded" } else { "settled" };
+    let result = finish(
+        &mut transaction,
+        &reservation,
+        cost,
+        None,
+        status,
+        "proxy",
+        Some(&format!("video_count={count};unit={unit}")),
     )
     .await?;
     transaction.commit().await.map_err(db_error)?;

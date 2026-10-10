@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::models::platform::{PlatformId, VideoProtocol};
 use crate::saas::repository::{self, db_error, invalid};
 use crate::services::route_model_capability::{
     advertised_model_ids_with_baseline, catalog_members, model_state_key,
@@ -12,7 +13,22 @@ use serde_json::{json, Value};
 use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use std::collections::BTreeSet;
 
-const SUPPORTED_PLATFORMS: [&str; 3] = ["codex", "claude", "gemini"];
+/// SaaS 能服务的平台：3 个文本平台 + **全部视频渠道方言**。
+///
+/// 这是 SaaS 侧平台白名单的单一来源（Rust 侧）。历史教训：它原来只是
+/// `["codex","claude","gemini"]`，而各处 SQL 又各写一遍同样的字面量，
+/// 于是视频渠道被**每一处各自**挡掉，直到集成测试才发现整条链路不可达
+/// （见计划文档「遗留 0」）。视频方言从 `VideoProtocol::ALL` 推导，
+/// 以后新增方言不用改这里，但要记得同步各处 SQL 的 `LIKE 'video:%'`。
+fn supported_platforms() -> Vec<&'static str> {
+    let mut platforms: Vec<&'static str> = vec!["codex", "claude", "gemini"];
+    platforms.extend(
+        VideoProtocol::ALL
+            .iter()
+            .map(|protocol| PlatformId::Video(*protocol).as_str()),
+    );
+    platforms
+}
 
 async fn codex_baseline_models(
     connection: &mut SqliteConnection,
@@ -41,6 +57,11 @@ pub struct GroupModel {
     pub output_price_micros: i64,
     #[serde(default)]
     pub image_price_micros: i64,
+    #[serde(default)]
+    pub video_price_micros: i64,
+    /// 按秒计价（与 `video_price_micros` **相加**，见迁移 0008）
+    #[serde(default)]
+    pub video_price_per_second_micros: i64,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
     #[serde(default = "active_sync_state")]
@@ -134,6 +155,12 @@ async fn sync_metadata(
     .map_err(db_error)
 }
 
+/// 载入一个 SaaS 可管理的核心组。
+///
+/// **这是 SaaS 侧的第二个总闸，而且是关键的一个**：`groups.save`（唯一的
+/// `saas_group_models` 写入路径）、`permitted_accounts_*`（决定预留能拿到哪些账号）、
+/// `group_json` / `catalog`（后台能不能看到这个组）全都经过它。
+/// 视频渠道必须在内，否则 `reserve_video` 一定拿不到账号（返回 `saas.empty_pool`）。
 async fn core_group(
     connection: &mut SqliteConnection,
     group_id: &str,
@@ -141,7 +168,8 @@ async fn core_group(
     sqlx::query_as(
         "SELECT id,name,platform,is_internal,is_active
          FROM route_pool_groups
-         WHERE id=? AND deleted_at IS NULL AND platform IN ('codex','claude','gemini')",
+         WHERE id=? AND deleted_at IS NULL
+           AND (platform IN ('codex','claude','gemini') OR platform LIKE 'video:%')",
     )
     .bind(group_id)
     .fetch_optional(&mut *connection)
@@ -169,7 +197,7 @@ async fn models(
 ) -> Result<Vec<GroupModel>, AppError> {
     sqlx::query_as(
         "SELECT model,upstream_model,input_price_micros,cache_price_micros,output_price_micros,
-                image_price_micros,enabled,sync_state,managed_by_pool,last_seen_at,updated_at
+                image_price_micros,video_price_micros,video_price_per_second_micros,enabled,sync_state,managed_by_pool,last_seen_at,updated_at
          FROM saas_group_models WHERE group_id=? ORDER BY model",
     )
     .bind(group_id)
@@ -434,7 +462,7 @@ pub async fn list(pool: &SqlitePool, payload: Value, user_only: bool) -> Result<
     let (limit, offset) = repository::page(&payload)?;
     let platform = payload.get("platform").and_then(Value::as_str);
     if let Some(platform) = platform {
-        if !SUPPORTED_PLATFORMS.contains(&platform) {
+        if !supported_platforms().contains(&platform) {
             return Err(invalid("saas.validation", "Unsupported platform"));
         }
     }
@@ -455,7 +483,8 @@ pub async fn list(pool: &SqlitePool, payload: Value, user_only: bool) -> Result<
         sqlx::query_as(
             "SELECT id,name,platform,is_internal,is_active
              FROM route_pool_groups
-             WHERE platform IN ('codex','claude','gemini') AND deleted_at IS NULL
+             WHERE (platform IN ('codex','claude','gemini') OR platform LIKE 'video:%')
+               AND deleted_at IS NULL
              ORDER BY platform,sort_order,created_at,id",
         )
         .fetch_all(&mut *connection)
@@ -497,7 +526,7 @@ pub async fn available(pool: &SqlitePool, payload: Value) -> Result<Value, AppEr
     let rows: Vec<CoreGroup> = sqlx::query_as(
         "SELECT groups.id,groups.name,groups.platform,groups.is_internal,groups.is_active
          FROM route_pool_groups groups
-         WHERE groups.platform IN ('codex','claude','gemini')
+         WHERE (groups.platform IN ('codex','claude','gemini') OR groups.platform LIKE 'video:%')
            AND groups.deleted_at IS NULL
            AND groups.is_internal=0
            AND NOT EXISTS (SELECT 1 FROM saas_group_models models WHERE models.group_id=groups.id)
@@ -541,7 +570,7 @@ pub async fn catalog(pool: &SqlitePool, payload: Value) -> Result<Value, AppErro
         baseline_models.as_deref(),
     );
     Ok(json!({
-        "platforms": SUPPORTED_PLATFORMS,
+        "platforms": supported_platforms(),
         "platform": group.platform,
         "groupId": group.id,
         "name": group.name,
@@ -632,6 +661,8 @@ pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> 
                 model.cache_price_micros,
                 model.output_price_micros,
                 model.image_price_micros,
+                model.video_price_micros,
+                model.video_price_per_second_micros,
             ]
             .iter()
             .any(|price| !(0..=repository::MAX_MONEY).contains(price))
@@ -733,9 +764,9 @@ pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> 
         sqlx::query(
             "INSERT INTO saas_group_models
                (group_id,model,upstream_model,input_price_micros,cache_price_micros,
-                output_price_micros,image_price_micros,version,enabled,sync_state,
+                output_price_micros,image_price_micros,video_price_micros,video_price_per_second_micros,version,enabled,sync_state,
                 managed_by_pool,last_seen_at,updated_at)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&identifier)
         .bind(model.model)
@@ -744,6 +775,8 @@ pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> 
         .bind(model.cache_price_micros)
         .bind(model.output_price_micros)
         .bind(model.image_price_micros)
+        .bind(model.video_price_micros)
+        .bind(model.video_price_per_second_micros)
         .bind(version)
         .bind(enabled)
         .bind(sync_state)

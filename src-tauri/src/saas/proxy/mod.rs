@@ -28,7 +28,7 @@ pub(crate) async fn handle(
 ) -> Response {
     let proxy = build_proxy_state(state.pool.clone(), &state.route_proxy);
     let mut response =
-        match execute(&state.pool, &state.saas, proxy, method, headers, uri, body).await {
+        match execute(state, &state.saas, proxy, method, headers, uri, body).await {
             Ok(response) => response,
             Err(error) => crate::saas::transport::error_response(error),
         };
@@ -39,7 +39,7 @@ pub(crate) async fn handle(
 }
 
 async fn execute(
-    pool: &SqlitePool,
+    app_state: &AppState,
     runtime: &SaasRuntime,
     proxy: ProxyAppState,
     method: Method,
@@ -47,6 +47,7 @@ async fn execute(
     uri: Uri,
     body: Body,
 ) -> Result<Response, AppError> {
+    let pool = &app_state.pool;
     runtime.initialize(pool).await?;
     let key = extract_inbound_api_key(&headers, None)
         .ok_or_else(|| repository::invalid("saas.invalid_key", "An API key is required"))?;
@@ -83,11 +84,17 @@ async fn execute(
         path.as_str(),
         "/v1/images/generations" | "/images/generations"
     );
+    // 视频渠道（G-P4）。平台值由组决定（`video:kling` …），所以这里只判断路径。
+    let videos = crate::services::route_proxy_service::is_video_generation_path(&path);
     if method != Method::POST
-        || !(anthropic || responses || chat || images)
+        || !(anthropic || responses || chat || images || videos)
         || (principal.platform == "claude" && !(anthropic || responses))
         || (principal.platform == "gemini" && !images)
         || (principal.platform == "codex" && anthropic)
+        // 视频 key 只能打视频端点。不加这条的话它会一路走到文本预留，
+        // 由 `reserve` 的 `groups.platform IN (...)` 挡下，报出来的是
+        // `saas.invalid_key`（「key 无效」）——而真正的原因是端点不对。
+        || (principal.platform.starts_with("video:") && !videos)
     {
         return Err(repository::invalid(
             "saas.endpoint_not_allowed",
@@ -125,6 +132,12 @@ async fn execute(
     if images {
         return execute_image_request(
             pool, runtime, proxy, principal, headers, uri, payload, model, &path,
+        )
+        .await;
+    }
+    if videos {
+        return execute_video_request(
+            app_state, pool, runtime, principal, payload, &path,
         )
         .await;
     }
@@ -367,6 +380,142 @@ async fn execute_image_request(
         .headers
         .insert("x-saas-request-id", request_id.parse().unwrap());
     Ok(Response::from_parts(parts, Body::from(bytes)))
+}
+
+/// 视频渠道的 SaaS 执行（G-P4）。
+///
+/// 与 `execute_image_request` 的**根本差异**：视频是异步任务 API，一次
+/// `POST /v1/video/generations` 只换来一个 task_id，真正出片在若干分钟之后。
+/// 因此这里：
+///   - 只做「预留 → 提交 → 结算（按已受理计费）→ 写日志 → 原样回 201」；
+///   - 后续的轮询与回调**不在本请求的生命周期里**，由 `videogen` 的常驻
+///     轮询器（`VideoGenerationService::run_loop`）推进。这是**有意为之**：
+///     若把轮询挂在这个 HTTP 请求上，客户端一断开进程就被取消，任务永远
+///     停在 processing。
+///
+/// 计费口径：上游 2xx 即视为「已受理、开始烧算」。这一单就按提交的视频条数
+/// 收款；若任务最终失败，由轮询器把 message 标 failed，但**不自动退款**——
+/// 上游确实消耗了算力，是否退款需要人工判（与「上游 4xx 直接退」的图像路径
+/// 不同）。
+async fn execute_video_request(
+    state: &AppState,
+    pool: &SqlitePool,
+    runtime: &SaasRuntime,
+    principal: billing::ApiPrincipal,
+    payload: Value,
+    path: &str,
+) -> Result<Response, AppError> {
+    let object = payload.as_object().ok_or_else(|| {
+        repository::invalid("saas.validation", "Request must contain a JSON object")
+    })?;
+    let model = object
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| repository::invalid("saas.model_not_allowed", "A model is required"))?
+        .to_string();
+    let count = object
+        .get("n")
+        .map(|value| {
+            value.as_i64().ok_or_else(|| {
+                repository::invalid("saas.request_limits", "Video count must be an integer")
+            })
+        })
+        .transpose()?
+        .unwrap_or(1);
+
+    // 先解析契约体再预留，这样计价用的时长与真正发到上游的时长是**同一个来源**
+    // （`request.duration`，缺省值与 `upstream_body` 共用常量），不会各算一套。
+    // 顺带：解析失败时还没预留，也就不需要退款那一支了。
+    let request = serde_json::from_value::<crate::videogen::protocol::VideoGenerationRequest>(
+        payload.clone(),
+    )
+    .map_err(|error| {
+        repository::invalid("saas.validation", &format!("Invalid video request: {error}"))
+    })?;
+    let duration_seconds = crate::videogen::protocol::effective_duration_seconds(&request);
+
+    let reservation =
+        billing::reserve_video(pool, &principal, &model, count, duration_seconds).await?;
+    let request_id = reservation.request_id.clone();
+    let started = Instant::now();
+    let created_at = chrono::Utc::now();
+
+    let outcome = crate::videogen::VideoGenerationService::submit(
+        state,
+        crate::videogen::SubmitVideoInput {
+            platform: principal.platform.clone(),
+            request,
+            session_id: None,
+            message_id: None,
+            // 关键：把账号池收窄到 `reserve_video` 算出的白名单，否则 SaaS key
+            // 会被路由到组外的账号。
+            credential_ids: Some(reservation.credential_ids.clone()),
+            // 组定价那一行的上游模型名：客户端看到的是 `model`，上游要的是这个。
+            upstream_model: Some(reservation.upstream_model.clone()),
+        },
+    )
+    .await;
+
+    let (status, body, success) = match outcome {
+        Ok(body) => (StatusCode::CREATED, body, true),
+        Err(error) => {
+            let status = match error.code() {
+                "validation.video_platform" | "validation.video_request" => {
+                    StatusCode::BAD_REQUEST
+                }
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            let body = json!({"error":{"code":error.code(),"message":error.to_string()}})
+                .to_string()
+                .into_bytes();
+            (status, body, false)
+        }
+    };
+    // 提交失败（上游拒了 / 建体失败）时条数为 0，`settle_video` 会走退款。
+    let settled_count = if success { Some(count) } else { Some(0) };
+    let settlement = billing::settle_video(pool, &request_id, settled_count, success).await?;
+
+    let record = LogRecord {
+        request_id: request_id.clone(),
+        user_id: reservation.user_id,
+        key_id: reservation.key_id,
+        group_id: reservation.group_id,
+        platform: reservation.platform,
+        model,
+        endpoint: path.to_string(),
+        created_at,
+        utc_offset_minutes: chrono::Local::now().offset().local_minus_utc() / 60,
+        duration_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+        status: status.as_u16(),
+        amount_usd_micros: settlement.price_usd_micros.unwrap_or(0),
+        settlement_status: settlement.status,
+        error_code: if success {
+            None
+        } else {
+            Some("upstream_rejected".into())
+        },
+        ..Default::default()
+    };
+    if runtime.logs.enqueue(record).await.is_err() {
+        eprintln!("SaaS request log queue rejected a completed video request");
+    }
+
+    let mut response = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .map_err(|_| repository::invalid("saas.response", "Could not build video response"))?;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        "no-store".parse().expect("static header"),
+    );
+    if let Ok(value) = request_id.parse() {
+        response
+            .headers_mut()
+            .insert("x-saas-request-id", value);
+    }
+    Ok(response)
 }
 
 struct Completion {

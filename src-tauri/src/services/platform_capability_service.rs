@@ -10,6 +10,12 @@ const API_CREDENTIALS_ONLY: &str = "capability.api_credentials_only";
 const OFFICIAL_ACCOUNT_UNAVAILABLE: &str = "capability.official_account_unavailable";
 const DEEPLINK_UNAVAILABLE: &str = "capability.deeplink_unavailable";
 const QUOTA_UNAVAILABLE: &str = "capability.quota_unavailable";
+/// 视频渠道专用：不写任何 CLI 配置。
+const CONFIG_WRITE_UNAVAILABLE: &str = "capability.video_no_config_write";
+/// 视频渠道专用：模型测试走 videogen 自己的提交链路，不在这里。
+const VIDEO_MODEL_TEST_UNAVAILABLE: &str = "capability.video_model_test_separate";
+/// 视频渠道专用：没有终端/会话概念。
+const VIDEO_AGENT_ONLY: &str = "capability.video_not_an_agent";
 
 pub struct PlatformCapabilityService;
 
@@ -45,6 +51,33 @@ impl PlatformCapabilityService {
 }
 
 fn capability_for(platform: PlatformId) -> PlatformCapability {
+    // 视频渠道（G-P1）。它和文本平台的能力集**完全不同**：
+    //   - 有账号池（route_credentials）、走通用 API 路由（generic_api_routing）
+    //     ——这正是 `forward_request` 需要的那两项；
+    //   - 没有任何「官方账号」概念：视频上游都是 API key 渠道；
+    //   - 不写 CLI 配置（视频不是 CLI 的 provider）、不支持 deeplink 导入、
+    //     不支持终端启动/会话续跑（那是 Agent 才有的东西）；
+    //   - 模型测试走 `videogen` 自己的提交链路，不进 `route_model_test_service`。
+    if platform.is_video() {
+        return PlatformCapability {
+            platform,
+            display_name: platform.display_name().to_string(),
+            support_level: SupportLevel::Partial,
+            operations: PlatformOperations {
+                route_credentials: api_credentials_only(),
+                generic_api_routing: api_credentials_only(),
+                config_write: unavailable(CONFIG_WRITE_UNAVAILABLE),
+                official_import: unavailable(OFFICIAL_ACCOUNT_UNAVAILABLE),
+                official_account_routing: unavailable(OFFICIAL_ACCOUNT_UNAVAILABLE),
+                deeplink_import: unavailable(DEEPLINK_UNAVAILABLE),
+                official_quota: unavailable(QUOTA_UNAVAILABLE),
+                model_test: unavailable(VIDEO_MODEL_TEST_UNAVAILABLE),
+                terminal_launch: unavailable(VIDEO_AGENT_ONLY),
+                session_resume: unavailable(VIDEO_AGENT_ONLY),
+            },
+        };
+    }
+
     let partial = matches!(
         platform,
         PlatformId::OpenCode | PlatformId::OpenClaw | PlatformId::Hermes

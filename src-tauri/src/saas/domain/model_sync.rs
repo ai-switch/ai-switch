@@ -41,6 +41,8 @@ struct ExistingModel {
     cache_price_micros: i64,
     output_price_micros: i64,
     image_price_micros: i64,
+    video_price_micros: i64,
+    video_price_per_second_micros: i64,
     version: i64,
     enabled: bool,
     sync_state: String,
@@ -65,13 +67,19 @@ struct DesiredModel {
 ///
 /// The operation only manages Claude groups. Other SaaS platforms return a
 /// stable no-op result so callers can safely use the same hook for all groups.
+///
+/// 视频渠道（`video:*`）走的就是这条 no-op 路径：视频的模型目录由管理员在
+/// `groups.save` 里手工定价，没有「按账号自动发现」这回事。**但它必须在白名单里**，
+/// 否则 `reserve_video` 调到这里会直接 `saas.group_not_found`（这是视频链路被挡住的
+/// 第四个闸门，见计划文档「遗留 0」）。
 pub(crate) async fn reconcile_group_connection(
     connection: &mut SqliteConnection,
     group_id: &str,
 ) -> Result<SaasModelSyncResult, AppError> {
     let group: Option<(String, bool)> = sqlx::query_as(
         "SELECT platform,is_internal FROM route_pool_groups
-         WHERE id=? AND deleted_at IS NULL AND platform IN ('codex','claude','gemini')",
+         WHERE id=? AND deleted_at IS NULL
+           AND (platform IN ('codex','claude','gemini') OR platform LIKE 'video:%')",
     )
     .bind(group_id)
     .fetch_optional(&mut *connection)
@@ -121,7 +129,7 @@ pub(crate) async fn reconcile_group_connection(
     let desired = desired_models(&members);
     let existing: Vec<ExistingModel> = sqlx::query_as(
         "SELECT model,upstream_model,input_price_micros,cache_price_micros,
-                output_price_micros,image_price_micros,version,enabled,sync_state,
+                output_price_micros,image_price_micros,video_price_micros,video_price_per_second_micros,version,enabled,sync_state,
                 managed_by_pool,last_seen_at,updated_at
          FROM saas_group_models WHERE group_id=? ORDER BY model",
     )
@@ -188,9 +196,9 @@ pub(crate) async fn reconcile_group_connection(
             sqlx::query(
                 "INSERT INTO saas_group_models
                    (group_id,model,upstream_model,input_price_micros,cache_price_micros,
-                    output_price_micros,image_price_micros,version,enabled,sync_state,
+                    output_price_micros,image_price_micros,video_price_micros,video_price_per_second_micros,version,enabled,sync_state,
                     managed_by_pool,last_seen_at,updated_at)
-                 VALUES(?,?,?,0,0,0,0,1,0,'pending_pricing',1,?,?)",
+                 VALUES(?,?,?,0,0,0,0,0,0,1,0,'pending_pricing',1,?,?)",
             )
             .bind(group_id)
             .bind(&desired_model.model)
@@ -381,15 +389,17 @@ async fn upsert_migrated_model(
     sqlx::query(
         "INSERT INTO saas_group_models
            (group_id,model,upstream_model,input_price_micros,cache_price_micros,
-            output_price_micros,image_price_micros,version,enabled,sync_state,
+            output_price_micros,image_price_micros,video_price_micros,video_price_per_second_micros,version,enabled,sync_state,
             managed_by_pool,last_seen_at,updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,'active',1,?,?)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,'active',1,?,?)
          ON CONFLICT(group_id,model) DO UPDATE SET
            upstream_model=excluded.upstream_model,
            input_price_micros=excluded.input_price_micros,
            cache_price_micros=excluded.cache_price_micros,
            output_price_micros=excluded.output_price_micros,
            image_price_micros=excluded.image_price_micros,
+           video_price_micros=excluded.video_price_micros,
+           video_price_per_second_micros=excluded.video_price_per_second_micros,
            version=excluded.version,
            enabled=excluded.enabled,
            sync_state=excluded.sync_state,
@@ -404,6 +414,8 @@ async fn upsert_migrated_model(
     .bind(source.cache_price_micros)
     .bind(source.output_price_micros)
     .bind(source.image_price_micros)
+    .bind(source.video_price_micros)
+    .bind(source.video_price_per_second_micros)
     .bind(source.version)
     .bind(source.enabled)
     .bind(now)
@@ -444,7 +456,7 @@ async fn result_from_connection(
 ) -> Result<SaasModelSyncResult, AppError> {
     let rows: Vec<GroupModel> = sqlx::query_as(
         "SELECT model,upstream_model,input_price_micros,cache_price_micros,
-                output_price_micros,image_price_micros,enabled,sync_state,
+                output_price_micros,image_price_micros,video_price_micros,video_price_per_second_micros,enabled,sync_state,
                 managed_by_pool,last_seen_at,updated_at
          FROM saas_group_models WHERE group_id=? ORDER BY model",
     )
@@ -580,9 +592,9 @@ mod tests {
         sqlx::query(
             "INSERT INTO saas_group_models
                (group_id,model,upstream_model,input_price_micros,cache_price_micros,
-                output_price_micros,image_price_micros,version,enabled,sync_state,
+                output_price_micros,image_price_micros,video_price_micros,video_price_per_second_micros,version,enabled,sync_state,
                 managed_by_pool,last_seen_at,updated_at)
-             VALUES('claude-saas','claude-sonnet-alias','provider-sonnet',101,202,303,404,
+             VALUES('claude-saas','claude-sonnet-alias','provider-sonnet',101,202,303,404,505,606,
                     7,1,'active',0,NULL,99)",
         )
         .execute(&pool)

@@ -188,6 +188,25 @@ async fn shared_fallback(
         {
             return route_access_disabled_response();
         }
+        // 视频渠道（G-P4）走自己的服务层，不进 `proxy_handler`：它需要
+        // 「先转方言体 → 打上游 → 落任务 → 回 201」这套异步流程，而不是
+        // 逐字节透明转发。鉴权与 SaaS 分流已经在上面完成。
+        if crate::services::route_proxy_service::is_video_generation_path(uri.path()) {
+            // 本地 token 才有权使用 `x-ai-switch-platform` 这个特权诊断覆盖；
+            // 未授权时摘掉它，让平台只能从请求体 `platform` 字段取（与
+            // `proxy_handler` 的处理保持一致）。
+            if !crate::web::auth::is_authorized(&headers, &context.token) {
+                headers.remove("x-ai-switch-platform");
+            }
+            return crate::web::video_routes::handle_video_request(
+                &context.state,
+                method,
+                &headers,
+                &uri,
+                body,
+            )
+            .await;
+        }
         let Some(proxy_state) = context.proxy.clone().or_else(|| {
             saas_config
                 .enabled

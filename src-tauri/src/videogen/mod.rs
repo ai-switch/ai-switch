@@ -5,12 +5,12 @@
 //! - **G-P2c**：`/v1/video/generations` + `GET /{task_id}`（new-api 契约）+ 各家协议转换（`protocol.rs`）
 //! - **G-P3**：异步任务表 + 轮询推进 + 回调（`repository.rs` 的 `videogen_tasks`）
 //!
-//! 注意：本模块目前只到「契约 + 持久化」层；`service` / HTTP 路由 / SaaS 计费接线是下一步，
-//! 故暂允许未被引用的公开项（`dead_code`），接线后应移除本 allow。
-#![allow(dead_code)]
+//! - **G-P3**：服务层（`service.rs`）：提交 → 落库 → 轮询推进 → 回调
+//! - **G-P4**：HTTP 路由 `/v1/video/generations` + SaaS 白名单与计费
 
 pub mod models;
 pub mod protocol;
 pub mod repository;
+pub mod service;
 
-pub use models::*;
+pub use service::{SubmitVideoInput, VideoGenerationService};

@@ -85,7 +85,7 @@ pub async fn create(pool: &SqlitePool, user_id: &str, payload: Value) -> Result<
          FROM route_pool_groups groups
          JOIN saas_group_settings settings ON settings.group_id=groups.id
          WHERE groups.id=?
-           AND groups.platform IN ('codex','claude')
+           AND (groups.platform IN ('codex','claude') OR groups.platform LIKE 'video:%')
            AND groups.is_internal=0
            AND groups.deleted_at IS NULL
            AND EXISTS (SELECT 1 FROM saas_group_models models WHERE models.group_id=groups.id)",

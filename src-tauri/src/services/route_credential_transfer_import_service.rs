@@ -1061,6 +1061,69 @@ mod tests {
         assert_eq!(preview.counts.duplicates, 1);
     }
 
+    /// 视频渠道可以走导入进来，平台串会归一成 `PlatformId::as_str()`。
+    ///
+    /// 这条路径目前是**唯一**能配置 `video:kling` 账号的入口——后台 UI 的平台选择器
+    /// 只有 7 个文本平台（见计划文档「遗留 1」），所以它必须能用。
+    /// 同时钉住别名归一：`video:seedance` 落库要变成 `video:ark`。
+    #[tokio::test]
+    async fn video_channels_are_importable_and_normalize_to_their_canonical_platform() {
+        let pool = migrated_pool().await;
+
+        let mut kling = compatibility_item("video:kling");
+        kling.insert(
+            "api-key-entries".to_string(),
+            json!([{"api-key": "kling-key-material"}]),
+        );
+        // `video:seedance` 是 Ark 的别名，落库必须归一成 `video:ark`
+        let mut seedance = compatibility_item("video:seedance");
+        seedance.insert(
+            "api-key-entries".to_string(),
+            json!([{"api-key": "seedance-key-material"}]),
+        );
+        let text = Value::Array(vec![
+            Value::Object(kling.clone()),
+            Value::Object(seedance.clone()),
+        ])
+        .to_string();
+
+        let preview = preview_route_credential_import(
+            &pool,
+            PreviewRouteCredentialImportInput {
+                text: text.clone(),
+                ambiguous_platform_choices: Vec::new(),
+            },
+        )
+        .await
+        .expect("preview");
+
+        // 视频渠道不是「平台不支持」：两条都应当可导入
+        assert_eq!(preview.items[0].disposition, "import");
+        assert_eq!(preview.items[1].disposition, "import");
+        assert_eq!(preview.counts.importable, 2);
+
+        import_route_credentials(
+            &pool,
+            ImportRouteCredentialsInput {
+                text,
+                ambiguous_platform_choices: Vec::new(),
+                restore_pool_membership: false,
+            },
+        )
+        .await
+        .expect("import");
+
+        let platforms: Vec<String> =
+            sqlx::query_scalar("SELECT platform FROM route_credentials ORDER BY platform")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            platforms,
+            vec!["video:ark".to_string(), "video:kling".to_string()]
+        );
+    }
+
     #[tokio::test]
     async fn preview_route_credential_import_detects_possible_duplicates_and_ignores_bad_candidates(
     ) {
@@ -1964,7 +2027,10 @@ pub async fn preview_route_credential_import(
     input: PreviewRouteCredentialImportInput,
 ) -> Result<RouteCredentialImportPreview, AppError> {
     let normalized = normalize_transfer_items(&input.text, &input.ambiguous_platform_choices)?;
-    let platforms = PlatformId::ALL
+    // 用 `all_with_video()` 而不是 `ALL`：视频渠道（`video:kling` …）也是本地
+    // 账号池的一员，导入去重必须把它们算进来，否则同一路视频账号会被重复导入。
+    // 凭据的 `platform` 列写的就是 `PlatformId::as_str()`，两边字面量一致。
+    let platforms = PlatformId::all_with_video()
         .iter()
         .map(|platform| platform.as_str().to_string())
         .collect::<Vec<_>>();

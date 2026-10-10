@@ -655,9 +655,9 @@ async fn pending_or_stale_saas_model_cannot_create_a_reservation() {
     sqlx::query(
         "INSERT INTO saas_group_models
            (group_id,model,upstream_model,input_price_micros,cache_price_micros,
-            output_price_micros,image_price_micros,version,enabled,sync_state,
+            output_price_micros,image_price_micros,video_price_micros,version,enabled,sync_state,
             managed_by_pool,last_seen_at,updated_at)
-         VALUES('claude-saas','provider-sonnet','provider-sonnet',1000,100,2000,0,
+         VALUES('claude-saas','provider-sonnet','provider-sonnet',1000,100,2000,0,0,
                 1,1,'pending_pricing',1,NULL,0)",
     )
     .execute(&pool)

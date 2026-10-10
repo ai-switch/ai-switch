@@ -101,7 +101,8 @@ async fn daily_subscription_migration_upgrades_an_existing_growth_schema() {
             .unwrap();
     // The latest migration is whatever the repository currently ships; pin it
     // so a future migration must consciously update this expectation.
-    assert_eq!(version, 6);
+    // 8 = 0008_video_price_per_second.sql (saas_group_models.video_price_per_second_micros).
+    assert_eq!(version, 8);
     assert!(columns.iter().any(|column| column == "invite_code"));
     assert!(!columns.iter().any(|column| column == "invite_code_hash"));
     assert_eq!(table_exists, 1);

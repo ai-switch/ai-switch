@@ -469,10 +469,16 @@ pub(crate) struct ProxyAppState {
 #[derive(Clone)]
 struct ProxyAccessScope {
     platform: PlatformId,
-    credential_ids: HashSet<String>,
+    /// `None` = 不限制账号子集（整池可选）；`Some(set)` = 只允许 set 内的账号。
+    ///
+    /// 这两者必须区分开：`Some(空集)` 是「一个都不允许」（SaaS 预留算不出可用账号时
+    /// 要 fail closed），而 `None` 是「不设限」。把后者写成前者会让整条链路一个
+    /// 候选都选不出来。
+    credential_ids: Option<HashSet<String>>,
 }
 
 impl ProxyAppState {
+    /// 钉死平台，并把账号池收窄到给定集合（SaaS 计费路径用）。
     pub(crate) fn with_access_scope(
         mut self,
         platform: PlatformId,
@@ -480,7 +486,16 @@ impl ProxyAppState {
     ) -> Self {
         self.access_scope = Some(Arc::new(ProxyAccessScope {
             platform,
-            credential_ids,
+            credential_ids: Some(credential_ids),
+        }));
+        self
+    }
+
+    /// 只钉死平台，不限制账号子集（直连网关路径用）。
+    pub(crate) fn with_platform_scope(mut self, platform: PlatformId) -> Self {
+        self.access_scope = Some(Arc::new(ProxyAccessScope {
+            platform,
+            credential_ids: None,
         }));
         self
     }
@@ -5337,7 +5352,7 @@ async fn load_request_candidates(
         state
             .access_scope
             .as_ref()
-            .map(|scope| &scope.credential_ids),
+            .and_then(|scope| scope.credential_ids.as_ref()),
     )
     .await
 }
@@ -5741,6 +5756,17 @@ fn requested_image_capability(path: &str) -> Option<&'static str> {
 /// 视频生成能力（G-P2c）。提交与状态查询都归 `video.generate`。
 /// 状态查询路径形如 `/v1/video/generations/{task_id}`，故按前缀判断。
 fn requested_video_capability(path: &str) -> Option<&'static str> {
+    requested_video_capability_for(path)
+}
+
+/// 视频端点识别（G-P4）。与 `requested_video_capability` 共用同一份路径判断，
+/// 但对外可见：`web::router::shared_fallback` 要用它决定把请求交给
+/// `videogen` 服务层而不是 `proxy_handler`。
+pub(crate) fn is_video_generation_path(path: &str) -> bool {
+    requested_video_capability_for(path).is_some()
+}
+
+fn requested_video_capability_for(path: &str) -> Option<&'static str> {
     let normalized = path.trim().trim_end_matches('/');
     if normalized == "/video/generations"
         || normalized == "/v1/video/generations"
@@ -8319,6 +8345,11 @@ fn default_official_base_url(platform: PlatformId) -> Result<&'static str, Strin
         PlatformId::OpenCode | PlatformId::OpenClaw | PlatformId::Hermes => {
             Err("capability.unavailable: official account routing is unavailable".to_string())
         }
+        // 视频渠道全是 API key 渠道；不存在官网上游地址可回退。
+        PlatformId::Video(_) => Err(
+            "capability.unavailable: official account routing is unavailable for video channels"
+                .to_string(),
+        ),
     }
 }
 
@@ -8852,7 +8883,9 @@ fn restrict_candidates(
     mut candidates: Vec<PoolCandidate>,
 ) -> Vec<PoolCandidate> {
     if let Some(scope) = &state.access_scope {
-        candidates.retain(|candidate| scope.credential_ids.contains(&candidate.credential.id));
+        if let Some(allowed) = &scope.credential_ids {
+            candidates.retain(|candidate| allowed.contains(&candidate.credential.id));
+        }
     }
     candidates
 }

@@ -4,6 +4,12 @@
 //! - `platform` 语义是「渠道平台」（对齐 `Provider.kind` 的「模态:协议」，如 `video:kling`）
 //! - message 带 `task_id`（视频是异步任务）
 //! - 额外有 `VideoTask`：异步任务表，驱动「提交 → 轮询 → 回调」
+//!
+//! 本文件里**只有任务链路（`VideoTask` / `VideoTaskProgress` / `VideoTaskStatus` 相关）
+//! 已接线**；会话 / 消息 / 资产是 G-P5 的生成会话模型，按计划明确暂缓
+//! （见 `docs/superpowers/plans/2026-10-09-multimodal-video-gateway.md` 的 G-P5）。
+//! 所以这里保留 `allow(dead_code)`：G-P5 落地时应当移除它，让编译器重新盯着这批类型。
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -137,9 +143,18 @@ pub struct VideoTaskProgress {
     pub error_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct VideoModelOption {
-    pub id: String,
-    pub upstream_model: String,
-    pub capabilities: Vec<String>,
+/// 保存一次提交的入参（供工作台会话回看用；网关直连时不落库）。
+///
+/// G-P5 的生成会话模型的一部分：会话/消息接线后由 `videogen_messages.request_json`
+/// 承载，当前与那批类型一同暂缓。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StoredVideoRequest {
+    pub model: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub duration: Option<f64>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }

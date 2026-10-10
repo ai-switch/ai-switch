@@ -8,10 +8,32 @@ use std::sync::{
     Arc,
 };
 
+/// `execute` takes the whole `AppState` (it now also needs the route-proxy
+/// runtime to reach the upstream), so every test needs one. Only `pool` is ever
+/// read on the code paths under test; the rest are inert defaults.
+fn test_app_state(pool: SqlitePool) -> AppState {
+    AppState {
+        paths: crate::paths::AppPaths::from_data_dir(
+            std::env::temp_dir().join(format!("ai-switch-saas-proxy-test-{}", uuid::Uuid::new_v4())),
+        ),
+        pool,
+        saas: Default::default(),
+        config_writes: Default::default(),
+        deeplink_protocols: Default::default(),
+        close_to_tray: Default::default(),
+        route_proxy: Default::default(),
+        web_service: Default::default(),
+        tailscale: Default::default(),
+        terminals: Default::default(),
+        terminal_hub: Default::default(),
+        event_broadcaster: Default::default(),
+    }
+}
+
 async fn fixture(
     streaming: bool,
 ) -> (
-    SqlitePool,
+    AppState,
     SaasRuntime,
     ProxyAppState,
     HeaderMap,
@@ -88,14 +110,14 @@ async fn fixture(
     headers.insert("x-ai-switch-platform", "claude".parse().unwrap());
     let runtime = SaasRuntime::default();
     let proxy = build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default());
-    (pool, runtime, proxy, headers, directory, hits, task)
+    (test_app_state(pool), runtime, proxy, headers, directory, hits, task)
 }
 
 #[tokio::test]
 async fn ordinary_and_sse_saas_requests_bill_once_and_never_write_sqlite_details() {
     for streaming in [false, true] {
-        let (pool, runtime, proxy, headers, _directory, hits, task) = fixture(streaming).await;
-        let response = execute(&pool,&runtime,proxy,Method::POST,headers,"/v1/chat/completions".parse().unwrap(),
+        let (state, runtime, proxy, headers, _directory, hits, task) = fixture(streaming).await;
+        let response = execute(&state,&runtime,proxy,Method::POST,headers,"/v1/chat/completions".parse().unwrap(),
             Body::from(json!({"model":"public-model","messages":[{"role":"user","content":"hi"}],"max_tokens":50,"stream":streaming}).to_string())).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
@@ -103,6 +125,7 @@ async fn ordinary_and_sse_saas_requests_bill_once_and_never_write_sqlite_details
             .unwrap();
         assert!(!body.is_empty());
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let pool = state.pool.clone();
         let ledger: (i64,i64) = sqlx::query_as("SELECT COUNT(*),COALESCE(SUM(amount_micros),0) FROM saas_wallet_ledger WHERE kind='usage'").fetch_one(&pool).await.unwrap();
         assert_eq!(ledger, (1, -135));
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM usage_events")
@@ -125,9 +148,9 @@ async fn ordinary_and_sse_saas_requests_bill_once_and_never_write_sqlite_details
 
 #[tokio::test]
 async fn image_requests_use_bound_group_and_bill_successful_images() {
-    let (pool, runtime, proxy, headers, _directory, hits, task) = fixture(false).await;
+    let (state, runtime, proxy, headers, _directory, hits, task) = fixture(false).await;
     let response = execute(
-        &pool,
+        &state,
         &runtime,
         proxy,
         Method::POST,
@@ -144,6 +167,7 @@ async fn image_requests_use_bound_group_and_bill_successful_images() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"].as_array().map(Vec::len), Some(2));
     assert_eq!(hits.load(Ordering::SeqCst), 1);
+    let pool = state.pool.clone();
     let ledger: (i64, i64) = sqlx::query_as(
         "SELECT COUNT(*),COALESCE(SUM(amount_micros),0) FROM saas_wallet_ledger WHERE kind='usage'",
     )
@@ -169,10 +193,11 @@ async fn image_requests_use_bound_group_and_bill_successful_images() {
 
 #[tokio::test]
 async fn dropped_response_is_pending_review_instead_of_silently_refunded() {
-    let (pool, runtime, proxy, headers, _directory, _hits, task) = fixture(true).await;
-    let response = execute(&pool,&runtime,proxy,Method::POST,headers,"/v1/chat/completions".parse().unwrap(),
+    let (state, runtime, proxy, headers, _directory, _hits, task) = fixture(true).await;
+    let response = execute(&state,&runtime,proxy,Method::POST,headers,"/v1/chat/completions".parse().unwrap(),
         Body::from(json!({"model":"public-model","messages":[{"role":"user","content":"hi"}],"max_tokens":50,"stream":true}).to_string())).await.unwrap();
     drop(response);
+    let pool = state.pool.clone();
     for _ in 0..100 {
         let pending: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM saas_billing_reservations WHERE status='pending_review'",
@@ -202,11 +227,12 @@ async fn claude_models_only_include_active_enabled_models_with_accounts() {
         header::AUTHORIZATION,
         format!("Bearer {plaintext}").parse().unwrap(),
     );
+    let state = test_app_state(pool.clone());
     let runtime = SaasRuntime::default();
     let proxy = build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default());
 
     let pending = execute(
-        &pool,
+        &state,
         &runtime,
         proxy.clone(),
         Method::GET,
@@ -227,7 +253,7 @@ async fn claude_models_only_include_active_enabled_models_with_accounts() {
         .await
         .unwrap();
     let active = execute(
-        &pool,
+        &state,
         &runtime,
         proxy.clone(),
         Method::GET,
@@ -248,7 +274,7 @@ async fn claude_models_only_include_active_enabled_models_with_accounts() {
         .await
         .unwrap();
     let disabled = execute(
-        &pool,
+        &state,
         &runtime,
         proxy,
         Method::GET,
@@ -274,11 +300,12 @@ async fn claude_responses_is_allowed_but_chat_completions_is_rejected() {
         header::AUTHORIZATION,
         format!("Bearer {plaintext}").parse().unwrap(),
     );
+    let state = test_app_state(pool.clone());
     let runtime = SaasRuntime::default();
     let proxy = build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default());
 
     let responses = execute(
-        &pool,
+        &state,
         &runtime,
         proxy.clone(),
         Method::POST,
@@ -292,7 +319,7 @@ async fn claude_responses_is_allowed_but_chat_completions_is_rejected() {
     }
 
     let chat = execute(
-        &pool,
+        &state,
         &runtime,
         proxy,
         Method::POST,
@@ -380,11 +407,12 @@ async fn claude_saas_end_to_end_sync_price_request_and_bill() {
         header::AUTHORIZATION,
         format!("Bearer {plaintext}").parse().unwrap(),
     );
+    let state = test_app_state(pool.clone());
     let runtime = SaasRuntime::default();
     let proxy = build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default());
 
     let pending = execute(
-        &pool,
+        &state,
         &runtime,
         proxy.clone(),
         Method::GET,
@@ -409,7 +437,7 @@ async fn claude_saas_end_to_end_sync_price_request_and_bill() {
     domain::admin(&pool, "groups.save", payload).await.unwrap();
 
     let listed = execute(
-        &pool,
+        &state,
         &runtime,
         proxy.clone(),
         Method::GET,
@@ -432,7 +460,7 @@ async fn claude_saas_end_to_end_sync_price_request_and_bill() {
         .any(|model| model["id"] == "provider-sonnet"));
 
     let response = execute(
-        &pool,
+        &state,
         &runtime,
         proxy,
         Method::POST,
@@ -466,4 +494,454 @@ async fn claude_saas_end_to_end_sync_price_request_and_bill() {
     assert_eq!(reservation.2, "claude");
     assert!(reservation.3 > 0);
     task.abort();
+}
+
+/// SaaS 视频渠道的完整链路（G-P4）：认证 → 预留 → 提交上游 → 按条结算 → 写日志。
+///
+/// 这条测试是「SaaS 视频到底能不能跑」的唯一证据。在它之前，
+/// `execute_video_request` / `reserve_video` / `settle_video` 全是死代码——
+/// SaaS 侧有四处硬编码的平台白名单（`authenticate_key` / `core_group` /
+/// `keys.create` / `reconcile_group_connection`）各自把视频渠道挡在门外。
+#[tokio::test]
+async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video() {
+    // ── mock 上游：可灵的提交端点 ──
+    let upstream_hits = Arc::new(AtomicUsize::new(0));
+    let hits = upstream_hits.clone();
+    let app = Router::new().route(
+        "/v1/videos/text2video",
+        post(move |Json(payload): Json<Value>| {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                // 上游体必须是可灵方言，且模型已被改写成定价行的 upstream_model
+                assert_eq!(payload["model_name"], "kling-v1-upstream");
+                // 计价用的时长与发到上游的时长必须是同一个
+                assert_eq!(payload["duration"], 10);
+                Json(json!({"data": {"task_id": "upstream-video-1"}})).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // ── 库：视频组 + 账号 + 定价 + 用户 + key ──
+    let pool = repository::test_pool().await;
+    // `test_pool()` 只跑 SaaS 迁移；`route_pool_groups` / `route_credentials`
+    // 这些核心表在 `database::run_migrations` 里。
+    crate::database::run_migrations(&pool).await.unwrap();
+    repository::test_enable(&pool).await;
+    let directory = canonical_test_directory();
+    sqlx::query("UPDATE saas_settings SET value_json=json_set(value_json,'$.logs',json(?)) WHERE key='config'")
+        .bind(json!({"directory":directory.path()}).to_string()).execute(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO route_pool_groups
+           (id,platform,name,sort_order,is_internal,is_active,created_at,updated_at)
+         VALUES('video-saas','video:kling','Video SaaS',10,0,1,'2026-01-01','2026-01-01')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO route_credentials
+           (id,platform,kind,display_name,status,secret_payload_json,config_json,created_at,updated_at)
+         VALUES('video-account','video:kling','api','Kling','ok',?,?,'2026-01-01','2026-01-01')",
+    )
+    .bind(r#"{"api_key":"upstream-video-key"}"#)
+    .bind(
+        json!({
+            "base_url": format!("http://{address}/v1"),
+            "interface_format": "openai",
+            "model_mappings": [{
+                "from": "kling-v1",
+                "to": "kling-v1-upstream",
+                "capabilities": ["video.generate"],
+            }],
+        })
+        .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO route_pool_members
+           (id,platform,route_credential_id,enabled,group_id,created_at,updated_at)
+         VALUES('video-member','video:kling','video-account',1,'video-saas','2026-01-01','2026-01-01')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // 管理员定价：按「条」3 万 micros。这一步同时证明 `groups.save`
+    // （`saas_group_models` 的唯一写入路径）已经接受视频组。
+    let saved = domain::admin(
+        &pool,
+        "groups.save",
+        json!({
+            "id": "video-saas",
+            "multiplierMicros": 1_000_000,
+            "maxOutputTokens": 4096,
+            "timeoutSeconds": 120,
+            "maxConcurrency": 10,
+            "models": [{
+                "model": "kling-v1",
+                "upstreamModel": "kling-v1-upstream",
+                // 三个 token 价是 `GroupModel` 的必填字段（没有 serde default）：
+                // 故意不放开成可选——漏填静默变 0 会让文本按 0 计价。
+                "inputPriceMicros": 0,
+                "cachePriceMicros": 0,
+                "outputPriceMicros": 0,
+                "videoPriceMicros": 10_000,
+                "videoPricePerSecondMicros": 5_000,
+                "enabled": true,
+            }],
+        }),
+    )
+    .await
+    .expect("video group is saveable");
+    assert_eq!(saved["id"], "video-saas");
+
+    let user_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO saas_users(id,github_id,login,github_created_at,created_at,updated_at) VALUES(?,?,'video-tester','2020-01-01T00:00:00Z',?,?)")
+        .bind(&user_id).bind(&user_id).bind("2026-01-01").bind("2026-01-01")
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE saas_users SET balance_micros=1000000 WHERE id=?")
+        .bind(&user_id).execute(&pool).await.unwrap();
+    let key = domain::user(
+        &pool,
+        &user_id,
+        "keys.create",
+        json!({"name":"video","groupId":"video-saas"}),
+    )
+    .await
+    .expect("a video group can issue a key");
+
+    // 认证必须认出视频组（`authenticate_key` 的第一道白名单）
+    let principal = crate::saas::billing::authenticate_key(
+        &pool,
+        key["plaintextKey"].as_str().unwrap(),
+    )
+    .await
+    .expect("video key authenticates");
+    assert_eq!(principal.platform, "video:kling");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {}", key["plaintextKey"].as_str().unwrap())
+            .parse()
+            .unwrap(),
+    );
+
+    // ── 真正打一次 SaaS 视频请求 ──
+    let state = test_app_state(pool.clone());
+    let runtime = SaasRuntime::default();
+    let proxy = build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default());
+    let response = execute(
+        &state,
+        &runtime,
+        proxy,
+        Method::POST,
+        headers,
+        "/v1/video/generations".parse().unwrap(),
+        Body::from(
+            // 10 秒 × 2 条：单价 = 10_000 + 5_000×10 = 60_000，合计 120_000
+            json!({"model":"kling-v1","prompt":"a cat surfing","duration":10,"n":2}).to_string(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["object"], "video");
+    assert_eq!(body["status"], "processing");
+    assert_eq!(body["model"], "kling-v1");
+    assert!(!body["task_id"].as_str().unwrap_or_default().is_empty());
+    assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
+
+    // 任务表要把「客户端看到的」和「上游认的」两个名字分开存：
+    // 响应体回显客户端名（`model`），上游体用的是定价行的 `upstream_model`。
+    let stored: (String, Option<String>) = sqlx::query_as(
+        "SELECT model,upstream_model FROM videogen_tasks WHERE task_id=?",
+    )
+    .bind(body["task_id"].as_str().unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.0, "kling-v1");
+    assert_eq!(stored.1.as_deref(), Some("kling-v1-upstream"));
+
+    // 计费：按「条」×2，且账号被收窄到预留算出的那一个
+    let reservation: (String, i64) = sqlx::query_as(
+        "SELECT status,reserved_micros FROM saas_billing_reservations",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reservation, ("settled".to_string(), 120_000));
+    let ledger: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*),COALESCE(SUM(amount_micros),0) FROM saas_wallet_ledger WHERE kind='usage'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ledger, (1, -120_000));
+
+    // 日志里要能对上这一单
+    runtime.logs.shutdown().await.unwrap();
+    let logs = runtime
+        .logs
+        .query(crate::saas::logs::LogQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(logs.total, 1);
+    assert_eq!(logs.items[0].amount_usd_micros, 120_000);
+    assert_eq!(logs.items[0].model, "kling-v1");
+    assert_eq!(logs.items[0].platform, "video:kling");
+
+    upstream.abort();
+}
+
+/// 视频 key 打文本端点必须被端点白名单拒掉，而不是掉进文本预留后
+/// 报一个误导性的「key 无效」。
+#[tokio::test]
+async fn saas_video_key_cannot_reach_text_endpoints() {
+    let pool = repository::test_pool().await;
+    // `test_pool()` 只跑 SaaS 迁移；`route_pool_groups` / `route_credentials`
+    // 这些核心表在 `database::run_migrations` 里。
+    crate::database::run_migrations(&pool).await.unwrap();
+    repository::test_enable(&pool).await;
+    let directory = canonical_test_directory();
+    sqlx::query("UPDATE saas_settings SET value_json=json_set(value_json,'$.logs',json(?)) WHERE key='config'")
+        .bind(json!({"directory":directory.path()}).to_string()).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO route_pool_groups
+           (id,platform,name,sort_order,is_internal,is_active,created_at,updated_at)
+         VALUES('video-saas','video:kling','Video SaaS',10,0,1,'2026-01-01','2026-01-01')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    domain::admin(
+        &pool,
+        "groups.save",
+        json!({
+            "id": "video-saas",
+            "multiplierMicros": 1_000_000,
+            "maxOutputTokens": 4096,
+            "timeoutSeconds": 120,
+            "maxConcurrency": 10,
+            "models": [{
+                "model": "kling-v1",
+                "upstreamModel": "kling-v1",
+                "inputPriceMicros": 0,
+                "cachePriceMicros": 0,
+                "outputPriceMicros": 0,
+                "videoPriceMicros": 10_000,
+                "videoPricePerSecondMicros": 5_000,
+                "enabled": true,
+            }],
+        }),
+    )
+    .await
+    .unwrap();
+    let user_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO saas_users(id,github_id,login,github_created_at,created_at,updated_at) VALUES(?,?,'video-tester','2020-01-01T00:00:00Z',?,?)")
+        .bind(&user_id).bind(&user_id).bind("2026-01-01").bind("2026-01-01")
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE saas_users SET balance_micros=1000000 WHERE id=?")
+        .bind(&user_id).execute(&pool).await.unwrap();
+    let key = domain::user(
+        &pool,
+        &user_id,
+        "keys.create",
+        json!({"name":"video","groupId":"video-saas"}),
+    )
+    .await
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {}", key["plaintextKey"].as_str().unwrap())
+            .parse()
+            .unwrap(),
+    );
+
+    let state = test_app_state(pool.clone());
+    let runtime = SaasRuntime::default();
+    let proxy = build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default());
+    let error = execute(
+        &state,
+        &runtime,
+        proxy,
+        Method::POST,
+        headers,
+        "/v1/chat/completions".parse().unwrap(),
+        Body::from(json!({"model":"kling-v1","messages":[]}).to_string()),
+    )
+    .await
+    .expect_err("video key must not reach the text endpoint");
+    assert_eq!(error.code(), "saas.endpoint_not_allowed");
+}
+
+/// 建一个最小的视频 SaaS 环境：`video:kling` 组 + 一个支持 `video.generate`
+/// 的账号 + 给定定价 + 一个能认证的 key。
+///
+/// 只在 `reserve_video` 层面用（不发上游），所以不需要 mock 上游。
+async fn video_billing_fixture(
+    flat_price: i64,
+    per_second_price: i64,
+) -> (SqlitePool, crate::saas::billing::ApiPrincipal) {
+    let pool = repository::test_pool().await;
+    crate::database::run_migrations(&pool).await.unwrap();
+    repository::test_enable(&pool).await;
+    sqlx::query(
+        "INSERT INTO route_pool_groups
+           (id,platform,name,sort_order,is_internal,is_active,created_at,updated_at)
+         VALUES('video-saas','video:kling','Video SaaS',10,0,1,'2026-01-01','2026-01-01')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO route_credentials
+           (id,platform,kind,display_name,status,secret_payload_json,config_json,created_at,updated_at)
+         VALUES('video-account','video:kling','api','Kling','ok','{}',?,'2026-01-01','2026-01-01')",
+    )
+    .bind(
+        json!({
+            "base_url": "http://127.0.0.1:1/v1",
+            "interface_format": "openai",
+            "model_mappings": [{
+                "from": "kling-v1",
+                "to": "kling-v1",
+                "capabilities": ["video.generate"],
+            }],
+        })
+        .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO route_pool_members
+           (id,platform,route_credential_id,enabled,group_id,created_at,updated_at)
+         VALUES('video-member','video:kling','video-account',1,'video-saas','2026-01-01','2026-01-01')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    domain::admin(
+        &pool,
+        "groups.save",
+        json!({
+            "id": "video-saas",
+            "multiplierMicros": 1_000_000,
+            "maxOutputTokens": 4096,
+            "timeoutSeconds": 120,
+            "maxConcurrency": 10,
+            "models": [{
+                "model": "kling-v1",
+                "upstreamModel": "kling-v1",
+                "inputPriceMicros": 0,
+                "cachePriceMicros": 0,
+                "outputPriceMicros": 0,
+                "videoPriceMicros": flat_price,
+                "videoPricePerSecondMicros": per_second_price,
+                "enabled": true,
+            }],
+        }),
+    )
+    .await
+    .expect("video group is saveable");
+
+    let user_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO saas_users(id,github_id,login,github_created_at,created_at,updated_at) VALUES(?,?,'video-tester','2020-01-01T00:00:00Z',?,?)")
+        .bind(&user_id).bind(&user_id).bind("2026-01-01").bind("2026-01-01")
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE saas_users SET balance_micros=100000000 WHERE id=?")
+        .bind(&user_id).execute(&pool).await.unwrap();
+    let key = domain::user(
+        &pool,
+        &user_id,
+        "keys.create",
+        json!({"name":"video","groupId":"video-saas"}),
+    )
+    .await
+    .unwrap();
+    let principal = crate::saas::billing::authenticate_key(
+        &pool,
+        key["plaintextKey"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    (pool, principal)
+}
+
+/// 视频定价矩阵：起步价与按秒价**相加**，且只配一种时也能工作
+/// （只配起步价 = 0007 的老行为，向后兼容）。
+#[tokio::test]
+async fn video_pricing_adds_the_flat_and_per_second_prices() {
+    // 只配起步价 → 与迁移 0007 行为一致
+    let (pool, principal) = video_billing_fixture(30_000, 0).await;
+    let reservation = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 2, 10)
+        .await
+        .unwrap();
+    assert_eq!(reservation.reserved_micros, 60_000);
+
+    // 只配按秒价 → 纯按秒
+    let (pool, principal) = video_billing_fixture(0, 2_000).await;
+    let reservation = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 2, 7)
+        .await
+        .unwrap();
+    assert_eq!(reservation.reserved_micros, 28_000);
+
+    // 两个都配 → 起步价 + 按秒价 × 时长
+    let (pool, principal) = video_billing_fixture(1_000, 2_000).await;
+    let reservation = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 2, 7)
+        .await
+        .unwrap();
+    assert_eq!(reservation.reserved_micros, 30_000);
+
+    // 时长直接影响预留额：同一配置下 10 秒应当比 5 秒贵
+    let short = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 5)
+        .await
+        .unwrap();
+    let long = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 10)
+        .await
+        .unwrap();
+    assert_eq!(short.reserved_micros, 11_000);
+    assert_eq!(long.reserved_micros, 21_000);
+}
+
+/// 定价为 0 与时长/条数越界都必须 fail closed。
+#[tokio::test]
+async fn video_pricing_rejects_unpriced_models_and_out_of_range_inputs() {
+    // 两种价都是 0 → 没有任何可用价格
+    let (pool, principal) = video_billing_fixture(0, 0).await;
+    let error = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 5)
+        .await
+        .expect_err("unpriced model must fail closed");
+    assert_eq!(error.code(), "saas.model_not_allowed");
+
+    let (pool, principal) = video_billing_fixture(30_000, 0).await;
+    for (count, duration) in [(0, 5), (5, 5), (1, 0), (1, 601)] {
+        let error = crate::saas::billing::reserve_video(
+            &pool, &principal, "kling-v1", count, duration,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.code(),
+            "saas.request_limits",
+            "count={count} duration={duration} should be rejected"
+        );
+    }
 }

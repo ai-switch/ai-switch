@@ -505,6 +505,14 @@ pub fn run() {
                 .await;
             });
 
+            // Video generation poller (G-P3): video upstreams are async task
+            // based, so the gateway advances its own video tasks. Idles with no
+            // upstream traffic while nothing is in flight.
+            let video_state = app.state::<AppState>().inner().clone();
+            tauri::async_runtime::spawn(async move {
+                crate::videogen::VideoGenerationService::run_loop(video_state).await;
+            });
+
             // Lift the upstream response id out of legacy rows' stored previews
             // and into its own column, so the cache-cleanup feature can later
             // delete those previews without losing the join to CLI transcripts.

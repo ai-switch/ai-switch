@@ -1,4 +1,10 @@
 //! 视频生成持久化（G-P3）：会话 / 消息 / 资产 / 异步任务
+//!
+//! 任务链路（`create_task` / `list_active_tasks` / `progress_task` /
+//! `mark_callback_delivered`）已接线到 `videogen::service`；会话 / 消息 / 资产的
+//! CRUD 属于 G-P5 的生成会话模型，按计划明确暂缓。同 `models.rs`，这里保留
+//! `allow(dead_code)` 兜住那批暂缓项，G-P5 落地时移除。
+#![allow(dead_code)]
 
 use super::models::*;
 use crate::error::AppError;
