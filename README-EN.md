@@ -246,6 +246,6 @@ AI Switch is a fully open-source, free project. If you find it useful, you can s
 
 | Date | Sponsor | Method | Amount | Message |
 | --- | --- | --- | --- | --- |
-| example | Anonymous | Alipay | ¥ -- | Thanks for your support, looking forward to more features! |
+| 2026-10-10 | xppp11_ | Alipay | ¥50 | — |
 
 Thank you to everyone who supports AI Switch!

@@ -19,7 +19,7 @@ The following are sponsorship records from community friends (newest first):
 
 | Date | Sponsor | Method | Amount | Message |
 | --- | --- | --- | --- | --- |
-| _example_ | _Anonymous_ | Alipay | _¥ --_ | _Thanks for your support, looking forward to more features!_ |
+| 2026-10-10 | xppp11_ | Alipay | ¥50 | — |
 
 > If you'd like to stay anonymous, use a nickname, or not be listed at all, just let me know via a repo Issue or social channel after sponsoring.
 
