@@ -194,6 +194,90 @@ key 与平台是**一一对应**的，所以每个协议一张 key（`video:klin
 - `SaasEndpoint` 原本只有 `codex | claude | gemini`（后端 SaaS 平台白名单的前端镜像），
   改为从 `VideoPlatform`（`video:${VideoProtocol}`）推导，保持单一来源。
 
+### 7. 复审修正（G-P4 补强）
+
+对整轮（`b8535dd..HEAD`，49 文件 / +4463）做了一次逐文件复审，抓出 5 个真 bug 并修掉。
+下面只记**已修**的；未修的见「遗留」。
+
+#### 7.1 SaaS 侧状态查询完全不可达（异步契约断一半）
+
+`saas::proxy::execute` 的端点守卫写的是 `method != Method::POST`，于是
+`sk-saas-` key 查 `/v1/video/generations/{task_id}` 只会拿到
+`saas.endpoint_not_allowed` —— **提交能用、轮询不能用**。而视频是异步任务 API，
+客户端不轮询就只剩可选的 `callback_url`。
+
+修法：守卫放行「视频路径 + GET」，并在读 body **之前**分派（状态查询没有请求体，
+否则空体会先撞 `saas.validation`）。新增 `execute_video_status`。
+
+#### 7.2 状态查询没有归属校验（越权读）
+
+`videogen_tasks` 原本**没有任何「属于谁」的列**，所以一旦放开查询，任何
+`sk-saas-` key 都能按 task_id 读到别人的任务和出片地址。task_id 是 UUIDv4 猜不到，
+但出片地址是**可用的签名 CDN 链接**，不该靠「猜不到」当访问控制。
+
+修法：迁移 `202610100001_video_task_owner.sql` 加 `owner_user_id`；
+`SubmitVideoInput.owner_user_id` 由 SaaS 路径填 `principal.user_id`（直连留 NULL）；
+查询时比对，不匹配回答 `videogen.task_not_found`（**不是**「无权访问」——
+后者会泄漏 task_id 是否存在）。
+
+#### 7.3 `callback_url` 零校验（SSRF）
+
+`deliver_callback` 直接把客户端给的地址交给 `reqwest.post`。SaaS 场景下网关是
+**运营方的机器**，于是任意租户都能让网关去打内网，最典型的是云元数据端点
+`http://169.254.169.254/latest/meta-data/…`。
+
+修法：新增 `validate_callback_url(raw, policy)`，提交时校验（坏地址不落库）、
+投递前再校验一次（兜住旧行与直接改库）。策略是**参数**而不是常量，因为两个部署
+模式的威胁模型不同：
+
+| 类别 | `Local`（桌面） | `Server`（`standalone-server`） |
+| --- | --- | --- |
+| 非 http/https、带 userinfo、不是 URL | 拒 | 拒 |
+| 链路本地 `169.254/16`、`0.0.0.0`、`::`、元数据主机名 | 拒 | 拒 |
+| 回环 / RFC1918 私网 / `localhost` | **放行** | 拒 |
+
+回环在桌面模式放行是刻意的：本应用本地优先，「回调打到本机」是正当用法。
+**已知不覆盖** DNS 重绑定（校验时解析公网、请求时解析内网），要封住得在连接建立后
+核对对端 IP。
+
+> 实现细节：必须用 `Url::host()` 拿 `Host` 枚举，**不能**用 `host_str()` ——
+> 后者对 IPv6 返回带方括号的 `[::1]`，`parse::<IpAddr>()` 会失败，整个 IPv6 分支
+> 被静默跳过（复审时第一版就是这么写的，被自己的测试抓到）。
+
+#### 7.4 `n>1` 按条收费但不生效（多收钱）
+
+`upstream_body` **压根不读 `request.n`**，而 `status_response` 的 `url` 是单值。
+所以 `n=4` 的语义是「按 4 条收钱、只发 1 条、只回 1 个地址」。
+
+修法：`MAX_VIDEO_COUNT` 从 4 改成 1（`videogen` 与 `saas::billing` 两处），
+`n>1` 在**预留之前**显式报错。要支持多条得先让契约能表达多个地址（`urls`），
+那是契约层的事，不在网关里糊。
+
+#### 7.5 回调投递失败永远不会重试（注释在说谎）
+
+`list_active_tasks` 只取 `status='processing'`，而终态任务的 `poll_once` 会直接
+早返回 —— 所以 `callback_delivered=0` 的任务**永远不会被再碰一次**。
+`deliver_callback` 上那句「失败留给下一轮重投」是空话。
+
+修法：迁移加 `callback_attempts`；新增 `list_pending_callbacks` +
+`retry_pending_callbacks`（在 `advance_all` 开头跑）；`run_loop` 的空闲判定也要把
+「待重投回调」算进来，否则有回调要投时循环会直接 `continue`。预算
+`MAX_CALLBACK_ATTEMPTS = 8`，防止死地址变成常驻噪声。
+
+#### 7.6 `/video/generations`（无 `/v1` 前缀）永远 404
+
+`web::video_routes::is_video_submit_path`、`is_video_generation_path`、
+`video_task_id_from_path` 都声称认这个别名，但 `shared_fallback` 只在
+`is_shared_model_api_path` 为真时才进入代理逻辑，而它不覆盖 `/video/generations`
+—— 别名被静默降级成静态兜底 404。「代码声称支持、实际永远 404」。
+
+修法：`is_shared_model_api_path` 补上该别名（含 `/video/generations/` 前缀）。
+
+#### 7.7 顺带清理
+
+- `route_credential_transfer_import_service` 里那条测试的注释说「导入是配置
+  `video:kling` 账号的唯一入口」——第三轮加了「视频」屏之后已经不成立，改了。
+
 ## 验证
 
 ```bash
@@ -203,7 +287,7 @@ CARGO_TARGET_DIR=target-codex cargo test --lib
 ```
 
 - `cargo check --lib`：**通过，0 error**（89 条 warning 全部是既有告警，本轮新增文件零告警）。
-- `cargo test --lib`：**1969 passed / 0 failed / 13 ignored**（整仓，136s）。
+- `cargo test --lib`：**1973 passed / 0 failed / 13 ignored**（整仓，121s；含复审新增 4 例）。
 - `npx tsc --noEmit`：**0 error**。
 - `npx vitest run`：**955 passed / 0 failed**（81 个文件；`src/` 下没有测试文件，
   前端测试都在仓库根的 `tests/`）。
@@ -220,6 +304,10 @@ CARGO_TARGET_DIR=target-codex cargo test --lib
   `web::video_routes` 6 例（新增 `dispatches_methods_and_maps_errors_to_status_codes`
   覆盖 405 / 404 / 400 分派、`resolves_the_platform_from_a_route_proxy_key`
   覆盖「只用 key 就能定出渠道 / 文本 key 不能用 / 无效 key 被拒」）、
+  复审新增 4 例：`saas_video_status_is_available_and_scoped_to_its_owner`、
+  `saas_video_request_rejects_more_than_one_clip`、
+  `callback_targets_are_validated_per_policy`、
+  `video_paths_without_the_v1_prefix_are_shared_model_api_paths`、
   导入服务 35 例（新增 `video_channels_are_importable_and_normalize_to_their_canonical_platform`）、
   `saas` 109 例（新增 `saas_video_request_authenticates_reserves_submits_and_bills_per_video`、
   `saas_video_key_cannot_reach_text_endpoints`、`video_pricing_adds_the_flat_and_per_second_prices`、
@@ -239,6 +327,10 @@ CARGO_TARGET_DIR=target-codex cargo test --lib
 | 平台从入站 key 解析（OpenAI 兼容路径） | ✅ 单测（含「文本 key 不能调视频」「无效 key 被拒」） |
 | 「接入信息」对话框（端点 + 每协议一张 key） | ✅ 组件测试（含未启动代理时的提示） |
 | SaaS 管理端的视频定价（按条 + 按秒）与平台徽标 | ✅ 组件测试 |
+| SaaS 的状态查询（可用性 + 归属校验） | ✅ 集成测试（含「别人的任务读到 not_found」） |
+| `n>1` 在预留前被拒 | ✅ 集成测试（并断言账上无冻结残留） |
+| `callback_url` 的 SSRF 校验（两种部署口径） | ✅ 单测（含 IPv6 / 映射地址 / userinfo） |
+| `/video/generations` 无 `/v1` 别名能进代理 | ✅ 单测 |
 | `reserve_video` / `settle_video` 的计费与退款 | ✅ 集成测试（SaaS 全链路）+ 定价矩阵单测（起步价 / 按秒 / 相加 / 越界 fail closed） |
 | `execute_video_request` 的 HTTP 行为 | ✅ 集成测试（201 契约体、日志、模型名不泄漏） |
 | 视频 key 的端点边界 | ✅ 单测（不能打文本端点） |
@@ -352,6 +444,42 @@ CARGO_TARGET_DIR=target-codex cargo test --lib
    **既有行一分钱都不变，向后兼容**）、只配按秒价（纯按秒）、两个都配（起步价 + 按秒）。
    单价在**预留时**就折算成最终值写进预留快照的 `unitPriceMicros`，
    所以 `settle_video` 一行没改——它本来就只按快照单价乘条数。
+
+3. **复审发现、**未修**的问题**（都已定位，需要决策或更大改动）：
+
+   a. **按秒计价的时长口径对两个方言不成立**。`effective_duration_seconds` 取客户端
+      请求的时长（只有 `.max(1)`），但：
+      - **Sora** 的上游体把时长 clamp 到 `1..20`，所以 `duration=60` 会**按 60 秒收费、
+        只给 20 秒**（多收）；
+      - **智谱** 的上游体**完全没有时长字段**，按秒收的秒数根本没发出去。
+      修法方向：把「每方言实际生效的时长」抽成一个函数，`upstream_body` 与计费共用；
+      智谱这类不传时长的方言，按秒价应当按 0 计或直接禁用该列。
+
+   b. **`?refresh=1` 绕过轮询间隔**。它直接调 `poll_once`，不检查
+      `last_polled_at`，所以客户端可以刷上游配额。修法方向：refresh 也受
+      `POLL_INTERVAL_SECONDS` 约束（或加每 key 的速率限制）。
+
+   c. **轮询循环没有真实背压**。`advance_all` 串行处理最多 32 个任务，每个任务一次
+      上游调用（超时 10s）；一轮可能远超 tick 间隔，而 tokio `interval` 默认
+      `MissedTickBehavior::Burst` 会把错过的 tick 立刻补齐，于是变成连续跑。
+      修法方向：`MissedTickBehavior::Delay`，或并发度受限的 `join_all`。
+
+   d. **并发投递回调可能重复**。`poll_once` 的「终态检查」与 `settle` 的写入之间有
+      await 窗口，守护循环与客户端的 `refresh=1` 可能同时进入，两边都看到
+      `callback_delivered=0`。UUID 级的幂等没做。修法方向：`mark_callback_delivered`
+      用 `WHERE callback_delivered=0` 做 CAS，让只有一个赢。
+
+   e. **`settle_video` 失败会让整个请求 500**，但上游已经受理、算力已经在烧，
+      客户端却看到失败，且预留被冻住。修法方向：结算失败不应把「提交成功」翻成
+      失败响应（记日志 + 留 `pending_review` 更合适）。
+
+   f. **`forward_submit` / `forward_poll` 里设的 `x-ai-switch-platform` 头是死代码**：
+      `proxy_state` 已经用 `access_scope` 把平台钉死，而 `resolve_platform` 的第一句
+      就是 `if let Some(scope) = &state.access_scope { return Ok(scope.platform) }`。
+      留着不危险，但会让人误以为头才是生效的那一环。
+
+   g. **`max_poll_attempts` 240 × 10s = 40 分钟**，更长的视频会被误判失败。
+      修法方向：按 `effective_duration_seconds` 动态算预算。
 
    **两个实现细节值得记**：
    - 计价用的时长与发到上游的时长**共用同一个来源**：`protocol::effective_duration_seconds()`
