@@ -278,6 +278,61 @@ key 与平台是**一一对应**的，所以每个协议一张 key（`video:klin
 - `route_credential_transfer_import_service` 里那条测试的注释说「导入是配置
   `video:kling` 账号的唯一入口」——第三轮加了「视频」屏之后已经不成立，改了。
 
+### 8. 供应商改用 `interface_format` 承载（平台统一成 `video`）
+
+**这是对 G-P1 的推翻。** 原来把供应商放进 `platform`（`video:kling` / `video:ark` …），
+但按文本平台已有的分层，`platform` 是**池身份**（路由/鉴权/计价/冷却/key 的单位），
+`interface_format` 才是**这个账号说的是哪种线协议** —— `build_api_upstream_request`
+里就是 `interface_format` 优先、平台默认兜底（一个 `platform = codex` 的账号完全可以
+挂 `interface_format: anthropic`）。
+
+视频的「供应商」恰好就是线协议：可灵 `/v1/videos/text2video` + `model_name`、
+方舟的 `content[]`、MiniMax 的 query 轮询、Sora 的 `seconds`+`size`。而视频没有
+「给哪个 CLI 用」这回事，所以池身份只有一个：`video`。
+
+放进 `platform` 的代价是一连串的：
+
+| | 旧（`video:kling`） | 新（`video` + `interface_format`） |
+| --- | --- | --- |
+| key | 5 张 | **1 张** |
+| SaaS 组 | 5 个 | 1 个 |
+| 平台枚举 | 5 个视频变体 | 1 个 `Video`（无载荷） |
+| 跨供应商路由 | 需要一个专门的「路由模式」跨 5 个平台 | **不需要任何机制** |
+| 前端 | 早就按「一个入口 + TAG 标供应商」做了 | 与后端一致 |
+
+**跨供应商路由因此变成普通逻辑**：按 `model` 名过滤候选 → 选中的账号自带方言 →
+用那个方言建体。没有任何开关或特殊模式。
+
+要点：
+
+- `PlatformId::Video` 去掉载荷；`VideoProtocol` 枚举、两张 5 分支静态表、与
+  `VideoDialect` 的 `From` 桥、往返守护测试**全部删除**。
+- 旧的 `video:kling` **明确拒绝**并给可照做的提示，不静默接受（静默接受会让账号落到
+  一个永远不会被选中的平台值上）。
+- 视频方言**不再接受 `openai` 别名**：那是文本 `ApiDialect` 的名字，收了它
+  `interface_format: "openai"` 会变成「Sora」这种惊悚的巧合。
+- **选号在 `route_proxy_service::video_route_plan`**（候选加载 → 模型过滤 →
+  `video.generate` 能力过滤 → 冷却剔除 → 优先级/游标排序 → 按方言分组），复用本模块
+  内部机制；视频侧再实现一遍必然漂移。
+- `forward_request` 的文本请求构造对视频不适用（`ApiDialect::parse("kling")` 直接失败，
+  而协议桥接/模型改写/reasoning 清理对视频全无意义），所以加了一条直路
+  `build_video_upstream_request`。
+- **轮询钉到提交时的账号**（迁移 `202610100002` 加 `credential_id`）：上游的任务按账号
+  隔离，换个账号的 key 查会 404/403；平台统一后账号变多，靠「按平台重选一个」几乎
+  必然选错。代价是 `forward_request` 内部的多账号 failover 用不上，改由
+  `forward_submit` 自己按 `classify_proxy_failure` 轮（同组方言不变，请求体可复用）。
+- 跨供应商游标由调用方推进：`forward_request` 只看到一个账号，它的推进是
+  `(0+1)%1=0`，会把游标按回 0。
+- 凭据服务 `validate_interface_format` 改成**按平台分**：两个方向都必须拦 —— 视频方言
+  塞进 `ApiDialect` 会污染文本的路径规范化；文本方言出现在视频账号上是静默死数据。
+- 导入：视频条目复用 `openai-compatibility` 分区（`api-key-entries`/`base-url` 的提取
+  是按分区走的，另造分区拿不到 key），但平台声明为 video 时跳过「分区→方言」检查。
+
+**顺带修掉的不一致**：`/v1/models` 两条路径都不按 `video.generate` 过滤，会列出
+「看得见、提交必失败」的模型。直连侧加了
+`advertised_model_catalog_entries_with_capability`；SaaS 侧改用
+`permitted_accounts_for_capability`。
+
 ## 验证
 
 ```bash
