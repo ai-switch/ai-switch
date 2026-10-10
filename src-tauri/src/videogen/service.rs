@@ -17,8 +17,9 @@
 use super::models::*;
 use super::protocol::{
     dialect_from_provider_kind, parse_upstream_status, parse_upstream_submit, status_response,
-    submit_response, upstream_body, upstream_status_path, upstream_submit_path, UpstreamStatus,
-    VideoDialect, VideoGenerationRequest, VideoTaskStatus,
+    submit_response, upstream_body, upstream_status_path, upstream_submit_path,
+    validate_callback_url, CallbackTargetPolicy, UpstreamStatus, VideoDialect,
+    VideoGenerationRequest, VideoTaskStatus,
 };
 use super::repository::VideoGenerationRepository;
 use crate::app_state::AppState;
@@ -31,8 +32,15 @@ use serde::Deserialize;
 use std::time::Duration;
 use uuid::Uuid;
 
-/// 一次提交可接受的 `n`（一个请求生成几段视频）
-const MAX_VIDEO_COUNT: u32 = 4;
+/// 一次提交可接受的 `n`（一个请求生成几段视频）。
+///
+/// **固定为 1。** new-api 的视频契约里 `url` 是单值，网关也只能回一个地址；
+/// 而 `upstream_body` 压根不把 `n` 发给上游（复审抓到的真 bug：允许 `n>1`
+/// 就是「按 4 条收钱、只发 1 条」）。要支持多条得先让 `status_response`
+/// 能表达多个地址（`urls`），那是契约层的事，不在网关里糊。
+const MAX_VIDEO_COUNT: u32 = 1;
+/// 回调投递的尝试预算。超了就不再重试，免得一个死地址变成常驻噪声。
+const MAX_CALLBACK_ATTEMPTS: i64 = 8;
 /// 上游响应体上限（视频接口的响应只有 task_id / 状态和 url，不需要很大）
 const UPSTREAM_RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 /// 单轮轮询最多处理多少个任务，避免一次 tick 打爆上游
@@ -69,6 +77,13 @@ pub struct SubmitVideoInput {
     /// 根本改写不到。所以这里显式区分「客户端看到的名字」与「上游的名字」。
     #[serde(default, skip)]
     pub upstream_model: Option<String>,
+    /// 可选：任务归属的 SaaS 用户。直连网关不设。
+    ///
+    /// 存下来只为一件事：`GET /v1/video/generations/{task_id}` 得能回答
+    /// 「这个 task_id 是不是你的」。没有它，SaaS 侧只能不做校验（越权读
+    /// 别人的任务和出片地址）或干脆不支持查询（异步契约断一半）。
+    #[serde(default, skip)]
+    pub owner_user_id: Option<String>,
 }
 
 /// 提交结果：对外契约体 + 落库的任务
@@ -113,11 +128,17 @@ impl VideoGenerationService {
                 "A prompt or a first-frame image is required",
             ));
         }
+        // 契约里的 `url` 是单值，所以一次提交只能生成一条。`n>1` 必须显式报错：
+        // 静默按 n 条计费而只发 1 条，比拒绝更糟。
         if request.n.unwrap_or(1) > MAX_VIDEO_COUNT {
             return Err(validation(
                 "validation.video_request",
-                "Video count exceeds the supported maximum",
+                "A video request generates exactly one clip; the contract cannot return more than one URL",
             ));
+        }
+        if let Some(callback) = request.callback_url() {
+            validate_callback_url(callback, CallbackTargetPolicy::current())
+                .map_err(|error| validation("validation.video_callback", &error))?;
         }
 
         let has_image = request.image.is_some();
@@ -140,6 +161,7 @@ impl VideoGenerationService {
                 dialect: dialect.as_str().to_string(),
                 upstream_task_id: Some(upstream_task_id),
                 callback_url: request.callback_url().map(str::to_string),
+                owner_user_id: input.owner_user_id,
             },
         )
         .await?;
@@ -403,11 +425,18 @@ impl VideoGenerationService {
                 )
                 .await;
             }
+            // 投失败要记一次尝试：重投由 `retry_pending_callbacks` 负责，
+            // 没有计数的话一个死地址会被无限重投。
+            let _ = VideoGenerationRepository::bump_callback_attempt(&state.pool, &task.task_id)
+                .await;
         }
         Ok(task)
     }
 
-    /// 把终态结果 POST 到任务登记的 `callback_url`。失败留给下一轮重投。
+    /// 把终态结果 POST 到任务登记的 `callback_url`。
+    ///
+    /// 投递失败**不会**丢：`retry_pending_callbacks` 在后续 tick 重投，
+    /// 直到成功或用完 `MAX_CALLBACK_ATTEMPTS` 的预算。
     ///
     /// 这里不经过路由池：回调是网关自己发出的出站请求，与上游渠道的选账号、
     /// 计费、日志都无关（计费在提交那一刀已经切完了）。
@@ -415,6 +444,10 @@ impl VideoGenerationService {
         let url = task.callback_url.as_deref().ok_or_else(|| {
             validation("videogen.callback", "Task has no callback URL registered")
         })?;
+        // 提交时已经校验过；这里再校验一次，兜住「校验上线之前落库的行」
+        // 和直接改库的情况。SSRF 的代价不对称，重复校验很便宜。
+        validate_callback_url(url, CallbackTargetPolicy::current())
+            .map_err(|error| validation("videogen.callback", &error))?;
         let status = VideoTaskStatus::parse(&task.status).unwrap_or(VideoTaskStatus::Processing);
         let payload = String::from_utf8_lossy(&status_response(
             &task.task_id,
@@ -443,8 +476,40 @@ impl VideoGenerationService {
         Ok(())
     }
 
+    /// 重投「已到终态但回调没投出去」的任务。
+    ///
+    /// 复审前这条路径**不存在**：`list_active_tasks` 只取 `status='processing'`，
+    /// 而终态任务的 `poll_once` 又直接早返回，于是投失败的回调永远不会被重试
+    /// —— `deliver_callback` 上那句「失败留给下一轮重投」是空话。
+    async fn retry_pending_callbacks(state: &AppState, limit: i64) {
+        let pending = match VideoGenerationRepository::list_pending_callbacks(
+            &state.pool,
+            limit,
+            MAX_CALLBACK_ATTEMPTS,
+        )
+        .await
+        {
+            Ok(tasks) => tasks,
+            Err(_) => return,
+        };
+        for task in pending {
+            if Self::deliver_callback(&task).await.is_ok() {
+                let _ = VideoGenerationRepository::mark_callback_delivered(
+                    &state.pool,
+                    &task.task_id,
+                )
+                .await;
+            } else {
+                let _ =
+                    VideoGenerationRepository::bump_callback_attempt(&state.pool, &task.task_id)
+                        .await;
+            }
+        }
+    }
+
     /// 推进所有在途任务（轮询循环的 tick 体），返回本轮推进过的任务。
     pub async fn advance_all(state: &AppState, limit: i64) -> Result<Vec<VideoTask>, AppError> {
+        Self::retry_pending_callbacks(state, limit).await;
         let tasks = VideoGenerationRepository::list_active_tasks(&state.pool, limit).await?;
         let mut advanced = Vec::with_capacity(tasks.len());
         for task in tasks {
@@ -471,12 +536,22 @@ impl VideoGenerationService {
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            if VideoGenerationRepository::list_active_tasks(&state.pool, 1)
+            // 空闲判定必须把「待重投的回调」也算进来：否则一个终态但回调
+            // 没投出去的任务会让循环直接 continue，回调永远等不到重投。
+            let active = VideoGenerationRepository::list_active_tasks(&state.pool, 1)
                 .await
-                .map(|tasks| tasks.is_empty())
-                .unwrap_or(true)
-            {
-                // 没有在途任务时完全不碰上游，空闲成本为零。
+                .map(|tasks| !tasks.is_empty())
+                .unwrap_or(false);
+            let pending_callback = VideoGenerationRepository::list_pending_callbacks(
+                &state.pool,
+                1,
+                MAX_CALLBACK_ATTEMPTS,
+            )
+            .await
+            .map(|tasks| !tasks.is_empty())
+            .unwrap_or(false);
+            if !active && !pending_callback {
+                // 没有在途任务、也没有待重投回调时完全不碰上游，空闲成本为零。
                 continue;
             }
             let _ = Self::advance_all(&state, POLL_BATCH_LIMIT).await;
@@ -603,7 +678,9 @@ mod tests {
             error_message: None,
             callback_url: None,
             callback_delivered: false,
+            callback_attempts: 0,
             attempt_count: 0,
+            owner_user_id: None,
             last_polled_at: None,
             created_at: "2026-01-01".into(),
             updated_at: "2026-01-01".into(),
@@ -770,6 +847,7 @@ mod tests {
                 credential_ids: None,
                 // 直连：客户端给的名字就是上游认的名字
                 upstream_model: None,
+                owner_user_id: None,
             },
         )
         .await

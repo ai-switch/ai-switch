@@ -95,6 +95,10 @@ pub(crate) async fn submit_video_generation(
             credential_ids: None,
             // 直连时客户端给的就是上游认的名字（上游名靠账号的 model_mappings 对齐）。
             upstream_model: None,
+            // 直连网关没有「用户」概念，任务不归属任何人；SaaS 那条路径
+            // （`saas::proxy::execute_video_request`）会填 principal.user_id，
+            // 状态查询靠它做越权校验。
+            owner_user_id: None,
         },
     )
     .await

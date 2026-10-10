@@ -86,7 +86,13 @@ async fn execute(
     );
     // 视频渠道（G-P4）。平台值由组决定（`video:kling` …），所以这里只判断路径。
     let videos = crate::services::route_proxy_service::is_video_generation_path(&path);
-    if method != Method::POST
+    // 视频是**异步任务** API：提交是 POST，查询是 GET，两者都算 `videos`。
+    // 复审前这里写的是 `method != Method::POST`，于是一个 `sk-saas-` key 查
+    // `/v1/video/generations/{task_id}` 只会拿到 `saas.endpoint_not_allowed`
+    // —— 提交能用、轮询不能用，异步契约断了一半。其余端点仍然只接受 POST。
+    let video_status =
+        videos && method == Method::GET && crate::web::video_routes::video_task_id_from_path(&path).is_some();
+    if (!video_status && method != Method::POST)
         || !(anthropic || responses || chat || images || videos)
         || (principal.platform == "claude" && !(anthropic || responses))
         || (principal.platform == "gemini" && !images)
@@ -111,6 +117,11 @@ async fn execute(
             "saas.logs_unavailable",
             "Request logging is unavailable; try again later",
         ));
+    }
+    // 状态查询没有请求体，必须在下面「读 body 并解析 JSON」之前分派，
+    // 否则空体会先撞上 `saas.validation`。
+    if video_status {
+        return execute_video_status(app_state, pool, principal, &path, uri.query()).await;
     }
     let body = axum::body::to_bytes(body, 2 * 1024 * 1024)
         .await
@@ -382,6 +393,51 @@ async fn execute_image_request(
     Ok(Response::from_parts(parts, Body::from(bytes)))
 }
 
+/// 视频任务的 SaaS 查询（G-P4 复审补）。
+///
+/// 存在两个理由，都是复审抓出来的：
+///   1. 复审前这里是**不可达**的 —— 上面的守卫写的是 `method != Method::POST`，
+///      所以 `sk-saas-` key 查 `/v1/video/generations/{task_id}` 只会拿到
+///      `saas.endpoint_not_allowed`。提交能用、轮询不能用，异步契约断了一半。
+///   2. 任务表原本没有任何「属于谁」的列，不做归属校验就等于任何 key 都能按
+///      task_id 读到别人的出片地址（task_id 是 UUIDv4，猜不到，但地址本身
+///      是可用的签名 CDN 链接，不该靠「猜不到」当访问控制）。
+async fn execute_video_status(
+    app_state: &AppState,
+    pool: &SqlitePool,
+    principal: billing::ApiPrincipal,
+    path: &str,
+    query: Option<&str>,
+) -> Result<Response, AppError> {
+    let task_id = crate::web::video_routes::video_task_id_from_path(path).ok_or_else(|| {
+        repository::invalid("saas.validation", "A video task id is required")
+    })?;
+    let task =
+        crate::videogen::repository::VideoGenerationRepository::get_task(pool, &task_id)
+            .await
+            .map_err(|_| {
+                repository::invalid("videogen.task_not_found", "Video task was not found")
+            })?;
+    if task.owner_user_id.as_deref() != Some(principal.user_id.as_str()) {
+        // 别人的任务回答「不存在」，而不是「无权访问」：后者会泄漏 task_id 是否存在。
+        return Err(repository::invalid(
+            "videogen.task_not_found",
+            "Video task was not found",
+        ));
+    }
+    let refresh = query.is_some_and(|query| {
+        query
+            .split('&')
+            .any(|pair| pair == "refresh=1" || pair == "refresh=true")
+    });
+    let body = crate::videogen::VideoGenerationService::status(app_state, &task_id, refresh).await?;
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .map_err(|error| repository::invalid("saas.response", &error.to_string()))?)
+}
+
 /// 视频渠道的 SaaS 执行（G-P4）。
 ///
 /// 与 `execute_image_request` 的**根本差异**：视频是异步任务 API，一次
@@ -453,6 +509,8 @@ async fn execute_video_request(
             credential_ids: Some(reservation.credential_ids.clone()),
             // 组定价那一行的上游模型名：客户端看到的是 `model`，上游要的是这个。
             upstream_model: Some(reservation.upstream_model.clone()),
+            // 任务归属：状态查询靠它做越权校验（`execute_video_status`）。
+            owner_user_id: Some(principal.user_id.clone()),
         },
     )
     .await;

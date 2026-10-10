@@ -188,6 +188,132 @@ impl VideoGenerationRequest {
     }
 }
 
+/// 回调地址的放行口径。两个部署模式的威胁模型不同，所以策略是参数而不是常量
+/// （这样才能在一个测试二进制里把两种口径都覆盖到）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallbackTargetPolicy {
+    /// 本地优先模式（桌面 app）：操作者就是使用者，回调打到本机是正当用法。
+    /// 仍然挡掉链路本地/元数据地址——那些任何模式下都不是回调。
+    Local,
+    /// 服务端模式（`standalone-server`，即 SaaS）：网关是运营方的机器，
+    /// 任意租户给的地址都可能是在探内网，所以连私网段与回环一起挡。
+    Server,
+}
+
+impl CallbackTargetPolicy {
+    /// 当前构建实际使用的口径。
+    pub const fn current() -> Self {
+        if cfg!(feature = "standalone-server") {
+            Self::Server
+        } else {
+            Self::Local
+        }
+    }
+}
+
+/// 校验 `metadata.callback_url`（SSRF 兜底）。
+///
+/// 回调是**网关主动发出的出站请求**，目标地址完全由调用方给。不校验的话，
+/// 任何能提交视频的人（SaaS 场景下是任意租户）都能让网关去打内网：
+/// `http://169.254.169.254/latest/meta-data/…` 这类云元数据端点是最典型的靶子。
+///
+/// 挡掉的四类：
+///   1. 非 `http`/`https`（`file:` / `gopher:` / `ftp:` … 都不是回调协议）；
+///   2. 带 userinfo（`http://user:pass@host/` 用来把真实主机藏在 `@` 之后）；
+///   3. 链路本地（`169.254.0.0/16`，含元数据地址）、`0.0.0.0`、`::`；
+///   4. 云元数据的常见主机名（`metadata.google.internal` 等）。
+///
+/// 第 5 类（回环与 RFC1918 私网段）只在 [`CallbackTargetPolicy::Server`] 下挡：
+/// 本地优先模式下「回调打到本机」是正当用法，一刀切会把功能砍掉。
+///
+/// **已知不覆盖**：DNS 重绑定（校验时解析到公网、请求时解析到内网）。
+/// 要彻底封住需要在连接建立后核对对端 IP，属于连接层改造，见计划文档遗留。
+pub fn validate_callback_url(
+    raw: &str,
+    policy: CallbackTargetPolicy,
+) -> Result<(), String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("callback_url must not be empty".to_string());
+    }
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|error| format!("callback_url is not a valid URL: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!(
+            "callback_url must use http or https, got '{}'",
+            parsed.scheme()
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("callback_url must not carry credentials".to_string());
+    }
+    // 必须走 `Url::host()` 而不是 `host_str()`：后者对 IPv6 返回带方括号的形式
+    // （`[::1]`），`parse::<IpAddr>()` 会失败，于是整个 IPv6 分支被静默跳过。
+    let host = parsed
+        .host()
+        .ok_or_else(|| "callback_url has no host".to_string())?;
+
+    /// 云元数据的常见主机名（`169.254.169.254` 的域名版本）。
+    const METADATA_HOSTS: [&str; 4] = [
+        "metadata.google.internal",
+        "metadata.goog",
+        "metadata.azure.com",
+        "instance-data",
+    ];
+
+    match host {
+        url::Host::Ipv4(v4) => {
+            let octets = v4.octets();
+            let link_local = octets[0] == 169 && octets[1] == 254;
+            let blocked = link_local
+                || v4.is_unspecified()
+                || (policy == CallbackTargetPolicy::Server
+                    && (v4.is_loopback() || v4.is_private()));
+            if blocked {
+                return Err(format!(
+                    "callback_url host '{v4}' is not a permitted callback target"
+                ));
+            }
+        }
+        url::Host::Ipv6(v6) => {
+            let unique_local = (v6.segments()[0] & 0xfe00) == 0xfc00;
+            let link_local = (v6.segments()[0] & 0xffc0) == 0xfe80;
+            // `::ffff:a.b.c.d`：回环/私网/链路本地都要按内嵌的 v4 判
+            let mapped = v6
+                .to_ipv4_mapped()
+                .map(|v4| {
+                    v4.is_loopback()
+                        || v4.is_private()
+                        || (v4.octets()[0] == 169 && v4.octets()[1] == 254)
+                })
+                .unwrap_or(false);
+            let blocked = link_local
+                || mapped
+                || v6.is_unspecified()
+                || (policy == CallbackTargetPolicy::Server
+                    && (v6.is_loopback() || unique_local));
+            if blocked {
+                return Err(format!(
+                    "callback_url host '{v6}' is not a permitted callback target"
+                ));
+            }
+        }
+        url::Host::Domain(name) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            if METADATA_HOSTS.contains(&name.as_str()) {
+                return Err("callback_url points at a cloud metadata endpoint".to_string());
+            }
+            if policy == CallbackTargetPolicy::Server
+                && matches!(name.as_str(), "localhost" | "localhost.localdomain")
+            {
+                return Err("callback_url points at the local host".to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn simplify_ratio(width: u32, height: u32) -> String {
     fn gcd(a: u32, b: u32) -> u32 {
         if b == 0 {
@@ -720,5 +846,75 @@ mod tests {
             );
         }
         assert_eq!(VideoProtocol::ALL.len(), 5);
+    }
+
+    /// 回调地址校验（SSRF 兜底）。两种部署口径都要覆盖——策略是参数而不是
+    /// 常量，就是为了让这一个测试二进制能同时钉住两边。
+    #[test]
+    fn callback_targets_are_validated_per_policy() {
+        use super::{validate_callback_url, CallbackTargetPolicy};
+        use CallbackTargetPolicy::{Local, Server};
+
+        for policy in [Local, Server] {
+            // 正常公网地址：两种口径都放行
+            assert!(validate_callback_url("https://cb.example/hook", policy).is_ok());
+            assert!(validate_callback_url("http://203.0.113.7:8080/hook", policy).is_ok());
+            assert!(validate_callback_url("https://cb.example./hook", policy).is_ok());
+
+            // 非 http(s) / 根本不是 URL / 空
+            for bad in [
+                "file:///etc/passwd",
+                "gopher://127.0.0.1:6379/_",
+                "ftp://example.com/x",
+                "not a url",
+                "",
+                "   ",
+            ] {
+                assert!(
+                    validate_callback_url(bad, policy).is_err(),
+                    "{bad:?} must be rejected under {policy:?}"
+                );
+            }
+
+            // userinfo 把真实主机藏在 `@` 之后
+            assert!(validate_callback_url("http://evil.com@169.254.169.254/", policy).is_err());
+
+            // 链路本地 / 云元数据：**任何模式**都不是合法回调目标
+            for bad in [
+                "http://169.254.169.254/latest/meta-data/",
+                "http://169.254.0.1/x",
+                "http://metadata.google.internal/x",
+                "http://metadata.azure.com/x",
+                "http://0.0.0.0/x",
+                "http://[::]/x",
+                "http://[fe80::1]/x",
+                "http://[::ffff:169.254.169.254]/x",
+            ] {
+                assert!(
+                    validate_callback_url(bad, policy).is_err(),
+                    "{bad:?} must be rejected under {policy:?}"
+                );
+            }
+        }
+
+        // 回环与私网：本地模式放行（「回调打到本机」是正当用法），服务端模式拒。
+        for ok in [
+            "http://127.0.0.1:9/hook",
+            "http://[::1]:9/hook",
+            "http://10.0.0.5/hook",
+            "http://192.168.1.4/hook",
+            "http://172.16.3.9/hook",
+            "http://localhost:9/hook",
+            "http://[fd00::1]/hook",
+        ] {
+            assert!(validate_callback_url(ok, Local).is_ok(), "{ok} must pass Local");
+            assert!(
+                validate_callback_url(ok, Server).is_err(),
+                "{ok} must be rejected under Server"
+            );
+        }
+        // `::ffff:127.0.0.1` 这类映射地址也要按内嵌 v4 判
+        assert!(validate_callback_url("http://[::ffff:127.0.0.1]/x", Server).is_err());
+        assert!(validate_callback_url("http://[::ffff:10.0.0.1]/x", Server).is_err());
     }
 }

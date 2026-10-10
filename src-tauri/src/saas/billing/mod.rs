@@ -14,7 +14,7 @@ use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
 /// 一次视频请求最多生成几条。与 `videogen::service::MAX_VIDEO_COUNT` 保持一致，
 /// 这里单独定义是为了让计费侧不依赖 videogen 模块（计费只管数量上下界）。
-const MAX_VIDEO_COUNT: i64 = 4;
+const MAX_VIDEO_COUNT: i64 = 1;
 /// 一次视频请求可接受的时长上界（秒）。防呆用，不是产品限制：
 /// 各家方言的最长时长由上游自己拒绝，这里只挡明显异常的输入。
 const MAX_VIDEO_DURATION_SECONDS: i64 = 600;

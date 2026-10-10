@@ -7828,6 +7828,12 @@ pub(crate) fn is_shared_model_api_path(path: &str) -> bool {
         || normalized == "/responses"
         || normalized.ends_with("/messages")
         || normalized.ends_with("/responses")
+        // 视频端点也声明了无 `/v1` 前缀的别名（`web::video_routes` 与
+        // `is_video_generation_path` 都认它）。少了这一条，那个别名在
+        // `shared_fallback` 里根本进不来——会被静默降级成静态兜底 404，
+        // 也就是「代码声称支持、实际永远 404」。
+        || normalized == "/video/generations"
+        || normalized.starts_with("/video/generations/")
         || normalized == "/v1"
         || normalized.starts_with("/v1/")
         || normalized == "/v1beta"
@@ -7858,6 +7864,22 @@ mod image_path_tests {
             normalize_api_upstream_path("openai", "/v1/images/edits"),
             "/v1/images/edits"
         );
+    }
+
+    /// 视频端点的**无 `/v1` 别名**也必须是共享模型 API 路径。
+    ///
+    /// `web::video_routes::is_video_submit_path` 与
+    /// `is_video_generation_path` 都声称认这个别名，但 `shared_fallback`
+    /// 只在 `is_shared_model_api_path` 为真时才进入代理逻辑。少了这一条，
+    /// 别名会被静默降级成静态兜底 404 —— 「代码声称支持、实际永远 404」。
+    #[test]
+    fn video_paths_without_the_v1_prefix_are_shared_model_api_paths() {
+        assert!(is_shared_model_api_path("/video/generations"));
+        assert!(is_shared_model_api_path("/video/generations/"));
+        assert!(is_shared_model_api_path("/video/generations/t-1"));
+        // 前缀接近但不同的路径不能被顺手放进来
+        assert!(!is_shared_model_api_path("/video/generation"));
+        assert!(!is_shared_model_api_path("/videos/generations"));
     }
 }
 

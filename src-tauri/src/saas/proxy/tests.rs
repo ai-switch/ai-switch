@@ -648,8 +648,8 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
         headers,
         "/v1/video/generations".parse().unwrap(),
         Body::from(
-            // 10 秒 × 2 条：单价 = 10_000 + 5_000×10 = 60_000，合计 120_000
-            json!({"model":"kling-v1","prompt":"a cat surfing","duration":10,"n":2}).to_string(),
+            // 10 秒 × 1 条：单价 = 10_000 + 5_000×10 = 60_000
+            json!({"model":"kling-v1","prompt":"a cat surfing","duration":10,"n":1}).to_string(),
         ),
     )
     .await
@@ -678,21 +678,21 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
     assert_eq!(stored.0, "kling-v1");
     assert_eq!(stored.1.as_deref(), Some("kling-v1-upstream"));
 
-    // 计费：按「条」×2，且账号被收窄到预留算出的那一个
+    // 计费：单价 60_000 × 1 条，且账号被收窄到预留算出的那一个
     let reservation: (String, i64) = sqlx::query_as(
         "SELECT status,reserved_micros FROM saas_billing_reservations",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(reservation, ("settled".to_string(), 120_000));
+    assert_eq!(reservation, ("settled".to_string(), 60_000));
     let ledger: (i64, i64) = sqlx::query_as(
         "SELECT COUNT(*),COALESCE(SUM(amount_micros),0) FROM saas_wallet_ledger WHERE kind='usage'",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(ledger, (1, -120_000));
+    assert_eq!(ledger, (1, -60_000));
 
     // 日志里要能对上这一单
     runtime.logs.shutdown().await.unwrap();
@@ -702,7 +702,7 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
         .await
         .unwrap();
     assert_eq!(logs.total, 1);
-    assert_eq!(logs.items[0].amount_usd_micros, 120_000);
+    assert_eq!(logs.items[0].amount_usd_micros, 60_000);
     assert_eq!(logs.items[0].model, "kling-v1");
     assert_eq!(logs.items[0].platform, "video:kling");
 
@@ -798,7 +798,7 @@ async fn saas_video_key_cannot_reach_text_endpoints() {
 async fn video_billing_fixture(
     flat_price: i64,
     per_second_price: i64,
-) -> (SqlitePool, crate::saas::billing::ApiPrincipal) {
+) -> (SqlitePool, crate::saas::billing::ApiPrincipal, String) {
     let pool = repository::test_pool().await;
     crate::database::run_migrations(&pool).await.unwrap();
     repository::test_enable(&pool).await;
@@ -876,13 +876,11 @@ async fn video_billing_fixture(
     )
     .await
     .unwrap();
-    let principal = crate::saas::billing::authenticate_key(
-        &pool,
-        key["plaintextKey"].as_str().unwrap(),
-    )
-    .await
-    .unwrap();
-    (pool, principal)
+    let plaintext = key["plaintextKey"].as_str().unwrap().to_string();
+    let principal = crate::saas::billing::authenticate_key(&pool, &plaintext)
+        .await
+        .unwrap();
+    (pool, principal, plaintext)
 }
 
 /// 视频定价矩阵：起步价与按秒价**相加**，且只配一种时也能工作
@@ -890,25 +888,25 @@ async fn video_billing_fixture(
 #[tokio::test]
 async fn video_pricing_adds_the_flat_and_per_second_prices() {
     // 只配起步价 → 与迁移 0007 行为一致
-    let (pool, principal) = video_billing_fixture(30_000, 0).await;
-    let reservation = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 2, 10)
-        .await
-        .unwrap();
-    assert_eq!(reservation.reserved_micros, 60_000);
-
-    // 只配按秒价 → 纯按秒
-    let (pool, principal) = video_billing_fixture(0, 2_000).await;
-    let reservation = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 2, 7)
-        .await
-        .unwrap();
-    assert_eq!(reservation.reserved_micros, 28_000);
-
-    // 两个都配 → 起步价 + 按秒价 × 时长
-    let (pool, principal) = video_billing_fixture(1_000, 2_000).await;
-    let reservation = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 2, 7)
+    let (pool, principal, _key) = video_billing_fixture(30_000, 0).await;
+    let reservation = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 10)
         .await
         .unwrap();
     assert_eq!(reservation.reserved_micros, 30_000);
+
+    // 只配按秒价 → 纯按秒
+    let (pool, principal, _key) = video_billing_fixture(0, 2_000).await;
+    let reservation = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 7)
+        .await
+        .unwrap();
+    assert_eq!(reservation.reserved_micros, 14_000);
+
+    // 两个都配 → 起步价 + 按秒价 × 时长
+    let (pool, principal, _key) = video_billing_fixture(1_000, 2_000).await;
+    let reservation = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 7)
+        .await
+        .unwrap();
+    assert_eq!(reservation.reserved_micros, 15_000);
 
     // 时长直接影响预留额：同一配置下 10 秒应当比 5 秒贵
     let short = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 5)
@@ -925,14 +923,15 @@ async fn video_pricing_adds_the_flat_and_per_second_prices() {
 #[tokio::test]
 async fn video_pricing_rejects_unpriced_models_and_out_of_range_inputs() {
     // 两种价都是 0 → 没有任何可用价格
-    let (pool, principal) = video_billing_fixture(0, 0).await;
+    let (pool, principal, _key) = video_billing_fixture(0, 0).await;
     let error = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 5)
         .await
         .expect_err("unpriced model must fail closed");
     assert_eq!(error.code(), "saas.model_not_allowed");
 
-    let (pool, principal) = video_billing_fixture(30_000, 0).await;
-    for (count, duration) in [(0, 5), (5, 5), (1, 0), (1, 601)] {
+    let (pool, principal, _key) = video_billing_fixture(30_000, 0).await;
+    // 条数上限是 1（契约的 `url` 是单值），所以 2 条也必须被拒
+    for (count, duration) in [(0, 5), (2, 5), (5, 5), (1, 0), (1, 601)] {
         let error = crate::saas::billing::reserve_video(
             &pool, &principal, "kling-v1", count, duration,
         )
@@ -944,4 +943,141 @@ async fn video_pricing_rejects_unpriced_models_and_out_of_range_inputs() {
             "count={count} duration={duration} should be rejected"
         );
     }
+}
+
+/// SaaS 的视频**状态查询**必须可用，且只能查自己的任务。
+///
+/// 复审前这条路径完全不可达：`execute` 的守卫是 `method != Method::POST`，
+/// 所以 `sk-saas-` key 查 `/v1/video/generations/{task_id}` 只会拿到
+/// `saas.endpoint_not_allowed` —— 提交能用、轮询不能用，异步契约断了一半。
+#[tokio::test]
+async fn saas_video_status_is_available_and_scoped_to_its_owner() {
+    use crate::videogen::models::{NewVideoTask, VideoTaskProgress};
+    use crate::videogen::repository::VideoGenerationRepository;
+
+    let (pool, principal, plaintext) = video_billing_fixture(10_000, 0).await;
+    let state = test_app_state(pool.clone());
+
+    let mine = VideoGenerationRepository::create_task(
+        &pool,
+        NewVideoTask {
+            task_id: "task-mine".into(),
+            session_id: None,
+            message_id: None,
+            model: "kling-v1".into(),
+            upstream_model: Some("kling-v1-upstream".into()),
+            dialect: "kling".into(),
+            upstream_task_id: Some("upstream-1".into()),
+            callback_url: None,
+            owner_user_id: Some(principal.user_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    VideoGenerationRepository::progress_task(
+        &pool,
+        &mine.task_id,
+        VideoTaskProgress {
+            status: "succeeded".into(),
+            url: Some("https://cdn.example/v.mp4".into()),
+            error_message: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    VideoGenerationRepository::create_task(
+        &pool,
+        NewVideoTask {
+            task_id: "task-theirs".into(),
+            session_id: None,
+            message_id: None,
+            model: "kling-v1".into(),
+            upstream_model: None,
+            dialect: "kling".into(),
+            upstream_task_id: Some("upstream-2".into()),
+            callback_url: None,
+            owner_user_id: Some("someone-else".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let runtime = SaasRuntime::default();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {plaintext}").parse().unwrap(),
+    );
+
+    let response = execute(
+        &state,
+        &runtime,
+        build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default()),
+        Method::GET,
+        headers.clone(),
+        "/v1/video/generations/task-mine".parse().unwrap(),
+        Body::empty(),
+    )
+    .await
+    .expect("GET on the video status path must be allowed for a video key");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["task_id"], "task-mine");
+    assert_eq!(body["status"], "succeeded");
+    assert_eq!(body["url"], "https://cdn.example/v.mp4");
+
+    // 别人的任务：回答「不存在」，而不是「无权访问」——后者会泄漏 task_id 是否存在
+    let error = execute(
+        &state,
+        &runtime,
+        build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default()),
+        Method::GET,
+        headers,
+        "/v1/video/generations/task-theirs".parse().unwrap(),
+        Body::empty(),
+    )
+    .await
+    .expect_err("another user's task must not be readable");
+    assert_eq!(error.code(), "videogen.task_not_found");
+}
+
+/// `n>1` 必须在预留之前被拒。
+///
+/// 契约里的 `url` 是单值，而 `upstream_body` 压根不把 `n` 发给上游，
+/// 所以允许它就是「按 n 条收钱、只发 1 条」——复审抓到的计费 bug。
+#[tokio::test]
+async fn saas_video_request_rejects_more_than_one_clip() {
+    let (pool, _principal, plaintext) = video_billing_fixture(10_000, 0).await;
+    let state = test_app_state(pool.clone());
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {plaintext}").parse().unwrap(),
+    );
+
+    let error = execute(
+        &state,
+        &SaasRuntime::default(),
+        build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default()),
+        Method::POST,
+        headers,
+        "/v1/video/generations".parse().unwrap(),
+        Body::from(json!({"model":"kling-v1","prompt":"x","n":2}).to_string()),
+    )
+    .await
+    .expect_err("n>1 must be rejected");
+    assert_eq!(error.code(), "saas.request_limits");
+
+    // 拒绝必须发生在预留之前：账上不能留下任何冻结
+    let reservations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM saas_billing_reservations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(reservations, 0);
 }

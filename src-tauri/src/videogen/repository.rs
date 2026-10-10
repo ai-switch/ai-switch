@@ -18,7 +18,7 @@ const SESSION_COLUMNS: &str = "id,title,platform,archived,created_at,updated_at"
 const MESSAGE_COLUMNS: &str = "id,session_id,role,prompt,request_json,status,model,upstream_model,member_id,task_id,error_message,video_count,cost_micros,created_at,updated_at";
 const ASSET_COLUMNS: &str =
     "id,session_id,message_id,relative_path,mime_type,sha256,width,height,duration_ms,byte_size,created_at";
-const TASK_COLUMNS: &str = "task_id,session_id,message_id,model,upstream_model,dialect,status,upstream_task_id,url,error_message,callback_url,callback_delivered,attempt_count,last_polled_at,created_at,updated_at";
+const TASK_COLUMNS: &str = "task_id,session_id,message_id,model,upstream_model,dialect,status,upstream_task_id,url,error_message,callback_url,callback_delivered,callback_attempts,attempt_count,last_polled_at,owner_user_id,created_at,updated_at";
 
 impl VideoGenerationRepository {
     pub async fn create_session(
@@ -196,7 +196,7 @@ impl VideoGenerationRepository {
         input: NewVideoTask,
     ) -> Result<VideoTask, AppError> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query("INSERT INTO videogen_tasks (task_id,session_id,message_id,model,upstream_model,dialect,status,upstream_task_id,callback_url,callback_delivered,attempt_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,0,0,?,?)")
+        sqlx::query("INSERT INTO videogen_tasks (task_id,session_id,message_id,model,upstream_model,dialect,status,upstream_task_id,callback_url,owner_user_id,callback_delivered,callback_attempts,attempt_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,0,0,0,?,?)")
             .bind(&input.task_id)
             .bind(&input.session_id)
             .bind(&input.message_id)
@@ -206,6 +206,7 @@ impl VideoGenerationRepository {
             .bind("processing")
             .bind(&input.upstream_task_id)
             .bind(&input.callback_url)
+            .bind(&input.owner_user_id)
             .bind(&now)
             .bind(&now)
             .execute(pool)
@@ -269,6 +270,47 @@ impl VideoGenerationRepository {
             .await
             .map_err(database)?;
         Self::get_task(pool, task_id).await
+    }
+
+    /// 终态但回调还没投出去的任务（供重投）。
+    ///
+    /// 复审前这条查询**不存在**：`list_active_tasks` 只取 `status='processing'`，
+    /// 而终态任务的 `poll_once` 会直接早返回，所以 `callback_delivered=0` 的任务
+    /// 永远不会被再碰一次 —— `deliver_callback` 注释里那句「失败留给下一轮重投」
+    /// 是空话。`callback_attempts` 给它一个有限预算，死地址不会变成常驻噪声。
+    pub async fn list_pending_callbacks(
+        pool: &SqlitePool,
+        limit: i64,
+        max_attempts: i64,
+    ) -> Result<Vec<VideoTask>, AppError> {
+        let sql = format!(
+            "SELECT {TASK_COLUMNS} FROM videogen_tasks \
+             WHERE callback_delivered=0 AND callback_url IS NOT NULL \
+               AND status IN ('succeeded','failed') AND callback_attempts < ? \
+             ORDER BY updated_at ASC LIMIT ?"
+        );
+        sqlx::query_as(&sql)
+            .bind(max_attempts)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+            .map_err(database)
+    }
+
+    /// 记一次回调投递尝试。成功前每投一次都要 +1。
+    pub async fn bump_callback_attempt(
+        pool: &SqlitePool,
+        task_id: &str,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            "UPDATE videogen_tasks SET callback_attempts=callback_attempts+1, updated_at=? WHERE task_id=?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(database)?;
+        Ok(())
     }
 }
 
@@ -376,6 +418,7 @@ mod tests {
                 dialect: "kling".into(),
                 upstream_task_id: Some("k-1".into()),
                 callback_url: Some("https://cb/1".into()),
+                owner_user_id: None,
             },
         )
         .await

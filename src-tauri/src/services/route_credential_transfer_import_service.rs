@@ -1063,9 +1063,10 @@ mod tests {
 
     /// 视频渠道可以走导入进来，平台串会归一成 `PlatformId::as_str()`。
     ///
-    /// 这条路径目前是**唯一**能配置 `video:kling` 账号的入口——后台 UI 的平台选择器
-    /// 只有 7 个文本平台（见计划文档「遗留 1」），所以它必须能用。
-    /// 同时钉住别名归一：`video:seedance` 落库要变成 `video:ark`。
+    /// 侧边栏「视频」屏（`VideoChannelsScreen`）也能新增视频渠道，但导入是
+    /// **批量**那条路，且它依赖 `all_with_video()` 参与去重——少了它，
+    /// 同一路视频账号会被重复导入。同时钉住别名归一：`video:seedance` 落库要
+    /// 变成 `video:ark`。
     #[tokio::test]
     async fn video_channels_are_importable_and_normalize_to_their_canonical_platform() {
         let pool = migrated_pool().await;

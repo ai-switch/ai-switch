@@ -73,7 +73,15 @@ pub struct VideoTask {
     pub error_message: Option<String>,
     pub callback_url: Option<String>,
     pub callback_delivered: bool,
+    /// 回调投递失败重试过几次（超预算就不再重试，见 `MAX_CALLBACK_ATTEMPTS`）
+    pub callback_attempts: i64,
     pub attempt_count: i64,
+    /// 归属的 SaaS 用户；直连网关的任务为 `None`。
+    ///
+    /// 存在的唯一理由：`GET /v1/video/generations/{task_id}` 必须能回答
+    /// 「这个 task_id 是不是你的」，否则 SaaS 侧只能不做校验（越权读）
+    /// 或干脆不支持查询（异步契约断一半）。
+    pub owner_user_id: Option<String>,
     pub last_polled_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -133,6 +141,8 @@ pub struct NewVideoTask {
     pub dialect: String,
     pub upstream_task_id: Option<String>,
     pub callback_url: Option<String>,
+    /// SaaS 提交时填 principal.user_id；直连网关留 `None`。
+    pub owner_user_id: Option<String>,
 }
 
 /// 轮询/回调推进任务状态
