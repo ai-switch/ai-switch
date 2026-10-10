@@ -114,6 +114,40 @@ run_loop → 常驻轮询调度器（10s 一跳，单轮最多 32 个任务，�
 它需要「先转方言体 → 打上游 → 落任务 → 回 201」这套异步流程，不是逐字节透明转发。
 分流时先摘掉未授权请求的 `x-ai-switch-platform` 头（与既有代理路径同一套防伪）。
 
+#### 4.1 平台解析：以 key 为准（修正）
+
+**原来的实现是错的，会让端点对 OpenAI 兼容客户端完全不可用。**
+
+`x-ai-switch-platform` 在 ai-switch 里的定位是**特权本地诊断覆盖**（代码注释原话：
+"a privileged diagnostic override, not an alternative to API-key auth"）——
+只有持有本地 token 的桌面端能用，外部请求的这一头会被 `shared_fallback` 摘掉。
+外部客户端（也就是 OpenAI 兼容客户端）走的是**入站 key**：`route_proxy_keys` 把
+`sk-ai-switch-…` 映射到平台，文本平台一直是这么做的。
+
+而视频最初只认「请求头 → 请求体 `platform` 字段」。于是：
+一个用**合法 route proxy key** 通过了鉴权的请求，到这里既没有头也没有体字段，
+被 400 挡回 —— 也就是说 `/v1/video/generations` 对任何 OpenAI 兼容客户端都不可用，
+而「插件只认一个 baseUrl + 一个 token」正是整个 G- 系列的设计前提。
+
+修法：`resolve_video_platform` 的优先级改成与 `route_proxy_service::resolve_platform`
+**完全一致**，key 排第一：
+
+1. 入站 API key（`Authorization: Bearer sk-ai-switch-…` / `x-api-key`）；
+2. `x-ai-switch-platform` 请求头（特权本地覆盖）；
+3. 请求体 `platform` 字段（curl 便利）。
+
+key 与平台是**一一对应**的，所以每个协议一张 key（`video:kling` / `video:ark` …），
+与文本平台的 `sk-ai-switch-codex` 是同一套 `route_proxy_keys` 表、同一个
+`get_route_proxy_key` 命令 —— 无需新增任何机制（`get_or_create_platform_key`
+只校验 `PlatformId::parse`，不查能力矩阵，所以 `video:kling` 的 key 本来就能签发）。
+
+前端在「视频」屏加了**「接入信息」**：摊开端点与 5 个协议各自的 key（复制/显示用
+`EndpointRow`，与 `AccountsScreen` 的配置写入对话框同一组件）。key 只在打开该对话框时
+读取 —— 读取会在不存在时创建它，不该因为用户路过这一屏就凭空签发 5 张 key。
+
+顺带把 `video.subtitle` 的文案从「用 x-ai-switch-platform 头指定渠道」改成
+「用各自的 key 指定渠道」—— 文案原来在教用户做错的事。
+
 ### 5. 前端：视频渠道管理（第三轮）
 
 **UX 落点**（用户定）：侧边栏**一个「视频」入口**，账号列表里每行用 **TAG** 标出上游协议。
@@ -169,17 +203,23 @@ CARGO_TARGET_DIR=target-codex cargo test --lib
 ```
 
 - `cargo check --lib`：**通过，0 error**（89 条 warning 全部是既有告警，本轮新增文件零告警）。
-- `cargo test --lib`：**1968 passed / 0 failed / 13 ignored**（整仓，128s）。
+- `cargo test --lib`：**1969 passed / 0 failed / 13 ignored**（整仓，136s）。
 - `npx tsc --noEmit`：**0 error**。
-- `npx vitest run`：**953 passed / 0 failed**（81 个文件；`src/` 下没有测试文件，
+- `npx vitest run`：**955 passed / 0 failed**（81 个文件；`src/` 下没有测试文件，
   前端测试都在仓库根的 `tests/`）。
+  > 全量跑时**每次会随机丢掉几个文件**：沙箱的 fs 垫片写不了 vitest 缓存，
+    抛 `EPERM …\Temp\…\web\<hash>`，**每个 EPERM 丢一个文件**，丢哪个每次不同。
+    所以单次输出会比 81/955 少。校验办法：把 `Test Files / Tests` 的差值拿去补跑
+    被丢的文件，或直接按上面的数字核对（丢的文件单独跑都是全过）。
+    这不是本仓的问题，也不是本次改动引起的。
 - 分套件：`videogen` 12 例（新增 `dialect_and_platform_protocol_round_trip`、
   `minimax_polls_through_query_string`、`platform_hint_round_trips_to_a_dialect`、
   `every_dialect_extracts_the_video_url_from_a_success_response`、
   `builds_the_remaining_three_dialects_and_their_paths`、
   `kling_submit_poll_and_callback_run_end_to_end`）、
-  `web::video_routes` 4 例（新增 `dispatches_methods_and_maps_errors_to_status_codes`，
-  覆盖 405 / 404 / 400 分派）、
+  `web::video_routes` 6 例（新增 `dispatches_methods_and_maps_errors_to_status_codes`
+  覆盖 405 / 404 / 400 分派、`resolves_the_platform_from_a_route_proxy_key`
+  覆盖「只用 key 就能定出渠道 / 文本 key 不能用 / 无效 key 被拒」）、
   导入服务 35 例（新增 `video_channels_are_importable_and_normalize_to_their_canonical_platform`）、
   `saas` 109 例（新增 `saas_video_request_authenticates_reserves_submits_and_bills_per_video`、
   `saas_video_key_cannot_reach_text_endpoints`、`video_pricing_adds_the_flat_and_per_second_prices`、
@@ -196,6 +236,8 @@ CARGO_TARGET_DIR=target-codex cargo test --lib
 | 平台钉死、能力收窄、账号池选择 | ✅ 集成测试间接覆盖 |
 | 视频渠道的导入（含别名归一） | ✅ 单测 |
 | 前端视频渠道管理（合并列表 + TAG、增删改、能力校验） | ✅ 组件测试 |
+| 平台从入站 key 解析（OpenAI 兼容路径） | ✅ 单测（含「文本 key 不能调视频」「无效 key 被拒」） |
+| 「接入信息」对话框（端点 + 每协议一张 key） | ✅ 组件测试（含未启动代理时的提示） |
 | SaaS 管理端的视频定价（按条 + 按秒）与平台徽标 | ✅ 组件测试 |
 | `reserve_video` / `settle_video` 的计费与退款 | ✅ 集成测试（SaaS 全链路）+ 定价矩阵单测（起步价 / 按秒 / 相加 / 越界 fail closed） |
 | `execute_video_request` 的 HTTP 行为 | ✅ 集成测试（201 契约体、日志、模型名不泄漏） |
@@ -232,6 +274,13 @@ CARGO_TARGET_DIR=target-codex cargo test --lib
   （视频轮询调度器在无 tauri 的独立服务端里同样编译通过）。
 
 ## 实现备忘（给后续接线的人）
+
+- **`x-ai-switch-platform` 是特权本地覆盖，不是对外契约。** 任何新增的多模态端点
+  （视频、音频、未来别的）都**必须**把入站 key 作为平台来源的第一顺位，
+  否则端点在 OpenAI 兼容客户端眼里就是坏的。视频这里是踩过一次的（见 4.1）。
+- **需要「先知道平台才能发请求」的端点，要自己在 HTTP 层解析平台**：
+  `forward_request` 内部解析平台是在发出去之前的最后一步，拿不到值去做请求体转换。
+  但解析的**来源与优先级**必须与 `resolve_platform` 一致，不能自己另发明一套。
 
 - **`video:kling` 落在 `route_credentials.platform` 列，不是 `kind` 列**。
   `kind` 有 `CHECK (kind IN ('official','api'))`，视频账号必须写 `kind='api'`；

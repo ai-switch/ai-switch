@@ -9,10 +9,16 @@
 //!
 //! **平台从哪来。** 与 `/v1/images/generations` 不同，视频的方言选择不可能从
 //! 请求体推出来（同一个 `model` 名在各家都可能存在），所以必须由调用方指明渠道。
-//! 取值优先级与 `route_proxy_service::resolve_platform` 一致：
-//!   1. `x-ai-switch-platform` 请求头（桌面/本地客户端与 SaaS 代理内部都用它）；
-//!   2. 请求体旁的 `platform` 字段（`/v1/video/generations` 的私有扩展，
+//! 取值优先级与 `route_proxy_service::resolve_platform` **保持一致**：
+//!   1. 入站 API key（`Authorization: Bearer sk-ai-switch-…`）—— 外部 OpenAI 兼容
+//!      客户端唯一会带的东西，也是设计前提「插件只认一个 baseUrl + 一个 token」；
+//!   2. `x-ai-switch-platform` 请求头（特权本地覆盖，桌面端与 SaaS 代理内部用）；
+//!   3. 请求体旁的 `platform` 字段（`/v1/video/generations` 的私有扩展，
 //!      方便 curl 调试时不必设置请求头）。
+//!
+//! key 必须排在第一位：它同时是**鉴权凭据**与**渠道选择**，就像文本平台
+//! （`sk-ai-switch-codex` 等）一样。把自定义头当主路径会让本端点对 OpenAI
+//! 兼容客户端不可用。
 //!
 //! 平台必须形如 `video:kling`（`Provider.kind` 的「模态:协议」语义，G-P1）。
 //!
@@ -23,13 +29,17 @@ use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
+use sqlx::SqlitePool;
 
 use crate::app_state::AppState;
+use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
 use crate::videogen::protocol::VideoGenerationRequest;
 use crate::videogen::service::{SubmitVideoInput, VideoGenerationService};
 
-/// 平台可能放在请求体里的字段名（curl 友好；请求头优先）。
+/// 平台可能放在请求体里的字段名（curl 友好；请求头与入站 key 都优先）。
 const PLATFORM_BODY_FIELD: &str = "platform";
+/// 平台特权覆盖头（与 `route_proxy_service::ROUTE_PROXY_PLATFORM_HEADER` 同值）。
+const PLATFORM_HEADER: &str = "x-ai-switch-platform";
 /// new-api 契约里 `metadata` 的字段名。
 const METADATA_FIELD: &str = "metadata";
 
@@ -55,13 +65,14 @@ pub(crate) fn video_task_id_from_path(path: &str) -> Option<String> {
 pub(crate) async fn submit_video_generation(
     state: &AppState,
     headers: &HeaderMap,
+    uri: &Uri,
     body: axum::body::Bytes,
 ) -> Response {
     let body = match normalize_request_body(&body) {
         Ok(body) => body,
         Err(response) => return response,
     };
-    let platform = match resolve_video_platform(headers, &body) {
+    let platform = match resolve_video_platform(&state.pool, headers, uri.query(), &body).await {
         Ok(platform) => platform,
         Err(response) => return response,
     };
@@ -113,34 +124,40 @@ pub(crate) async fn video_generation_status(
     }
 }
 
-/// 平台解析：请求头优先，其次请求体 `platform` 字段。
-fn resolve_video_platform(headers: &HeaderMap, body: &[u8]) -> Result<String, Response> {
-    let from_header = headers
-        .get("x-ai-switch-platform")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let platform = if let Some(platform) = from_header {
-        platform.to_string()
-    } else {
-        let from_body = serde_json::from_slice::<Value>(body)
+/// 平台解析，优先级与 `route_proxy_service::resolve_platform` **一致**：
+///   1. 入站 API key（`Authorization: Bearer sk-ai-switch-…` / `x-api-key`）；
+///   2. `x-ai-switch-platform` 请求头（特权本地覆盖）；
+///   3. 请求体 `platform` 字段（curl 便利）。
+///
+/// **key 必须排第一。** 外部 OpenAI 兼容客户端只会带 `Authorization: Bearer`，
+/// 不会带自定义头。早先只认头/体字段时，一个用合法 route proxy key 通过鉴权的
+/// 请求会在这里被 400 挡回——本端点于是对 OpenAI 兼容客户端完全不可用，
+/// 也违背了「插件只认一个 baseUrl + 一个 token」的设计前提。
+async fn resolve_video_platform(
+    pool: &SqlitePool,
+    headers: &HeaderMap,
+    query: Option<&str>,
+    body: &[u8],
+) -> Result<String, Response> {
+    let from_key = match crate::services::route_proxy_service::extract_inbound_api_key(headers, query)
+    {
+        Some(key) => RouteProxyKeyRepository::get_platform_by_key(pool, &key)
+            .await
             .ok()
-            .and_then(|value| {
-                value
-                    .get(PLATFORM_BODY_FIELD)
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string)
-            });
-        let Some(platform) = from_body else {
+            .flatten(),
+        None => None,
+    };
+    // key 命中就以它为准；没命中（本地 token、SaaS key、或压根没带）再退回头/体字段。
+    let platform = match from_key.or_else(|| platform_from_request_fields(headers, body)) {
+        Some(platform) => platform,
+        None => {
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
-                "A video channel platform is required: send x-ai-switch-platform: video:kling or a \"platform\" field",
-            ));
-        };
-        platform
+                "A video channel platform is required: authenticate with a video channel key \
+                 (Authorization: Bearer sk-ai-switch-…), or send x-ai-switch-platform: video:kling",
+            ))
+        }
     };
     if crate::videogen::protocol::dialect_from_provider_kind(&platform).is_none() {
         return Err(error_response(
@@ -152,6 +169,28 @@ fn resolve_video_platform(headers: &HeaderMap, body: &[u8]) -> Result<String, Re
         ));
     }
     Ok(platform)
+}
+
+/// 请求头优先、其次请求体 `platform` 字段。纯函数，便于单测。
+fn platform_from_request_fields(headers: &HeaderMap, body: &[u8]) -> Option<String> {
+    if let Some(platform) = headers
+        .get(PLATFORM_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(platform.to_string());
+    }
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get(PLATFORM_BODY_FIELD)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
 }
 
 /// 把 `platform` 字段从请求体里摘掉再交给契约解析。
@@ -264,7 +303,7 @@ pub(crate) async fn handle_video_request(
                 )
             }
         };
-        return submit_video_generation(state, headers, body).await;
+        return submit_video_generation(state, headers, uri, body).await;
     }
     if let Some(task_id) = video_task_id_from_path(path) {
         if method != axum::http::Method::GET {
@@ -308,22 +347,80 @@ mod tests {
     #[test]
     fn resolves_platform_from_header_then_body() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-ai-switch-platform", "video:kling".parse().unwrap());
+        headers.insert(PLATFORM_HEADER, "video:kling".parse().unwrap());
         assert_eq!(
-            resolve_video_platform(&headers, b"{}").ok().as_deref(),
+            platform_from_request_fields(&headers, b"{}").as_deref(),
             Some("video:kling")
         );
 
         let empty = HeaderMap::new();
         assert_eq!(
-            resolve_video_platform(&empty, br#"{"platform":"video:seedance"}"#)
-                .ok()
-                .as_deref(),
+            platform_from_request_fields(&empty, br#"{"platform":"video:seedance"}"#).as_deref(),
             Some("video:seedance")
         );
-        // 缺平台与非视频平台都必须拒绝
-        assert!(resolve_video_platform(&empty, b"{}").is_err());
-        assert!(resolve_video_platform(&empty, br#"{"platform":"text:openai"}"#).is_err());
+        // 请求头优先于请求体字段
+        assert_eq!(
+            platform_from_request_fields(&headers, br#"{"platform":"video:seedance"}"#).as_deref(),
+            Some("video:kling")
+        );
+        // 两者都没有 → 没有可用的平台
+        assert_eq!(platform_from_request_fields(&empty, b"{}"), None);
+    }
+
+    /// 入站 API key 是外部 OpenAI 兼容客户端唯一会带的东西，必须能定出渠道。
+    ///
+    /// 这条曾经是坏的：key 通过了 `shared_fallback` 的鉴权，但平台解析只认
+    /// 请求头/请求体字段，于是合法 key 换回一个 400 —— 端点对 OpenAI 兼容客户端
+    /// 完全不可用。
+    #[tokio::test]
+    async fn resolves_the_platform_from_a_route_proxy_key() {
+        use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
+        use crate::database::{create_memory_pool, run_migrations};
+        use axum::http::header::AUTHORIZATION;
+
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let key = RouteProxyKeyRepository::ensure_platform_key(
+            &pool,
+            "video:kling",
+            "sk-ai-switch-video-kling",
+        )
+        .await
+        .expect("mint key");
+
+        // 只带 Authorization，不带任何自定义头 —— 这就是 OpenAI 客户端的样子
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            format!("Bearer {key}").parse().unwrap(),
+        );
+        assert_eq!(
+            resolve_video_platform(&pool, &headers, None, br#"{"model":"kling-v1"}"#)
+                .await
+                .ok()
+                .as_deref(),
+            Some("video:kling")
+        );
+
+        // 文本平台的 key 不该能用来调视频端点
+        RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-codex")
+            .await
+            .expect("mint codex key");
+        let mut text_headers = HeaderMap::new();
+        text_headers.insert(
+            AUTHORIZATION,
+            "Bearer sk-ai-switch-codex".parse().unwrap(),
+        );
+        assert!(
+            resolve_video_platform(&pool, &text_headers, None, b"{}")
+                .await
+                .is_err()
+        );
+
+        // 无效 key 且没有头/体字段 → 拒绝
+        let mut bogus = HeaderMap::new();
+        bogus.insert(AUTHORIZATION, "Bearer sk-nope".parse().unwrap());
+        assert!(resolve_video_platform(&pool, &bogus, None, b"{}").await.is_err());
     }
 
     #[test]

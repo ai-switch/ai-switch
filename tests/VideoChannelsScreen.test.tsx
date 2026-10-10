@@ -5,6 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createApiRouteCredential,
   deleteRouteCredential,
+  getRouteProxyKey,
+  getRouteProxyStatus,
   listRouteCredentials,
   setRouteCredentialStatuses,
   updateRouteCredential,
@@ -17,6 +19,8 @@ import { VideoChannelsScreen } from "../src/screens/VideoChannelsScreen";
 vi.mock("../src/lib/api/client", () => ({
   createApiRouteCredential: vi.fn(),
   deleteRouteCredential: vi.fn(),
+  getRouteProxyKey: vi.fn(),
+  getRouteProxyStatus: vi.fn(),
   listRouteCredentials: vi.fn(),
   setRouteCredentialStatuses: vi.fn(),
   updateRouteCredential: vi.fn(),
@@ -67,6 +71,12 @@ describe("VideoChannelsScreen", () => {
     vi.clearAllMocks();
     vi.mocked(deleteRouteCredential).mockResolvedValue(undefined);
     vi.mocked(setRouteCredentialStatuses).mockResolvedValue(undefined);
+    vi.mocked(getRouteProxyStatus).mockResolvedValue({
+      running: false,
+      route_access_enabled: false,
+      bind_host: "127.0.0.1",
+      base_url: null,
+    });
   });
 
   it("merges every video dialect into one list and tags each row with its protocol", async () => {
@@ -199,5 +209,51 @@ describe("VideoChannelsScreen", () => {
     expect(input.display_name).toBe("可灵备用");
     // 没动 key 就不能把它清掉
     expect(JSON.parse(input.secret_payload_json).api_key).toBe("sk-upstream");
+  });
+
+  it("hands out the endpoint and one key per protocol, so no custom header is needed", async () => {
+    mockLists({});
+    vi.mocked(getRouteProxyStatus).mockResolvedValue({
+      running: true,
+      route_access_enabled: true,
+      bind_host: "127.0.0.1",
+      base_url: "http://127.0.0.1:8787",
+    });
+    vi.mocked(getRouteProxyKey).mockImplementation(
+      async (platform: string) => `sk-ai-switch-${platform}`,
+    );
+
+    renderScreen();
+    await userEvent.click(screen.getByRole("button", { name: "接入信息" }));
+
+    const dialog = await screen.findByRole("dialog");
+    // 端点：客户端只需要 baseUrl + Authorization，没有自定义头
+    expect(within(dialog).getByLabelText("端点")).toHaveValue(
+      "http://127.0.0.1:8787/v1/video/generations",
+    );
+    // 每个协议一个 key，按协议签发
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText("Kling · video:kling")).toHaveValue(
+        "sk-ai-switch-video:kling",
+      ),
+    );
+    expect(within(dialog).getByLabelText("Seedance · video:ark")).toHaveValue(
+      "sk-ai-switch-video:ark",
+    );
+    expect(vi.mocked(getRouteProxyKey)).toHaveBeenCalledWith("video:kling");
+  });
+
+  it("asks the user to start the route proxy when it is not running yet", async () => {
+    mockLists({});
+    vi.mocked(getRouteProxyKey).mockImplementation(
+      async (platform: string) => `sk-ai-switch-${platform}`,
+    );
+
+    renderScreen();
+    await userEvent.click(screen.getByRole("button", { name: "接入信息" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/启动本地路由代理/)).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("端点")).not.toBeInTheDocument();
   });
 });

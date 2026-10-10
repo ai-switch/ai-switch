@@ -26,7 +26,7 @@ type EndpointRowProps = {
 };
 
 /** One copyable connection parameter for clients this dialog cannot write. */
-function EndpointRow({ label, value, secret = false }: EndpointRowProps) {
+export function EndpointRow({ label, value, secret = false }: EndpointRowProps) {
   const [copied, setCopied] = useState(false);
   const [revealed, setRevealed] = useState(false);
   const [error, setError] = useState<string | null>(null);

@@ -1,9 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, Trash2, X } from "lucide-react";
+import { Pencil, Plug, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { EndpointRow } from "../components/accounts/ConfigWriteTargetsDialog";
 import {
   createApiRouteCredential,
   deleteRouteCredential,
+  getRouteProxyKey,
+  getRouteProxyStatus,
   listRouteCredentials,
   setRouteCredentialStatuses,
   updateRouteCredential,
@@ -108,6 +111,7 @@ export function VideoChannelsScreen() {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState<{ credential: RouteCredential | null } | null>(null);
   const [pendingDelete, setPendingDelete] = useState<RouteCredential | null>(null);
+  const [connectOpen, setConnectOpen] = useState(false);
 
   const channelsQuery = useQuery({
     queryKey: ["video-channels"],
@@ -151,14 +155,24 @@ export function VideoChannelsScreen() {
           <h1 className="mt-0.5 text-lg font-semibold text-stone-950">{t("video.title")}</h1>
           <p className="mt-1 max-w-2xl text-[12px] text-stone-500">{t("video.subtitle")}</p>
         </div>
-        <button
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-stone-900 px-3 py-1.5 text-[12px] font-semibold text-white motion-control hover:bg-stone-800"
-          onClick={() => setEditing({ credential: null })}
-          type="button"
-        >
-          <Plus aria-hidden="true" className="h-3.5 w-3.5" />
-          {t("video.add")}
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            className="inline-flex items-center gap-1.5 rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-[12px] font-semibold text-stone-700 motion-control hover:bg-stone-100"
+            onClick={() => setConnectOpen(true)}
+            type="button"
+          >
+            <Plug aria-hidden="true" className="h-3.5 w-3.5" />
+            {t("video.connect")}
+          </button>
+          <button
+            className="inline-flex items-center gap-1.5 rounded-lg bg-stone-900 px-3 py-1.5 text-[12px] font-semibold text-white motion-control hover:bg-stone-800"
+            onClick={() => setEditing({ credential: null })}
+            type="button"
+          >
+            <Plus aria-hidden="true" className="h-3.5 w-3.5" />
+            {t("video.add")}
+          </button>
+        </div>
       </div>
 
       {channelsQuery.isLoading ? (
@@ -265,7 +279,92 @@ export function VideoChannelsScreen() {
           saving={deleteMutation.isPending}
         />
       ) : null}
+
+      {connectOpen ? <VideoConnectDialog onClose={() => setConnectOpen(false)} /> : null}
     </section>
+  );
+}
+
+/// 「接入信息」：把端点与每个协议的 key 摊开给用户。
+///
+/// key 是按协议（`video:kling` …）签发的，与文本平台的 `sk-ai-switch-codex`
+/// 是同一套 `route_proxy_keys`。客户端只需 `Authorization: Bearer <key>`，
+/// **不需要任何自定义请求头** —— 这正是「OpenAI 兼容」的落点。
+///
+/// key 只在打开这个对话框时读取：读取会在 key 不存在时创建它，
+/// 不该因为用户路过这一屏就凭空签发 5 个 key（与 `AccountsScreen` 同策略）。
+function VideoConnectDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useI18n();
+  const proxyQuery = useQuery({
+    queryKey: ["route-proxy-status"],
+    queryFn: getRouteProxyStatus,
+  });
+  const keysQuery = useQuery({
+    queryKey: ["video-channel-keys"],
+    queryFn: async () =>
+      Promise.all(
+        VIDEO_PLATFORMS.map(
+          async (platform) => [platform, await getRouteProxyKey(platform)] as const,
+        ),
+      ),
+  });
+
+  const status = proxyQuery.data;
+  const ready = Boolean(status?.running && status?.route_access_enabled);
+  const endpoint = ready && status?.base_url ? `${status.base_url}/v1/video/generations` : null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-stone-950/40 px-4 py-10">
+      <div
+        aria-label={t("video.connectTitle")}
+        aria-modal="true"
+        className="w-full max-w-xl border border-stone-200 bg-white shadow-xl"
+        role="dialog"
+      >
+        <div className="flex items-center justify-between border-b border-stone-200 px-4 py-3">
+          <h2 className="text-[14px] font-semibold text-stone-950">
+            {t("video.connectTitle")}
+          </h2>
+          <button
+            aria-label={t("video.connectClose")}
+            className="grid h-7 w-7 place-items-center rounded-lg text-stone-500 motion-control hover:bg-stone-100 hover:text-stone-900"
+            onClick={onClose}
+            type="button"
+          >
+            <X aria-hidden="true" className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="grid gap-3 px-4 py-4">
+          <p className="text-[12px] leading-5 text-stone-600">{t("video.connectIntro")}</p>
+
+          {endpoint ? (
+            <EndpointRow label={t("video.connectEndpoint")} value={endpoint} />
+          ) : (
+            <p className="text-[12px] text-amber-700">{t("video.connectPending")}</p>
+          )}
+
+          {keysQuery.isError ? (
+            <p className="text-[12px] text-red-700" role="alert">
+              {t("video.loadFailed")}
+            </p>
+          ) : null}
+          <div className="grid gap-2">
+            {VIDEO_PLATFORMS.map((platform) => {
+              const entry = keysQuery.data?.find(([value]) => value === platform);
+              return (
+                <EndpointRow
+                  key={platform}
+                  label={`${videoProtocolLabel(platform)} · ${platform}`}
+                  secret
+                  value={entry ? entry[1] : null}
+                />
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
