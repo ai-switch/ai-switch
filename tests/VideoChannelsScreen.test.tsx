@@ -198,6 +198,10 @@ describe("VideoChannelsScreen", () => {
     expect(within(dialog).getByLabelText("端点")).toHaveValue(
       "http://127.0.0.1:8787/v1/video/generations",
     );
+    // 网关同时提供 OpenAI 原生契约（`/v1/videos`），指向同一套任务与同一张 key
+    expect(within(dialog).getByLabelText("OpenAI 原生端点")).toHaveValue(
+      "http://127.0.0.1:8787/v1/videos",
+    );
     // 一张 key 覆盖全部供应商 —— 不再是每个协议一张
     await waitFor(() =>
       expect(within(dialog).getByLabelText("渠道密钥")).toHaveValue("sk-ai-switch-video"),

@@ -289,14 +289,19 @@ export function VideoChannelsScreen() {
   );
 }
 
-/// 「接入信息」：把端点与每个协议的 key 摊开给用户。
+/// 「接入信息」：把端点与渠道的 key 摊开给用户。
 ///
-/// key 是按协议（`video:kling` …）签发的，与文本平台的 `sk-ai-switch-codex`
-/// 是同一套 `route_proxy_keys`。客户端只需 `Authorization: Bearer <key>`，
-/// **不需要任何自定义请求头** —— 这正是「OpenAI 兼容」的落点。
+/// 视频只有**一个平台、一张 key**（`sk-ai-switch-video`，与文本平台的
+/// `sk-ai-switch-codex` 是同一套 `route_proxy_keys`）。客户端只需
+/// `Authorization: Bearer <key>`，**不需要任何自定义请求头** ——
+/// 这正是「OpenAI 兼容」的落点。
+///
+/// 端点摊两个：网关同时提供 new-api 契约（`/v1/video/generations`）与
+/// OpenAI 原生契约（`/v1/videos`），指向同一套任务。客户端按自己写的那套调，
+/// 不需要知道另一套的存在。
 ///
 /// key 只在打开这个对话框时读取：读取会在 key 不存在时创建它，
-/// 不该因为用户路过这一屏就凭空签发 5 个 key（与 `AccountsScreen` 同策略）。
+/// 不该因为用户路过这一屏就凭空签发（与 `AccountsScreen` 同策略）。
 function VideoConnectDialog({ onClose }: { onClose: () => void }) {
   const { t } = useI18n();
   const proxyQuery = useQuery({
@@ -311,7 +316,9 @@ function VideoConnectDialog({ onClose }: { onClose: () => void }) {
 
   const status = proxyQuery.data;
   const ready = Boolean(status?.running && status?.route_access_enabled);
-  const endpoint = ready && status?.base_url ? `${status.base_url}/v1/video/generations` : null;
+  const baseUrl = ready ? status?.base_url : null;
+  const endpoint = baseUrl ? `${baseUrl}/v1/video/generations` : null;
+  const openaiEndpoint = baseUrl ? `${baseUrl}/v1/videos` : null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-stone-950/40 px-4 py-10">
@@ -338,8 +345,14 @@ function VideoConnectDialog({ onClose }: { onClose: () => void }) {
         <div className="grid gap-3 px-4 py-4">
           <p className="text-[12px] leading-5 text-stone-600">{t("video.connectIntro")}</p>
 
-          {endpoint ? (
-            <EndpointRow label={t("video.connectEndpoint")} value={endpoint} />
+          {endpoint && openaiEndpoint ? (
+            <>
+              <EndpointRow label={t("video.connectEndpoint")} value={endpoint} />
+              <EndpointRow label={t("video.connectEndpointOpenai")} value={openaiEndpoint} />
+              <span className="text-[11px] text-stone-400">
+                {t("video.connectEndpointHint")}
+              </span>
+            </>
           ) : (
             <p className="text-[12px] text-amber-700">{t("video.connectPending")}</p>
           )}
