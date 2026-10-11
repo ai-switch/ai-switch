@@ -1,5 +1,9 @@
 # 多模态网关：音频渠道（G-P7 / TTS）
 
+> **后续变更（2026-10-12）**：音频**不再有自己的侧边栏入口** —— 它收进了 codex 页的
+> 模态分段器（`通用 / 生图 / 视频 / TTS`），`AudioChannelsScreen` 以 `embedded` 模式
+> 挂在那里。见 [`2026-10-12-unified-pool-and-modality-segments.md`](./2026-10-12-unified-pool-and-modality-segments.md)。
+
 ## 背景
 
 视频渠道（G-P1 ~ G-P6）落地后，网关的模态矩阵是「文本 + 图像 + 视频」。音频是第四条：
@@ -32,7 +36,7 @@ POST /v1/audio/speech
 | 上游路径 | `/v1/audio/speech`（与入站路径相同） |
 | 直路 | `route_proxy_service::build_audio_upstream_request` |
 | 计费 | 按**千字符**（迁移 `0009_audio_billing.sql`） |
-| 前端 | 「音频」导航屏（`AudioChannelsScreen`）+ SaaS 管理端定价列 |
+| 前端 | 音频渠道屏（`AudioChannelsScreen`）+ SaaS 管理端定价列 |
 
 **没有新模块目录的持久化层**：`audiogen/` 只有 `mod.rs` 与 `protocol.rs`。理由见下。
 

@@ -20,7 +20,6 @@ import {
 } from "lucide-react";
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { agentPlatforms, type AgentPlatform } from "../components/layout/AppLayout";
-import { isMediaPseudoPlatform } from "../lib/agentVisibility";
 import { getSessionMessages, listSessions, openSessionTerminal } from "../lib/api/client";
 import { useI18n, type Language } from "../lib/i18n";
 import type { SessionMessage, SessionMeta } from "../lib/api/types";
@@ -43,16 +42,11 @@ const platformLabels: Record<AgentPlatform, string> = {
   opencode: "OpenCode",
   openclaw: "OpenClaw",
   hermes: "Hermes",
-  // 视频 / 音频是导航用的媒体伪平台：它们的生成会话模型还没做，
-  // 所以不会有 `providerId === "video"` 这样的会话。这两项只是为了类型完整。
-  video: "Video",
-  audio: "Audio",
 };
 
-/// 会话筛选下拉里要排除媒体伪平台：它们没有会话，列出来只会是恒为 0 的死选项。
-const sessionPlatformOptions = agentPlatforms.filter(
-  (platform) => !isMediaPseudoPlatform(platform),
-);
+/// 会话只可能来自池身份平台。多模态渠道（视频 / 音频）没有生成会话模型，
+/// 它们也不是导航目的地（收在 codex 页的分段器里），所以这里不需要排除项。
+const sessionPlatformOptions = agentPlatforms;
 
 function isAgentPlatform(value: string | null | undefined): value is AgentPlatform {
   return Boolean(value && agentPlatforms.includes(value as AgentPlatform));

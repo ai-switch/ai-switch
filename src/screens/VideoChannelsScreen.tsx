@@ -111,7 +111,15 @@ function parseMappingText(
  * 后端的能力矩阵（`platform_capability_service`）对这四项给的就是
  * `unavailable`，所以界面上也不该出现。
  */
-export function VideoChannelsScreen() {
+export function VideoChannelsScreen({
+  embedded = false,
+  hint,
+}: {
+  /// 嵌在 codex 页的分段器里时置真：由外层提供标题，这里只留一句说明。
+  embedded?: boolean;
+  /// 覆盖默认副标题（分段器用它讲清「这些账号属于另一个池」）。
+  hint?: string;
+} = {}) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState<{ credential: RouteCredential | null } | null>(null);
@@ -153,11 +161,17 @@ export function VideoChannelsScreen() {
     <section className="space-y-3">
       <div className="flex items-start justify-between gap-3 border-b border-stone-200 px-1 pb-3">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-stone-400">
-            {t("video.kicker")}
-          </p>
-          <h1 className="mt-0.5 text-lg font-semibold text-stone-950">{t("video.title")}</h1>
-          <p className="mt-1 max-w-2xl text-[12px] text-stone-500">{t("video.subtitle")}</p>
+          {/* 嵌在分段器里时标题由外层给；这里只留一句说明 —— 视频 / 音频是
+              独立平台，段内要讲清这一点，免得用户以为它们属于 codex 池。 */}
+          {embedded ? null : (
+            <>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-stone-400">
+                {t("video.kicker")}
+              </p>
+              <h1 className="mt-0.5 text-lg font-semibold text-stone-950">{t("video.title")}</h1>
+            </>
+          )}
+          <p className="mt-1 max-w-2xl text-[12px] text-stone-500">{hint ?? t("video.subtitle")}</p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <button

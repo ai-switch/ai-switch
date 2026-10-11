@@ -11,7 +11,6 @@ import {
   type AgentPlatform,
 } from "./components/layout/AppLayout";
 import {
-  isMediaPseudoPlatform,
   readAgentVisibility,
   resolveVisibleAgentScreen,
   writeAgentVisibility,
@@ -35,8 +34,6 @@ import { OcrScreen } from "./screens/OcrScreen";
 import { ProvidersScreen } from "./screens/ProvidersScreen";
 import { SessionsScreen } from "./screens/SessionsScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
-import { AudioChannelsScreen } from "./screens/AudioChannelsScreen";
-import { VideoChannelsScreen } from "./screens/VideoChannelsScreen";
 import { TargetsScreen } from "./screens/TargetsScreen";
 import { UpdatesScreen } from "./screens/UpdatesScreen";
 import { VibeScreen } from "./screens/VibeScreen";
@@ -45,6 +42,7 @@ import { SkillsScreen } from "./screens/SkillsScreen";
 import { MotionPage, MotionProvider, type MotionDirection } from "./components/motion/MotionPrimitives";
 import { SaasAdmin } from "./saas";
 import { ImageGenerationScreen } from "./imagegen/ImageGenerationScreen";
+import { CodexChannelsScreen } from "./screens/CodexChannelsScreen";
 import { adminCall } from "./saas/api";
 import { getSettings } from "./lib/api/client";
 
@@ -245,9 +243,20 @@ export function App() {
               >
                 <AnimatePresence initial={false} mode="wait">
                   <MotionPage direction={navigationDirection} key={screen}>
-                    {/* `video` / `audio` 是导航用的媒体伪平台（一个模态一屏），
-                        不能交给 AccountsScreen——它的 platform 是真实平台值。 */}
-                    {agentPlatform && !isMediaPseudoPlatform(agentPlatform) && (
+                    {/* codex 页多一层模态分段器（通用 / 生图 / 视频 / TTS）——
+                        多模态渠道不再是独立的导航入口，见 CodexChannelsScreen。
+                        其余池身份仍直接是 AccountsScreen。 */}
+                    {agentPlatform === "codex" && (
+                  <CodexChannelsScreen
+                    imageGenerationEnabled={imageGenerationEnabled}
+                    onOpenImageStudio={() => navigate("ImageGen")}
+                    onOpenSessions={openSessions}
+                    onPoolScopeFocusConsumed={handlePoolScopeFocusConsumed}
+                    poolScopeFocus={poolScopeFocus}
+                    sidebarCollapsed={sidebarCollapsed}
+                  />
+                )}
+                    {agentPlatform && agentPlatform !== "codex" && (
                   <AccountsScreen
                     onOpenSessions={openSessions}
                     platform={agentPlatform}
@@ -256,8 +265,6 @@ export function App() {
                     sidebarCollapsed={sidebarCollapsed}
                   />
                 )}
-                {screen === "Video" && <VideoChannelsScreen />}
-                {screen === "Audio" && <AudioChannelsScreen />}
                 {screen === "Dashboard" && <DashboardScreen />}
                 {screen === "Batches" && <BatchesScreen />}
                 {screen === "Providers" && <ProvidersScreen />}

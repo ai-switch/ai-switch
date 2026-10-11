@@ -112,8 +112,6 @@ const agentLabelKeys = {
   opencode: "nav.agent.opencode",
   openclaw: "nav.agent.openclaw",
   hermes: "nav.agent.hermes",
-  video: "nav.agent.video",
-  audio: "nav.agent.audio",
 } as const;
 
 const themeOptions: {
