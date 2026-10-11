@@ -1,10 +1,20 @@
 //! 视频生成协议层（G-P2c）
 //! =================================================================
-//! 网关对外只暴露**一份** new-api 契约：
+//! 网关对外暴露**两条**契约，指向同一套任务与同一套上游方言：
+//!
+//! **① new-api 对齐（G-P2c）**
 //!   POST `/v1/video/generations`  → 201 `{ id, object:"video", model, created_at, task_id, status:"processing" }`
 //!   GET  `/v1/video/generations/{task_id}` → 200 `{ task_id, status, url, format, metadata, error }`
 //!
-//! 上游各家（可灵 / 方舟 Seedance / MiniMax / 智谱 / Sora）差异全部在本文件内吃掉：
+//! **② OpenAI 原生（`/v1/videos`）**
+//!   POST `/v1/videos`              → 201 `{ id, object:"video", model, created_at, status:"queued", progress, seconds, size }`
+//!   GET  `/v1/videos/{id}`         → 200 `{ id, object:"video", model, created_at, status, progress, seconds, size, url, error }`
+//!   GET  `/v1/videos/{id}/content` → 200 视频字节流（`video/mp4`）
+//!
+//! 两者的字段形状差异（`seconds` vs `duration`、`size` vs `width`/`height`、
+//! `input_reference` vs `image`、以及**两套不同的状态词表**）全部在本文件内吃掉。
+//!
+//! 上游各家（可灵 / 方舟 Seedance / MiniMax / 智谱 / Sora）差异同样在本文件内：
 //! 请求体构造、提交响应取 taskId、状态响应取 status/url、状态枚举统一。
 //!
 //! 纯函数 + serde_json，便于单测（对齐 `imagegen/protocol.rs` 的写法）。
@@ -321,10 +331,17 @@ pub fn dialect_from_provider_kind(kind: &str) -> Option<VideoDialect> {
 
 // ─────────────── 对外（new-api 契约）响应 ───────────────
 
+/// new-api 契约里 `id` 的前缀：`id` 是 `video-{task_id}`，而 `task_id` 是裸的。
+///
+/// 单独抽成常量是因为 `web::video_routes` 要反向摘掉它 —— OpenAI 原生契约的
+/// `id` 就是裸 task_id，客户端可能把这条契约的 `id` 拿去查另一条，反之亦然。
+/// 两边共用同一个字面量才不会漂。
+pub const VIDEO_TASK_ID_PREFIX: &str = "video-";
+
 /// 提交成功响应体（HTTP 201）
 pub fn submit_response(model: &str, task_id: &str) -> Vec<u8> {
     serde_json::to_vec(&json!({
-        "id": format!("video-{task_id}"),
+        "id": format!("{VIDEO_TASK_ID_PREFIX}{task_id}"),
         "object": "video",
         "model": model,
         "created_at": chrono::Utc::now().timestamp(),
@@ -350,6 +367,218 @@ pub fn status_response(
         "error": error,
     }))
     .expect("static video status response serializes")
+}
+
+// ─────────────── 对外（OpenAI 原生契约：`/v1/videos`） ───────────────
+//
+// 除了 new-api 那条契约，还对外提供 OpenAI 原生视频契约的三个端点
+// （`POST /v1/videos`、`GET /v1/videos/{id}`、`GET /v1/videos/{id}/content`）。
+// 两条契约指向**同一套任务与同一套上游方言**，差别只在请求体与响应体的形状：
+//
+//   | | new-api 契约 | OpenAI 原生契约 |
+//   | --- | --- | --- |
+//   | 提交 | `POST /v1/video/generations` | `POST /v1/videos` |
+//   | 时长字段 | `duration: 5`（数字） | `seconds: "5"`（字符串） |
+//   | 画幅 | `width`/`height` 两个整数 | `size: "1280x720"` 一个字符串 |
+//   | 首帧图 | `image` | `input_reference` |
+//   | 状态词表 | `processing`/`succeeded`/`failed` | `queued`/`in_progress`/`completed`/`failed` |
+//
+// **状态词表不同是刻意的**，不是笔误：客户端按哪条契约写的就按哪套词表读。
+
+/// 内部三态 → OpenAI 原生契约的状态词表。
+///
+/// OpenAI 有四个值，我们只有三个（没有「已排队但还没提交给上游」这个状态，
+/// 我们提交时就已经打到上游了）。所以：
+///   - `Processing` → `in_progress`（说 in_progress 是诚实的：上游确实在跑）；
+///   - `Succeeded` → `completed`（**不是 `succeeded`** —— 那是 new-api 契约的词）；
+///   - `Failed` → `failed`。
+pub fn openai_video_status(status: VideoTaskStatus) -> &'static str {
+    match status {
+        VideoTaskStatus::Processing => "in_progress",
+        VideoTaskStatus::Succeeded => "completed",
+        VideoTaskStatus::Failed => "failed",
+    }
+}
+
+/// OpenAI 原生契约（`POST /v1/videos`）的请求体 → 内部契约体。
+///
+/// 三处形状差异全在这里吃掉（见上面那张表）。另外把 `size` 原串**同时**
+/// 写进 `metadata.size`：Sora 方言的 `upstream_body` 读的就是 `metadata.size`，
+/// 若只写 `width`/`height`，它会被重新拼成另一个值。
+///
+/// **不支持 multipart。** OpenAI 的 `input_reference` 是文件上传，这里只收
+/// 字符串（URL 或 data URI）。传了文件会被当成非字符串而忽略，随后因为
+/// 「既没有 prompt 也没有首帧图」在 `submit` 里被拒 —— 不会静默出错片。
+///
+/// `duration` 也接受（new-api 契约用这个名字），`seconds` 优先。
+pub fn video_request_from_openai(bytes: &[u8]) -> Result<VideoGenerationRequest, String> {
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Invalid video generation request: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "Video generation request must be a JSON object".to_string())?;
+
+    let mut internal = serde_json::Map::new();
+
+    let model = object
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if model.is_empty() {
+        return Err("Video generation request is missing model".to_string());
+    }
+    internal.insert("model".into(), json!(model));
+
+    if let Some(prompt) = object.get("prompt").and_then(Value::as_str) {
+        internal.insert("prompt".into(), json!(prompt));
+    }
+
+    // `seconds` 是字符串（`"4"`）或数字，`duration` 是数字；前者优先。
+    let seconds = object
+        .get("seconds")
+        .and_then(number_like)
+        .or_else(|| object.get("duration").and_then(number_like));
+    if let Some(seconds) = seconds {
+        internal.insert("duration".into(), json!(seconds));
+    }
+
+    // `metadata` 是本地扩展（new-api 契约里有），先搬进来，稍后补 `size`。
+    let mut metadata = object
+        .get("metadata")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    if let Some(size) = object
+        .get("size")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|size| !size.is_empty())
+    {
+        if let Some((width, height)) = parse_size(size) {
+            internal.insert("width".into(), json!(width));
+            internal.insert("height".into(), json!(height));
+        }
+        metadata.insert("size".into(), json!(size));
+    }
+
+    let image = object
+        .get("input_reference")
+        .and_then(Value::as_str)
+        .or_else(|| object.get("image").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|image| !image.is_empty());
+    if let Some(image) = image {
+        internal.insert("image".into(), json!(image));
+    }
+
+    if let Some(seed) = object.get("seed").and_then(Value::as_i64) {
+        internal.insert("seed".into(), json!(seed));
+    }
+    if !metadata.is_empty() {
+        internal.insert("metadata".into(), Value::Object(metadata));
+    }
+
+    serde_json::from_value(Value::Object(internal))
+        .map_err(|error| format!("Invalid video generation request: {error}"))
+}
+
+/// `POST /v1/videos` 的 201 响应体。
+///
+/// `seconds` 与 `size` 都是**字符串**（OpenAI 的规定），`progress` 是 0–100。
+/// 刚提交时进度必然是 0、状态用 `queued` —— 与 OpenAI 一致。
+pub fn openai_video_create_response(
+    task_id: &str,
+    model: &str,
+    duration_seconds: i64,
+    size: Option<&str>,
+) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "id": task_id,
+        "object": "video",
+        "model": model,
+        "created_at": chrono::Utc::now().timestamp(),
+        "status": "queued",
+        "progress": 0,
+        "seconds": duration_seconds.to_string(),
+        "size": size,
+    }))
+    .expect("static openai video create response serializes")
+}
+
+/// `GET /v1/videos/{video_id}` 的 200 响应体。
+///
+/// 参数多是为了保持本文件「纯函数、不认识 `models::VideoTask`」的性质——
+/// 这样它能在不知道数据库形状的情况下被单测钉住。
+#[allow(clippy::too_many_arguments)]
+pub fn openai_video_retrieve_response(
+    task_id: &str,
+    model: &str,
+    created_at: &str,
+    status: VideoTaskStatus,
+    url: Option<&str>,
+    error: Option<&str>,
+    duration_seconds: Option<i64>,
+    size: Option<&str>,
+) -> Vec<u8> {
+    // 我们只有一个粗粒度的状态，没有真实百分比；用「完成即 100、否则 0」
+    // 表达，而不是编一个假进度。
+    let progress = match status {
+        VideoTaskStatus::Succeeded => 100,
+        _ => 0,
+    };
+    serde_json::to_vec(&json!({
+        "id": task_id,
+        "object": "video",
+        "model": model,
+        "created_at": rfc3339_to_unix(created_at),
+        "status": openai_video_status(status),
+        "progress": progress,
+        "seconds": duration_seconds.map(|seconds| seconds.to_string()),
+        "size": size,
+        "url": url,
+        "error": error.map(|message| json!({
+            "code": "video_generation_failed",
+            "message": message,
+        })),
+    }))
+    .expect("static openai video retrieve response serializes")
+}
+
+/// JSON 里的「数字」也可能是字符串（OpenAI 的 `seconds` 就是 `"4"`）。
+fn number_like(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// `"1280x720"` / `"1280×720"` → `(1280, 720)`。
+///
+/// 解析不出来返回 `None`：原串已经进了 `metadata.size`，会原样透传给上游，
+/// 不在这里猜一个值出来。
+fn parse_size(raw: &str) -> Option<(u32, u32)> {
+    let (width, height) = raw.split_once(|c: char| matches!(c, 'x' | 'X' | '×' | '*'))?;
+    let width = width.trim().parse::<u32>().ok()?;
+    let height = height.trim().parse::<u32>().ok()?;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+/// OpenAI 的 `seconds` 是字符串（`"4"`，不是 `4`）。
+///
+/// 时长永远是整秒（`effective_duration_seconds` 已经取整并 clamp 到 ≥1），
+/// 所以直接 `to_string` 就够，不需要处理小数。
+///
+/// 任务表的 `created_at` 是 RFC3339，OpenAI 契约要 Unix 秒。
+///
+/// 解析不了就退回「现在」——比回 `null` 好：客户端普遍当这个字段必有，
+/// 而一个解析不了的 `created_at` 只可能是脏数据，此时「现在」是最接近的答案。
+fn rfc3339_to_unix(value: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|parsed| parsed.timestamp())
+        .unwrap_or_else(|_| chrono::Utc::now().timestamp())
 }
 
 // ─────────────── 上游路径 ───────────────
@@ -399,6 +628,22 @@ pub fn effective_duration_seconds(request: &VideoGenerationRequest) -> i64 {
         (seconds.round() as i64).max(1)
     } else {
         DEFAULT_VIDEO_DURATION_SECONDS as i64
+    }
+}
+
+/// 这次请求的「画幅」字符串（OpenAI 契约的 `size`，形如 `1280x720`）。
+///
+/// 优先用客户端显式给的 `metadata.size` —— Sora 方言的上游体读的就是它，
+/// 必须原样保留；否则由 `width`/`height` 拼出来。两者都没有时返回 `None`，
+/// **不编造默认值**：`upstream_body` 自己会给上游补缺省，这里编一个会让
+/// 「客户端没说要多大」和「客户端要 1280x720」变得无法区分。
+pub fn effective_size(request: &VideoGenerationRequest) -> Option<String> {
+    if let Some(size) = request.metadata_str("size") {
+        return Some(size.to_string());
+    }
+    match (request.width, request.height) {
+        (Some(width), Some(height)) if width > 0 && height > 0 => Some(format!("{width}x{height}")),
+        _ => None,
     }
 }
 
@@ -782,6 +1027,166 @@ mod tests {
         assert_eq!(status["status"], "succeeded");
         assert_eq!(status["url"], "https://cdn/v.mp4");
         assert_eq!(status["format"], "mp4");
+    }
+
+    /// OpenAI 原生契约的字段名与内部契约不同的就三处（`seconds` / `size` /
+    /// `input_reference`），全在 `video_request_from_openai` 里吃掉。逐个钉住。
+    #[test]
+    fn openai_video_requests_map_the_native_field_names() {
+        let request = video_request_from_openai(
+            br#"{
+                "model": "sora-2",
+                "prompt": "a fox",
+                "seconds": "8",
+                "size": "1280x720",
+                "input_reference": "https://cdn/first.png",
+                "metadata": {"negative_prompt": "blurry"}
+            }"#,
+        )
+        .expect("request");
+        assert_eq!(request.model, "sora-2");
+        assert_eq!(request.prompt, "a fox");
+        // `seconds` 是字符串，内部是 f64
+        assert_eq!(request.duration, Some(8.0));
+        // `size` 既拆成 width/height，也保留原串
+        assert_eq!(request.width, Some(1280));
+        assert_eq!(request.height, Some(720));
+        assert_eq!(request.aspect_ratio(), "16:9");
+        // `input_reference` → image
+        assert_eq!(request.image.as_deref(), Some("https://cdn/first.png"));
+        // metadata 里原有的字段没被覆盖
+        assert_eq!(request.metadata_str("negative_prompt"), Some("blurry"));
+
+        // **原串必须留在 metadata.size 里**：Sora 方言的上游体读的就是它，
+        // 只写 width/height 的话上游会收到被重新拼出来的另一个值。
+        assert_eq!(request.metadata_str("size"), Some("1280x720"));
+        let body: Value =
+            serde_json::from_slice(&upstream_body(VideoDialect::Sora, "sora-2", &request).unwrap())
+                .unwrap();
+        assert_eq!(body["size"], "1280x720");
+        assert_eq!(body["seconds"], 8);
+
+        // `seconds` 写成数字、或改用 `duration`（new-api 契约的名字），都收
+        assert_eq!(
+            video_request_from_openai(br#"{"model":"m","prompt":"p","seconds":4}"#)
+                .unwrap()
+                .duration,
+            Some(4.0)
+        );
+        assert_eq!(
+            video_request_from_openai(br#"{"model":"m","prompt":"p","duration":6}"#)
+                .unwrap()
+                .duration,
+            Some(6.0)
+        );
+        // 画幅解析不出来时不猜：只把原串留给上游
+        let odd = video_request_from_openai(br#"{"model":"m","prompt":"p","size":"portrait"}"#)
+            .expect("request");
+        assert_eq!(odd.width, None);
+        assert_eq!(odd.height, None);
+        assert_eq!(odd.metadata_str("size"), Some("portrait"));
+    }
+
+    #[test]
+    fn openai_video_requests_require_a_model() {
+        assert!(video_request_from_openai(br#"{"prompt":"p"}"#).is_err());
+        assert!(video_request_from_openai(br#"{"model":"   "}"#).is_err());
+        assert!(video_request_from_openai(b"[]").is_err());
+        assert!(video_request_from_openai(b"not json").is_err());
+    }
+
+    /// **两套契约的状态词表不同**：new-api 用 `succeeded`，OpenAI 用 `completed`。
+    ///
+    /// 这是刻意的，不是笔误。钉住它，免得以后有人「统一」成一套而静默破坏
+    /// 其中一个客户端 —— 客户端是按自己那套契约读的。
+    #[test]
+    fn openai_video_statuses_use_the_openai_vocabulary() {
+        assert_eq!(openai_video_status(VideoTaskStatus::Processing), "in_progress");
+        assert_eq!(openai_video_status(VideoTaskStatus::Succeeded), "completed");
+        assert_eq!(openai_video_status(VideoTaskStatus::Failed), "failed");
+        assert_ne!(
+            openai_video_status(VideoTaskStatus::Succeeded),
+            VideoTaskStatus::Succeeded.as_str(),
+        );
+    }
+
+    #[test]
+    fn emits_openai_video_contract_responses() {
+        let create: Value = serde_json::from_slice(&openai_video_create_response(
+            "t-1",
+            "sora-2",
+            8,
+            Some("1280x720"),
+        ))
+        .expect("json");
+        assert_eq!(create["id"], "t-1");
+        assert_eq!(create["object"], "video");
+        assert_eq!(create["model"], "sora-2");
+        assert_eq!(create["status"], "queued");
+        assert_eq!(create["progress"], 0);
+        // `seconds` / `size` 都是字符串（OpenAI 的规定，不是数字）
+        assert_eq!(create["seconds"], "8");
+        assert_eq!(create["size"], "1280x720");
+
+        let retrieve: Value = serde_json::from_slice(&openai_video_retrieve_response(
+            "t-1",
+            "sora-2",
+            "2026-10-10T12:00:00+00:00",
+            VideoTaskStatus::Succeeded,
+            Some("https://cdn/v.mp4"),
+            None,
+            Some(8),
+            Some("1280x720"),
+        ))
+        .expect("json");
+        assert_eq!(retrieve["id"], "t-1");
+        assert_eq!(retrieve["object"], "video");
+        assert_eq!(retrieve["status"], "completed");
+        assert_eq!(retrieve["progress"], 100);
+        assert_eq!(retrieve["url"], "https://cdn/v.mp4");
+        assert_eq!(retrieve["seconds"], "8");
+        assert_eq!(retrieve["size"], "1280x720");
+        assert_eq!(retrieve["error"], Value::Null);
+        // RFC3339 → Unix 秒
+        assert!(retrieve["created_at"].as_i64().is_some_and(|v| v > 1_700_000_000));
+
+        // 失败：带 error 对象、进度归 0、拿不到的字段回 null 而不是编一个
+        let failed: Value = serde_json::from_slice(&openai_video_retrieve_response(
+            "t-2",
+            "sora-2",
+            "not-a-date",
+            VideoTaskStatus::Failed,
+            None,
+            Some("upstream said no"),
+            None,
+            None,
+        ))
+        .expect("json");
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["progress"], 0);
+        assert_eq!(failed["url"], Value::Null);
+        assert_eq!(failed["seconds"], Value::Null);
+        assert_eq!(failed["error"]["message"], "upstream said no");
+        // 脏 created_at 退回「现在」，仍然是个可用的整数
+        assert!(failed["created_at"].as_i64().is_some_and(|v| v > 1_700_000_000));
+    }
+
+    /// `effective_size` 的取值优先级：显式 `metadata.size` > width/height > 无。
+    #[test]
+    fn effective_size_prefers_the_explicit_size() {
+        let explicit = VideoGenerationRequest::parse(
+            br#"{"model":"m","prompt":"p","width":1920,"height":1080,"metadata":{"size":"720x1280"}}"#,
+        )
+        .unwrap();
+        assert_eq!(effective_size(&explicit).as_deref(), Some("720x1280"));
+
+        let derived =
+            VideoGenerationRequest::parse(br#"{"model":"m","prompt":"p","width":1920,"height":1080}"#)
+                .unwrap();
+        assert_eq!(effective_size(&derived).as_deref(), Some("1920x1080"));
+
+        let neither = VideoGenerationRequest::parse(br#"{"model":"m","prompt":"p"}"#).unwrap();
+        assert_eq!(effective_size(&neither), None);
     }
 
     #[test]

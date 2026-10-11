@@ -101,15 +101,25 @@ async fn execute(
         path.as_str(),
         "/v1/images/generations" | "/images/generations"
     );
-    // 视频渠道（G-P4）。平台值由组决定（`video:kling` …），所以这里只判断路径。
+    // 视频渠道（G-P4）。平台值由组决定（`video` 一个值），所以这里只判断路径。
     let videos = crate::services::route_proxy_service::is_video_generation_path(&path);
     // 视频是**异步任务** API：提交是 POST，查询是 GET，两者都算 `videos`。
     // 复审前这里写的是 `method != Method::POST`，于是一个 `sk-saas-` key 查
     // `/v1/video/generations/{task_id}` 只会拿到 `saas.endpoint_not_allowed`
     // —— 提交能用、轮询不能用，异步契约断了一半。其余端点仍然只接受 POST。
+    //
+    // **三条 GET 形态都要放行**：new-api 的 `/{task_id}`、OpenAI 原生的
+    // `/{video_id}` 与 `/{video_id}/content`。漏掉任何一条，那条契约在 SaaS 侧
+    // 就是「提交能用、取不到结果」——与上面那个 bug 同类。
+    let video_get_method = videos && method == Method::GET;
     let video_status =
-        videos && method == Method::GET && crate::web::video_routes::video_task_id_from_path(&path).is_some();
-    if (!video_status && method != Method::POST)
+        video_get_method && crate::web::video_routes::video_task_id_from_path(&path).is_some();
+    let video_object =
+        video_get_method && crate::web::video_routes::openai_video_id_from_path(&path).is_some();
+    let video_content = video_get_method
+        && crate::web::video_routes::openai_video_content_id_from_path(&path).is_some();
+    let video_get = video_status || video_object || video_content;
+    if (!video_get && method != Method::POST)
         || !(anthropic || responses || chat || images || videos)
         || (principal.platform == "claude" && !(anthropic || responses))
         || (principal.platform == "gemini" && !images)
@@ -135,10 +145,10 @@ async fn execute(
             "Request logging is unavailable; try again later",
         ));
     }
-    // 状态查询没有请求体，必须在下面「读 body 并解析 JSON」之前分派，
+    // 查询 / 内容都没有请求体，必须在下面「读 body 并解析 JSON」之前分派，
     // 否则空体会先撞上 `saas.validation`。
-    if video_status {
-        return execute_video_status(app_state, pool, principal, &path, uri.query()).await;
+    if video_get {
+        return execute_video_get(app_state, principal, &path, uri.query()).await;
     }
     let body = axum::body::to_bytes(body, 2 * 1024 * 1024)
         .await
@@ -410,31 +420,55 @@ async fn execute_image_request(
     Ok(Response::from_parts(parts, Body::from(bytes)))
 }
 
-/// 视频任务的 SaaS 查询（G-P4 复审补）。
+/// 视频的 GET 端点（SaaS 侧）。
 ///
-/// 存在两个理由，都是复审抓出来的：
-///   1. 复审前这里是**不可达**的 —— 上面的守卫写的是 `method != Method::POST`，
-///      所以 `sk-saas-` key 查 `/v1/video/generations/{task_id}` 只会拿到
-///      `saas.endpoint_not_allowed`。提交能用、轮询不能用，异步契约断了一半。
-///   2. 任务表原本没有任何「属于谁」的列，不做归属校验就等于任何 key 都能按
-///      task_id 读到别人的出片地址（task_id 是 UUIDv4，猜不到，但地址本身
-///      是可用的签名 CDN 链接，不该靠「猜不到」当访问控制）。
-async fn execute_video_status(
+/// 覆盖三条形态，全部走**同一套**归属校验：
+///   - `GET /v1/video/generations/{task_id}` —— new-api 契约的状态查询
+///   - `GET /v1/videos/{video_id}`           —— OpenAI 原生的对象查询
+///   - `GET /v1/videos/{video_id}/content`   —— OpenAI 原生的内容下载
+///
+/// 三条合在一个函数里而不是各写一个，是因为归属校验必须一模一样：出片地址是
+/// 可用的签名 CDN 链接，不做校验就等于任何 key 都能按 task_id 读到别人的视频。
+/// 拆成三处之后最容易发生的事就是有一处忘了校验。
+///
+/// 两条复审教训也落在这里：
+///   1. 这里原先**不可达** —— 上面的守卫写的是 `method != Method::POST`，
+///      所以 `sk-saas-` key 查任务只会拿到 `saas.endpoint_not_allowed`。
+///      提交能用、轮询不能用，异步契约断了一半。
+///   2. 任务表原先没有任何「属于谁」的列（迁移 `202610100001` 才加），
+///      在那之前只能不做校验（task_id 是 UUIDv4 猜不到，但地址本身是可用的
+///      签名链接，不该靠「猜不到」当访问控制）。
+async fn execute_video_get(
     app_state: &AppState,
-    pool: &SqlitePool,
     principal: billing::ApiPrincipal,
     path: &str,
     query: Option<&str>,
 ) -> Result<Response, AppError> {
-    let task_id = crate::web::video_routes::video_task_id_from_path(path).ok_or_else(|| {
-        repository::invalid("saas.validation", "A video task id is required")
-    })?;
-    let task =
-        crate::videogen::repository::VideoGenerationRepository::get_task(pool, &task_id)
-            .await
-            .map_err(|_| {
-                repository::invalid("videogen.task_not_found", "Video task was not found")
-            })?;
+    use crate::web::video_routes::{
+        load_video_task, openai_video_content, openai_video_content_id_from_path,
+        openai_video_id_from_path, openai_video_object, video_task_id_from_path,
+    };
+
+    // 先定形态、再取 id。`content` 必须排在裸 `{id}` 之前 —— 反过来的话
+    // `/v1/videos/x/content` 会被当成「id 为 x 的对象查询」。
+    let (task_id, view) = if let Some(task_id) = video_task_id_from_path(path) {
+        (task_id, VideoGetView::Status)
+    } else if let Some(video_id) = openai_video_content_id_from_path(path) {
+        (video_id, VideoGetView::Content)
+    } else if let Some(video_id) = openai_video_id_from_path(path) {
+        (video_id, VideoGetView::Object)
+    } else {
+        return Err(repository::invalid(
+            "saas.validation",
+            "A video task id is required",
+        ));
+    };
+
+    // `load_video_task` 容忍 new-api 契约 `id` 的 `video-` 前缀：两条契约指向
+    // 同一套任务，客户端拿哪条契约的 id 来查都该查到。
+    let task = load_video_task(app_state, &task_id)
+        .await
+        .map_err(task_not_found_or)?;
     if task.owner_user_id.as_deref() != Some(principal.user_id.as_str()) {
         // 别人的任务回答「不存在」，而不是「无权访问」：后者会泄漏 task_id 是否存在。
         return Err(repository::invalid(
@@ -442,15 +476,59 @@ async fn execute_video_status(
             "Video task was not found",
         ));
     }
-    let refresh = query.is_some_and(|query| {
-        query
-            .split('&')
-            .any(|pair| pair == "refresh=1" || pair == "refresh=true")
-    });
-    let body = crate::videogen::VideoGenerationService::status(app_state, &task_id, refresh).await?;
+
+    match view {
+        VideoGetView::Status => {
+            let refresh = query.is_some_and(|query| {
+                query
+                    .split('&')
+                    .any(|pair| pair == "refresh=1" || pair == "refresh=true")
+            });
+            let body =
+                crate::videogen::VideoGenerationService::status(app_state, &task.task_id, refresh)
+                    .await?;
+            json_response(body)
+        }
+        VideoGetView::Object => json_response(openai_video_object(&task)),
+        VideoGetView::Content => {
+            let (content_type, body) = openai_video_content(&task).await?;
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, content_type)
+                .body(body)
+                .map_err(|_| {
+                    repository::invalid("saas.response", "Could not build video response")
+                })?)
+        }
+    }
+}
+
+/// 视频 GET 端点的三种形态。
+enum VideoGetView {
+    /// new-api 契约的状态查询
+    Status,
+    /// OpenAI 原生的对象查询
+    Object,
+    /// OpenAI 原生的内容下载
+    Content,
+}
+
+/// 把「任务不存在」统一成 `videogen.task_not_found`，其余错误原样上抛。
+///
+/// 不能无脑 `map_err(|_| …)`：那样一个数据库错误也会被报成「任务不存在」，
+/// 症状离根因很远。
+fn task_not_found_or(error: AppError) -> AppError {
+    if error.code() == "videogen.task_not_found" {
+        repository::invalid("videogen.task_not_found", "Video task was not found")
+    } else {
+        error
+    }
+}
+
+fn json_response(body: Vec<u8>) -> Result<Response, AppError> {
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header("content-type", "application/json")
+        .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body))
         .map_err(|error| repository::invalid("saas.response", &error.to_string()))?)
 }
@@ -526,14 +604,14 @@ async fn execute_video_request(
             credential_ids: Some(reservation.credential_ids.clone()),
             // 组定价那一行的上游模型名：客户端看到的是 `model`，上游要的是这个。
             upstream_model: Some(reservation.upstream_model.clone()),
-            // 任务归属：状态查询靠它做越权校验（`execute_video_status`）。
+            // 任务归属：状态查询靠它做越权校验（`execute_video_get`）。
             owner_user_id: Some(principal.user_id.clone()),
         },
     )
     .await;
 
     let (status, body, success) = match outcome {
-        Ok(body) => (StatusCode::CREATED, body, true),
+        Ok(outcome) => (StatusCode::CREATED, outcome.body, true),
         Err(error) => {
             let status = match error.code() {
                 "validation.video_platform" | "validation.video_request" => {

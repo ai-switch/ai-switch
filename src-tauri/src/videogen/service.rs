@@ -16,10 +16,10 @@
 
 use super::models::*;
 use super::protocol::{
-    dialect_from_interface_format, parse_upstream_status, parse_upstream_submit, status_response,
-    submit_response, upstream_body, upstream_status_path, upstream_submit_path,
-    validate_callback_url, CallbackTargetPolicy, UpstreamStatus, VideoDialect,
-    VideoGenerationRequest, VideoTaskStatus,
+    dialect_from_interface_format, effective_duration_seconds, effective_size,
+    parse_upstream_status, parse_upstream_submit, status_response, submit_response, upstream_body,
+    upstream_status_path, upstream_submit_path, validate_callback_url, CallbackTargetPolicy,
+    UpstreamStatus, VideoDialect, VideoGenerationRequest, VideoTaskStatus,
 };
 use super::repository::VideoGenerationRepository;
 use crate::app_state::AppState;
@@ -102,11 +102,21 @@ struct SelectedRouteGroup {
     cursor: i64,
 }
 
-/// 提交结果：对外契约体 + 落库的任务
+/// 提交结果：对外 201 体 + 本网关的 `task_id`。
+///
+/// `task_id` 单独给出来，是因为**两条对外契约的 201 体形状不同**：
+/// new-api 契约里 `id` 是 `video-{task_id}`、另有 `task_id` 字段；OpenAI 原生
+/// 契约（`/v1/videos`）里 `id` 就是裸 task_id、根本没有 `task_id` 字段。
+/// 让调用方去解析 `body` 里的 JSON 取 id 太脆，所以由服务层直接给。
+pub struct SubmitVideoOutcome {
+    pub task_id: String,
+    pub body: Vec<u8>,
+}
+
 pub struct VideoGenerationService;
 
 impl VideoGenerationService {
-    /// 提交一次视频生成，返回 new-api 契约的 201 响应体（已序列化）。
+    /// 提交一次视频生成，返回本网关的 `task_id` 与 new-api 契约的 201 响应体。
     ///
     /// **平台只有一个 `video`；供应商由请求里的 `model` 名决定。** 可灵 / 方舟 /
     /// MiniMax / 智谱 / Sora 的差别是线协议，住在账号的 `config_json.interface_format`
@@ -122,9 +132,12 @@ impl VideoGenerationService {
     /// `forward_request` 的 model_mappings 去改写：那套改写只认 OpenAI 风格的
     /// `model` 字段，可灵的上游体用的是 `model_name`，改写不到。
     ///
-    /// 只回响应体、不回任务行：调用方要的 `task_id` 已经在这个体里（契约要求），
-    /// 而任务的生命周期由轮询循环接管，调用方拿着任务行也没有可做的事。
-    pub async fn submit(state: &AppState, input: SubmitVideoInput) -> Result<Vec<u8>, AppError> {
+    /// 任务的生命周期由轮询循环接管，调用方拿着任务行也没有可做的事——
+    /// 但 `task_id` 要给出去，见 [`SubmitVideoOutcome`]。
+    pub async fn submit(
+        state: &AppState,
+        input: SubmitVideoInput,
+    ) -> Result<SubmitVideoOutcome, AppError> {
         let platform = input.platform.trim();
         if PlatformId::parse(platform).ok() != Some(PlatformId::Video) {
             return Err(validation(
@@ -197,13 +210,20 @@ impl VideoGenerationService {
                 // **必须记住提交者**：上游的任务按账号隔离，轮询用别的账号查会 404。
                 credential_id: Some(credential_id),
                 upstream_task_id: Some(upstream_task_id),
+                // 输出形状落库：OpenAI 原生契约（`/v1/videos`）的响应要回显
+                // `seconds` 与 `size`，而提交之后再无从推导（上游响应里没有）。
+                duration_seconds: Some(effective_duration_seconds(&request)),
+                size: effective_size(&request),
                 callback_url: request.callback_url().map(str::to_string),
                 owner_user_id: input.owner_user_id,
             },
         )
         .await?;
 
-        Ok(submit_response(&model, &task_id))
+        Ok(SubmitVideoOutcome {
+            body: submit_response(&model, &task_id),
+            task_id,
+        })
     }
 
     /// 选出这次请求要用的方言与账号集合。
@@ -872,7 +892,7 @@ mod tests {
         let state = test_app_state(pool.clone(), RouteProxyRuntimeState::default());
 
         // ── 1) 提交 ──
-        let submitted = VideoGenerationService::submit(
+        let outcome = VideoGenerationService::submit(
             &state,
             SubmitVideoInput {
                 platform: "video".into(),
@@ -904,11 +924,17 @@ mod tests {
         .await
         .expect("submit succeeds against the mock upstream");
 
-        let submitted: Value = serde_json::from_slice(&submitted).unwrap();
+        let submitted_task_id = outcome.task_id.clone();
+        let submitted: Value = serde_json::from_slice(&outcome.body).unwrap();
         assert_eq!(submitted["object"], "video");
         assert_eq!(submitted["status"], "processing");
         assert_eq!(submitted["model"], "kling-v1");
-        let task_id = submitted["task_id"].as_str().unwrap().to_string();
+        // 服务层给出的 task_id 必须与契约体里的一致（两条契约共用同一个 id）
+        assert_eq!(
+            submitted["task_id"].as_str(),
+            Some(submitted_task_id.as_str())
+        );
+        let task_id = submitted_task_id;
         assert!(!task_id.is_empty());
 
         // 落库的上游 task_id / 方言必须是可灵那套

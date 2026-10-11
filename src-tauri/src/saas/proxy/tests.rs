@@ -945,11 +945,14 @@ async fn video_pricing_rejects_unpriced_models_and_out_of_range_inputs() {
     }
 }
 
-/// SaaS 的视频**状态查询**必须可用，且只能查自己的任务。
+/// SaaS 的视频**读取端点**必须可用，且只能读自己的任务。
+///
+/// 覆盖三条形态：new-api 的 `GET /v1/video/generations/{task_id}`，以及
+/// OpenAI 原生的 `GET /v1/videos/{video_id}` 与 `/{video_id}/content`。
 ///
 /// 复审前这条路径完全不可达：`execute` 的守卫是 `method != Method::POST`，
-/// 所以 `sk-saas-` key 查 `/v1/video/generations/{task_id}` 只会拿到
-/// `saas.endpoint_not_allowed` —— 提交能用、轮询不能用，异步契约断了一半。
+/// 所以 `sk-saas-` key 查任务只会拿到 `saas.endpoint_not_allowed`
+/// —— 提交能用、轮询不能用，异步契约断了一半。
 #[tokio::test]
 async fn saas_video_status_is_available_and_scoped_to_its_owner() {
     use crate::videogen::models::{NewVideoTask, VideoTaskProgress};
@@ -969,6 +972,8 @@ async fn saas_video_status_is_available_and_scoped_to_its_owner() {
             dialect: "kling".into(),
             credential_id: Some("video-account".into()),
             upstream_task_id: Some("upstream-1".into()),
+            duration_seconds: Some(5),
+            size: Some("1280x720".into()),
             callback_url: None,
             owner_user_id: Some(principal.user_id.clone()),
         },
@@ -998,6 +1003,8 @@ async fn saas_video_status_is_available_and_scoped_to_its_owner() {
             dialect: "kling".into(),
             credential_id: Some("video-account".into()),
             upstream_task_id: Some("upstream-2".into()),
+            duration_seconds: None,
+            size: None,
             callback_url: None,
             owner_user_id: Some("someone-else".into()),
         },
@@ -1040,12 +1047,89 @@ async fn saas_video_status_is_available_and_scoped_to_its_owner() {
         &runtime,
         build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default()),
         Method::GET,
-        headers,
+        headers.clone(),
         "/v1/video/generations/task-theirs".parse().unwrap(),
         Body::empty(),
     )
     .await
     .expect_err("another user's task must not be readable");
+    assert_eq!(error.code(), "videogen.task_not_found");
+
+    // ── OpenAI 原生契约（`/v1/videos`）的两条 GET 形态 ──
+    //
+    // 它们走的是同一套归属校验。漏掉任何一条，那条契约在 SaaS 侧就是
+    // 「提交能用、取不到结果」——与复审前那个 `method != POST` 的 bug 同类。
+
+    let response = execute(
+        &state,
+        &runtime,
+        build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default()),
+        Method::GET,
+        headers.clone(),
+        "/v1/videos/task-mine".parse().unwrap(),
+        Body::empty(),
+    )
+    .await
+    .expect("GET /v1/videos/{id} must be allowed for a video key");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["id"], "task-mine");
+    assert_eq!(body["object"], "video");
+    // OpenAI 的词表：完成是 `completed`（不是 new-api 的 `succeeded`）
+    assert_eq!(body["status"], "completed");
+    assert_eq!(body["progress"], 100);
+    assert_eq!(body["url"], "https://cdn.example/v.mp4");
+    // 落库的输出形状要回显（迁移 202610100003 加的两列）
+    assert_eq!(body["seconds"], "5");
+    assert_eq!(body["size"], "1280x720");
+
+    // new-api 契约 201 体里的 `id` 是 `video-{task_id}`；两条契约指向同一套任务，
+    // 客户端拿那个 id 来查 OpenAI 契约也必须查得到。
+    let response = execute(
+        &state,
+        &runtime,
+        build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default()),
+        Method::GET,
+        headers.clone(),
+        "/v1/videos/video-task-mine".parse().unwrap(),
+        Body::empty(),
+    )
+    .await
+    .expect("the new-api id prefix must resolve through /v1/videos too");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // 别人的任务在 OpenAI 契约下同样回答「不存在」
+    let error = execute(
+        &state,
+        &runtime,
+        build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default()),
+        Method::GET,
+        headers.clone(),
+        "/v1/videos/task-theirs".parse().unwrap(),
+        Body::empty(),
+    )
+    .await
+    .expect_err("another user's task must not be readable through /v1/videos");
+    assert_eq!(error.code(), "videogen.task_not_found");
+
+    // `/content` 也一样：归属校验发生在去上游取字节**之前**，
+    // 否则别人的出片地址就被代理出去了。
+    let error = execute(
+        &state,
+        &runtime,
+        build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default()),
+        Method::GET,
+        headers,
+        "/v1/videos/task-theirs/content".parse().unwrap(),
+        Body::empty(),
+    )
+    .await
+    .expect_err("another user's video content must not be downloadable");
     assert_eq!(error.code(), "videogen.task_not_found");
 }
 

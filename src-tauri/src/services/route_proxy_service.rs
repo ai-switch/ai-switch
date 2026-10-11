@@ -5838,15 +5838,41 @@ fn requested_image_capability(path: &str) -> Option<&'static str> {
 
 /// 视频生成能力（G-P2c）。提交与状态查询都归 `video.generate`。
 /// 状态查询路径形如 `/v1/video/generations/{task_id}`，故按前缀判断。
+///
+/// **看的是「上游」路径**：`forward_request` 用它推导这次请求需要账号声明什么能力。
+/// 所以这里只能有 new-api 家族 —— 理由见 `is_video_generation_path`。
 fn requested_video_capability(path: &str) -> Option<&'static str> {
     requested_video_capability_for(path)
 }
 
-/// 视频端点识别（G-P4）。与 `requested_video_capability` 共用同一份路径判断，
-/// 但对外可见：`web::router::shared_fallback` 要用它决定把请求交给
-/// `videogen` 服务层而不是 `proxy_handler`。
+/// 入站视频端点识别（G-P4）。
+///
+/// 与 `requested_video_capability` **不是同一个问题**，所以是两个函数：
+///   - `requested_video_capability`：这个**上游**路径要求账号具备什么能力；
+///   - 本函数：这个**入站**路径该不该交给 `videogen` 服务层（而不是 `proxy_handler`）。
+///
+/// **覆盖两条契约**：new-api 的 `/v1/video/generations` 家族，以及 OpenAI 原生的
+/// `/v1/videos` 家族（提交 / 查询 / 内容）。
+///
+/// ⚠️ 这里**不能**直接复用 `requested_video_capability_for` 的返回值，也不能把
+/// `/v1/videos*` 塞进那个函数：**Sora 方言的上游提交路径恰好就是 `/v1/videos`**，
+/// 可灵的是 `/v1/videos/text2video` —— 与入站的 OpenAI 原生家族同名。塞进去的话，
+/// 这两家的上游请求会被 `forward_request` 当成「入站视频端点」，于是在能力过滤
+/// 那一步要求 `video.generate` + 按 `model` 字段匹配；而可灵的上游体用的是
+/// `model_name`、根本没有 `model` 字段，匹配必然落空，账号被全部筛掉。
+/// 症状是 `route_pool.model_unmatched: no enabled route credential supports
+/// model 'unknown'`（`'unknown'` 就是「读不出 model」的占位符），离根因很远。
+///
+/// 漏掉任何一条入站路径的代价则是：那条契约在 `shared_fallback` 里静默降级成
+/// 静态兜底 404 —— 也就是「代码声称支持、实际永远 404」，本项目已踩过一次。
 pub(crate) fn is_video_generation_path(path: &str) -> bool {
-    requested_video_capability_for(path).is_some()
+    let normalized = path.trim().trim_end_matches('/');
+    requested_video_capability_for(normalized).is_some()
+        // OpenAI 原生契约（入站）。**只有 `/v1` 前缀这一种形态**：OpenAI 的路径
+        // 永远是 `/v1/videos`，而加一个 `/videos` 别名会让 `/videos/generations`
+        // 这类无关路径被 `is_shared_model_api_path` 顺手放进来。
+        || normalized == "/v1/videos"
+        || normalized.starts_with("/v1/videos/")
 }
 
 fn requested_video_capability_for(path: &str) -> Option<&'static str> {
@@ -7975,6 +8001,11 @@ pub(crate) fn is_shared_model_api_path(path: &str) -> bool {
         // `is_video_generation_path` 都认它）。少了这一条，那个别名在
         // `shared_fallback` 里根本进不来——会被静默降级成静态兜底 404，
         // 也就是「代码声称支持、实际永远 404」。
+        //
+        // **OpenAI 原生契约（`/v1/videos`）故意不做这个别名**：OpenAI 的路径
+        // 永远是 `/v1/videos`，加一个 `/videos` 前缀会让 `/videos/generations`
+        // 这类无关路径也被顺手放进来（下面那条断言就是防这个的），而它换不到
+        // 任何真实客户端。`/v1/videos*` 已经被下面的 `/v1/` 兜住。
         || normalized == "/video/generations"
         || normalized.starts_with("/video/generations/")
         || normalized == "/v1"
@@ -8020,9 +8051,87 @@ mod image_path_tests {
         assert!(is_shared_model_api_path("/video/generations"));
         assert!(is_shared_model_api_path("/video/generations/"));
         assert!(is_shared_model_api_path("/video/generations/t-1"));
+        // OpenAI 原生契约（`/v1/videos*`）由 `/v1/` 那条兜住，不需要单独的条目
+        assert!(is_shared_model_api_path("/v1/videos"));
+        assert!(is_shared_model_api_path("/v1/videos/t-1"));
+        assert!(is_shared_model_api_path("/v1/videos/t-1/content"));
         // 前缀接近但不同的路径不能被顺手放进来
         assert!(!is_shared_model_api_path("/video/generation"));
         assert!(!is_shared_model_api_path("/videos/generations"));
+        assert!(!is_shared_model_api_path("/videos"));
+    }
+
+    /// 两条视频契约的端点都必须被 `shared_fallback` 认出来。
+    ///
+    /// 漏掉任何一条，那条契约就会静默降级成静态兜底 404 —— 也就是
+    /// 「代码声称支持、实际永远 404」，本项目已经为 `/video/generations`
+    /// 这个别名踩过一次。
+    #[test]
+    fn both_video_contract_families_are_video_paths() {
+        use super::is_video_generation_path;
+
+        for path in [
+            "/v1/video/generations",
+            "/v1/video/generations/t-1",
+            "/video/generations",
+            "/video/generations/t-1",
+            "/v1/videos",
+            "/v1/videos/",
+            "/v1/videos/t-1",
+            "/v1/videos/t-1/content",
+        ] {
+            assert!(is_video_generation_path(path), "{path}");
+        }
+
+        // 近似但不同的路径不能被顺手放进来
+        for path in ["/videos", "/videos/t-1", "/v1/video", "/v1/videosx", "/v2/videos"] {
+            assert!(!is_video_generation_path(path), "{path}");
+        }
+    }
+
+    /// **上游**路径不能影响能力推导 —— 这是两个不同的谓词，不能合并。
+    ///
+    /// Sora 方言的上游提交路径恰好就是 `/v1/videos`，可灵的是
+    /// `/v1/videos/text2video`，与入站的 OpenAI 原生家族同名。一旦把入站家族塞进
+    /// `requested_video_capability`，这两家的上游请求就会被 `forward_request`
+    /// 当成入站视频端点，在能力过滤那一步要求 `video.generate` 并按 `model`
+    /// 字段匹配；而可灵的上游体用的是 `model_name`、没有 `model` 字段，匹配必然
+    /// 落空，账号被全部筛掉，报出来的是
+    /// `route_pool.model_unmatched: ... model 'unknown'`。
+    ///
+    /// 这条测试就是那次回归的守卫（真实踩过：两个端到端视频测试同时挂掉）。
+    #[test]
+    fn upstream_video_paths_do_not_imply_a_capability() {
+        use super::requested_video_capability;
+
+        for path in [
+            // Sora 方言的上游提交与状态路径
+            "/v1/videos",
+            "/v1/videos/abc",
+            // 可灵方言的上游提交与状态路径
+            "/v1/videos/text2video",
+            "/v1/videos/image2video",
+            "/v1/videos/text2video/t-1",
+            // 其余三家的上游路径
+            "/api/v3/contents/generations/tasks",
+            "/api/v3/contents/generations/tasks/t-1",
+            "/v1/video_generation",
+            "/v1/query/video_generation",
+            "/v4/videos/generations",
+            "/v4/async-result/t-1",
+        ] {
+            assert_eq!(requested_video_capability(path), None, "{path}");
+        }
+
+        // 只有入站的 new-api 家族带能力（`forward_request` 靠它推导要什么能力）
+        assert_eq!(
+            requested_video_capability("/v1/video/generations"),
+            Some("video.generate")
+        );
+        assert_eq!(
+            requested_video_capability("/v1/video/generations/t-1"),
+            Some("video.generate")
+        );
     }
 }
 

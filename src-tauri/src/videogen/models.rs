@@ -77,6 +77,17 @@ pub struct VideoTask {
     pub upstream_task_id: Option<String>,
     pub url: Option<String>,
     pub error_message: Option<String>,
+    /// 本次请求要求的时长（**整秒**）与画幅（`WxH`）。
+    ///
+    /// 存在的唯一理由：OpenAI 原生视频契约（`/v1/videos`）的对象体里
+    /// `seconds` 与 `size` 是必现字段，而这两个值在**提交时**就已知、之后
+    /// 从别处无从推导。`/v1/video/generations` 那条契约完全不读它们
+    /// （迁移 `202610100003` 纯追加，既有行留 NULL）。
+    ///
+    /// 用 `i64` 而不是 `f64`：时长本来就取整到秒（`effective_duration_seconds`
+    /// 的返回值），而且 `f64` 没有 `Eq`，会让 `VideoTask` 的 `Eq` 派生失效。
+    pub duration_seconds: Option<i64>,
+    pub size: Option<String>,
     pub callback_url: Option<String>,
     pub callback_delivered: bool,
     /// 回调投递失败重试过几次（超预算就不再重试，见 `MAX_CALLBACK_ATTEMPTS`）
@@ -147,6 +158,9 @@ pub struct NewVideoTask {
     pub dialect: String,
     pub credential_id: Option<String>,
     pub upstream_task_id: Option<String>,
+    /// 供 OpenAI 原生契约回显的时长（整秒）与画幅；见 `VideoTask` 同名字段。
+    pub duration_seconds: Option<i64>,
+    pub size: Option<String>,
     pub callback_url: Option<String>,
     /// SaaS 提交时填 principal.user_id；直连网关留 `None`。
     pub owner_user_id: Option<String>,

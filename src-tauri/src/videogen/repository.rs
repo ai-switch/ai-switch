@@ -18,7 +18,7 @@ const SESSION_COLUMNS: &str = "id,title,platform,archived,created_at,updated_at"
 const MESSAGE_COLUMNS: &str = "id,session_id,role,prompt,request_json,status,model,upstream_model,member_id,task_id,error_message,video_count,cost_micros,created_at,updated_at";
 const ASSET_COLUMNS: &str =
     "id,session_id,message_id,relative_path,mime_type,sha256,width,height,duration_ms,byte_size,created_at";
-const TASK_COLUMNS: &str = "task_id,session_id,message_id,model,upstream_model,dialect,status,credential_id,upstream_task_id,url,error_message,callback_url,callback_delivered,callback_attempts,attempt_count,last_polled_at,owner_user_id,created_at,updated_at";
+const TASK_COLUMNS: &str = "task_id,session_id,message_id,model,upstream_model,dialect,status,credential_id,upstream_task_id,url,error_message,duration_seconds,size,callback_url,callback_delivered,callback_attempts,attempt_count,last_polled_at,owner_user_id,created_at,updated_at";
 
 impl VideoGenerationRepository {
     pub async fn create_session(
@@ -196,7 +196,7 @@ impl VideoGenerationRepository {
         input: NewVideoTask,
     ) -> Result<VideoTask, AppError> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query("INSERT INTO videogen_tasks (task_id,session_id,message_id,model,upstream_model,dialect,status,credential_id,upstream_task_id,callback_url,owner_user_id,callback_delivered,callback_attempts,attempt_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,0,0,?,?)")
+        sqlx::query("INSERT INTO videogen_tasks (task_id,session_id,message_id,model,upstream_model,dialect,status,credential_id,upstream_task_id,duration_seconds,size,callback_url,owner_user_id,callback_delivered,callback_attempts,attempt_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,0,?,?)")
             .bind(&input.task_id)
             .bind(&input.session_id)
             .bind(&input.message_id)
@@ -206,6 +206,8 @@ impl VideoGenerationRepository {
             .bind("processing")
             .bind(&input.credential_id)
             .bind(&input.upstream_task_id)
+            .bind(input.duration_seconds)
+            .bind(&input.size)
             .bind(&input.callback_url)
             .bind(&input.owner_user_id)
             .bind(&now)
@@ -419,6 +421,8 @@ mod tests {
                 dialect: "kling".into(),
                 credential_id: None,
                 upstream_task_id: Some("k-1".into()),
+                duration_seconds: Some(5),
+                size: Some("1920x1080".into()),
                 callback_url: Some("https://cb/1".into()),
                 owner_user_id: None,
             },
@@ -428,6 +432,9 @@ mod tests {
         assert_eq!(task.status, "processing");
         assert!(!task.callback_delivered);
         assert_eq!(task.attempt_count, 0);
+        // 输出形状（迁移 202610100003 加的两列）要原样读回来
+        assert_eq!(task.duration_seconds, Some(5));
+        assert_eq!(task.size.as_deref(), Some("1920x1080"));
 
         assert_eq!(
             VideoGenerationRepository::list_active_tasks(&pool, 10)

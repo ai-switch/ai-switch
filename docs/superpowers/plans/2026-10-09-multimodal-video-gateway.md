@@ -1,4 +1,4 @@
-# 多模态网关：视频渠道（G-P1 / G-P2c / G-P3 / G-P4）
+# 多模态网关：视频渠道（G-P1 / G-P2c / G-P3 / G-P4 / G-P6）
 
 ## 背景
 
@@ -10,7 +10,11 @@
 编号沿用 **G-** 前缀与插件侧 P 对齐。产品取舍取 §7.8 的 **(a) 无头网关 + 渠道管理**——
 只加「视频渠道类型 + 统一端点 + 协议转换」，**不动导航与生成会话模型**（G-P5 暂不做）。
 
-## 对外契约（new-api 对齐）
+## 对外契约
+
+网关提供**两套**契约，指向同一套任务、同一套上游方言、同一套计费与轮询。
+
+### ① new-api 对齐（G-P2c）
 
 ```
 POST /v1/video/generations
@@ -23,9 +27,33 @@ GET /v1/video/generations/{task_id}
 
 - `metadata` 是逃逸口：`negative_prompt` / `aspect_ratio` / `resolution` / `size` / `callback_url` …（各家私有参数不进主契约）。
 - 状态枚举统一成 `processing` / `succeeded` / `failed`。
-- 平台（渠道）由 `x-ai-switch-platform` 请求头指明，请求体里的 `platform` 字段是同语义的 curl 友好兜底；
-  取值形如 `video:kling` / `video:seedance` / `video:minimax` / `video:zhipu` / `video:sora`。
-  **方言不可能从 `model` 推出来**（同一个模型名各家都可能存在），所以必须由调用方指明渠道。
+
+### ② OpenAI 原生（G-P6，见 §9）
+
+```
+POST /v1/videos
+  model / prompt / seconds / size / input_reference
+→ 201 { id, object:"video", model, created_at, status:"queued", progress, seconds, size }
+
+GET  /v1/videos/{video_id}
+→ 200 { id, object:"video", model, created_at, status, progress, seconds, size, url, error }
+
+GET  /v1/videos/{video_id}/content
+→ 200 视频字节流（video/mp4）
+```
+
+- 状态枚举是 OpenAI 那套：`queued` / `in_progress` / `completed` / `failed`。
+  **与 ① 不同是刻意的**，客户端按哪套契约写的就按哪套读。
+
+### 平台与供应商
+
+**鉴权与渠道选择是同一件事**：客户端用 `Authorization: Bearer sk-ai-switch-video`
+（或 SaaS 的 `sk-saas-` key），平台由**入站 key** 解析。`x-ai-switch-platform` 是特权本地
+诊断覆盖，不是对外契约（见 §4.1）。
+
+平台**只有 `video` 一个值**：可灵 / 方舟 / MiniMax / 智谱 / Sora 的差别是线协议，住在账号的
+`config_json.interface_format` 里，落到哪家由请求里的 `model` 名决定。调用方**不需要、也不应该**
+指定供应商（见 §8）。
 
 ## 档位与进度
 
@@ -36,6 +64,7 @@ GET /v1/video/generations/{task_id}
 | G-P3 | 异步任务表 + 轮询推进 + 回调 `callback_url` | ✅ 已落地（`videogen/service.rs` + 常驻轮询调度器） |
 | G-P4 | 计费计量单位扩展（次/秒、字符）——Saas 模块 | ✅ 已落地（按「条」+ 按「秒」相加计价；SaaS 全链路已打通并有端到端测试） |
 | G-P5 | Generate TAB 合并（图像/视频/音频内 tab） | ⬜ 暂不做（仅 option (b) 才需要） |
+| G-P6 | OpenAI 原生视频契约 `/v1/videos`（提交 / 查询 / 内容下载） | ✅ 已落地（见 §9） |
 
 ## 第一轮落地内容（G-P1 / G-P2c）
 
@@ -332,6 +361,98 @@ key 与平台是**一一对应**的，所以每个协议一张 key（`video:klin
 「看得见、提交必失败」的模型。直连侧加了
 `advertised_model_catalog_entries_with_capability`；SaaS 侧改用
 `permitted_accounts_for_capability`。
+
+### 9. 补上 OpenAI 原生视频契约（`/v1/videos`，G-P6）
+
+**为什么补。** 在这之前网关只提供 new-api 那一份契约。照 OpenAI 官方视频文档写的客户端
+（SDK 的 `client.videos.create()` / `.retrieve()` / `.content()`）打的是 `/v1/videos`，
+在我们这儿是 404。而 **new-api 自己是两套并存的**（`/v1/video/generations` 是它自己的
+格式，`/v1/videos` 是 OpenAI 兼容格式），所以「对齐 new-api」不能只做一套。
+
+两条契约**指向同一套任务、同一套上游方言、同一套计费与轮询**，差别只在请求体 / 响应体
+形状与状态词表，全部在 `videogen::protocol` 里吃掉：
+
+| | new-api 契约 | OpenAI 原生契约 |
+| --- | --- | --- |
+| 时长 | `duration: 5`（数字） | `seconds: "5"`（**字符串**） |
+| 画幅 | `width` / `height` 两个整数 | `size: "1280x720"` 一个字符串 |
+| 首帧图 | `image` | `input_reference` |
+| 状态词表 | `processing` / `succeeded` / `failed` | `queued` / `in_progress` / `completed` / `failed` |
+
+状态词表不同有测试钉住（`openai_video_statuses_use_the_openai_vocabulary` 里显式断言
+`openai_video_status(Succeeded) != Succeeded.as_str()`），免得以后有人「统一」成一套。
+
+要点：
+
+- **迁移 `202610100003`** 给 `videogen_tasks` 加 `duration_seconds` / `size` 两列。
+  OpenAI 的响应体里这两个字段必现，而它们**只在提交时已知**（上游响应里没有），之后
+  无从推导。纯追加，既有行留 NULL，new-api 契约完全不读。用 `INTEGER` 而不是 `REAL`：
+  时长本来就取整到秒（`effective_duration_seconds`），而且 `f64` 没有 `Eq`，会让
+  `VideoTask` 的 `Eq` 派生失效。
+- **`submit` 改成返回 `SubmitVideoOutcome { task_id, body }`**：两条契约的 201 体形状
+  不同（new-api 的 `id` 是 `video-{task_id}` 且另有 `task_id` 字段；OpenAI 的 `id` 就是
+  裸 task_id）。让调用方去解析 body 里的 JSON 取 id 太脆。这是本轮唯一改到既有签名的
+  地方（3 个构造点跟着改）。
+- **`/v1/videos/{id}` 容忍 `video-` 前缀**：两条契约共用一套任务，客户端可能拿 new-api 的
+  `id` 去查 OpenAI 的端点。前缀字面量抽成 `protocol::VIDEO_TASK_ID_PREFIX`，
+  `submit_response` 与查询共用，不会漂。
+- **不做 `/videos`（无 `/v1`）别名。** `/video/generations` 那个别名有真实消费者，
+  而 OpenAI 的路径永远是 `/v1/videos`；加别名只会让 `/videos/generations` 这类无关路径
+  被 `is_shared_model_api_path` 顺手放进来 —— 已有断言在防这个。
+- **`/content` 是真代理字节，不是 302。** OpenAI 的契约是「返回视频文件流」，而不少 SDK
+  的 HTTP 客户端默认不跟随重定向（Python `httpx` 就是 `follow_redirects=False`），
+  一个 302 会让它们拿到空体。用 `Body::from_stream` 流式转发（出片几十上百 MB，缓冲会把
+  并发上限变成内存上限），120s 超时。目标地址来自**我们自己刚存下的上游响应**（签名 CDN
+  链接），不是客户端给的，所以没有 SSRF 面。
+- **SaaS 侧三条 GET 形态合成一个 `execute_video_get`**，共用**同一套**归属校验 —— 拆成三个
+  函数之后最容易发生的事就是有一处忘了校验，而出片地址是可用的签名链接。归属校验发生在
+  去上游取字节**之前**。（原来的 `execute_video_status` 被它取代。）
+- **`submit_openai_video` 的 `seconds` / `size` 与落库、与上游体共用同一份计算**
+  （`effective_duration_seconds` / `effective_size`），否则三个地方会各算一套。
+- **`effective_size` 优先用显式的 `metadata.size`**（Sora 方言的上游体读的就是它，必须原样
+  保留），其次由 `width` / `height` 拼，两者都没有时返回 `None` —— 不编造默认值，
+  否则「客户端没说要多大」和「客户端要 1280x720」变得无法区分。
+- **不支持 multipart 的 `input_reference`。** OpenAI 那边它是文件上传，我们只收字符串
+  （URL / data URI）。传了文件会被当成非字符串而忽略，随后因为「既没有 prompt 也没有
+  首帧图」在 `submit` 里被拒 —— 不会静默出错片。
+
+#### 9.1 踩到的真 bug：入站与上游是两个谓词，不能合并
+
+`is_video_generation_path`（**入站**端点识别）与 `requested_video_capability`
+（**上游**路径 → 这次请求要账号声明什么能力）原本共用同一份路径判断。我一开始把
+`/v1/videos*` 直接塞进那份判断，结果**两个端到端视频测试同时挂掉**：
+
+```text
+videogen.submit_failed: route_pool.model_unmatched:
+  no enabled route credential supports model 'unknown' on platform 'video'
+```
+
+根因：**Sora 方言的上游提交路径恰好就是 `/v1/videos`，可灵的是 `/v1/videos/text2video`**
+—— 与入站的 OpenAI 原生家族同名。塞进去之后，这两家的**上游**请求被 `forward_request`
+当成「入站视频端点」，于是在能力过滤那一步要求 `video.generate` 并按 `model` 字段匹配；
+而可灵的上游体用的是 `model_name`、根本没有 `model` 字段，匹配必然落空，账号被全部筛掉。
+`'unknown'` 就是「读不出 model」的占位符，症状离根因很远。
+
+修法：拆成两个函数。`is_video_generation_path` = new-api 家族 ∪ `/v1/videos` 家族；
+`requested_video_capability` 只留 new-api 家族。新增
+`upstream_video_paths_do_not_imply_a_capability` 把五家方言的 11 条上游提交/状态路径
+全部钉成 `None`，作为这次回归的守卫。
+
+**教训：一个函数同时服务「入站」与「上游」两种路径语义时，任何新增路径都可能在两个方向
+之一上是错的。方向必须体现在函数名与注释里。**
+
+#### 9.2 验证
+
+- `cargo test --lib`：**1982 passed / 0 failed / 13 ignored**（+10 例）
+- `cargo check --no-default-features --features standalone-server --bin ai-switch-server`：0 error
+- `npx tsc --noEmit`：0 error
+- `npx vitest run`：**955 passed / 0 failed**（81 文件；「接入信息」那条测试加了一个断言，
+  没有新增用例）
+- 新增用例：`protocol` 5 例（字段名映射、缺 model、状态词表、两种响应体、`effective_size`
+  优先级）、`web::video_routes` 3 例（路径解析、两条契约路径族不重叠、`video-` 前缀容忍 +
+  输出形状回显）、`route_proxy_service` 2 例（两条契约都是入站视频路径；上游路径不推能力）、
+  `videogen::repository` 的既有生命周期测试补了输出形状断言、`saas::proxy` 的既有测试扩到
+  三条 GET 形态（含「别人的 `/content` 也读不到」）。
 
 ## 验证
 

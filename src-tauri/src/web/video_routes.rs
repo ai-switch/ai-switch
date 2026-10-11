@@ -1,11 +1,21 @@
 //! 视频渠道的 HTTP 入口（G-P4）
 //! =================================================================
-//! 把 new-api 契约端点接到 `VideoGenerationService`：
+//! 把**两条**契约端点接到 `VideoGenerationService`，指向同一套任务：
 //!
 //! ```text
+//! ① new-api 对齐
 //! POST /v1/video/generations            提交 → 201 { id, object, model, created_at, task_id, status }
 //! GET  /v1/video/generations/{task_id}  查询 → 200 { task_id, status, url, format, metadata, error }
+//!
+//! ② OpenAI 原生（`/v1/videos`）
+//! POST /v1/videos                       提交 → 201 { id, object, model, created_at, status, progress, seconds, size }
+//! GET  /v1/videos/{video_id}            查询 → 200 { id, object, model, created_at, status, progress, seconds, size, url, error }
+//! GET  /v1/videos/{video_id}/content    内容 → 200 视频字节流（video/mp4）
 //! ```
+//!
+//! 两条契约的差别只在请求体/响应体的形状与状态词表，**任务、上游方言、计费、
+//! 轮询都是同一套**（形状差异全在 `videogen::protocol` 里吃掉）。加第二条的理由：
+//! 照 OpenAI 官方视频文档写的客户端会打 `/v1/videos`，只有 new-api 那条会 404。
 //!
 //! **平台从哪来。** 与 `/v1/images/generations` 不同，视频的方言选择不可能从
 //! 请求体推出来（同一个 `model` 名在各家都可能存在），所以必须由调用方指明渠道。
@@ -32,10 +42,18 @@ use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
+use std::time::Duration;
 
 use crate::app_state::AppState;
 use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
-use crate::videogen::protocol::VideoGenerationRequest;
+use crate::error::AppError;
+use crate::videogen::models::VideoTask;
+use crate::videogen::protocol::{
+    effective_duration_seconds, effective_size, openai_video_create_response,
+    openai_video_retrieve_response, video_request_from_openai, VideoGenerationRequest,
+    VideoTaskStatus, VIDEO_TASK_ID_PREFIX,
+};
+use crate::videogen::repository::VideoGenerationRepository;
 use crate::videogen::service::{SubmitVideoInput, VideoGenerationService};
 
 /// 平台可能放在请求体里的字段名（curl 友好；请求头与入站 key 都优先）。
@@ -44,6 +62,11 @@ const PLATFORM_BODY_FIELD: &str = "platform";
 const PLATFORM_HEADER: &str = "x-ai-switch-platform";
 /// new-api 契约里 `metadata` 的字段名。
 const METADATA_FIELD: &str = "metadata";
+/// 请求体上限。视频请求体只是 JSON（首帧图是 URL，不是字节），4 MiB 绰绰有余。
+const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+/// 拉取上游视频字节流的超时。出片动辄几十上百 MB，比轮询的 10s 宽松得多，
+/// 但仍然要有上限——不然一个挂死的 CDN 会一直占着连接。
+const CONTENT_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `/v1/video/generations` 是否为「提交」路径（与状态查询区分）。
 pub(crate) fn is_video_submit_path(path: &str) -> bool {
@@ -61,6 +84,138 @@ pub(crate) fn video_task_id_from_path(path: &str) -> Option<String> {
         .or_else(|| normalized.strip_prefix("/video/generations/"))?;
     let task_id = rest.trim();
     (!task_id.is_empty() && !task_id.contains('/')).then(|| task_id.to_string())
+}
+
+/// OpenAI 原生契约的提交路径（`POST /v1/videos`）。
+///
+/// 与 `/v1/video/generations` 是**两条独立的路径**，不会互相匹配：
+/// 前者要求路径正好是 `/v1/videos`，后者要求 `/v1/video/generations`。
+///
+/// **只有 `/v1` 前缀这一种形态**，不做 `/videos` 别名：OpenAI 的路径永远是
+/// `/v1/videos`，而加那个别名会让 `/videos/generations` 这类无关路径被
+/// `route_proxy_service::is_shared_model_api_path` 顺手放进来。
+pub(crate) fn is_openai_video_submit_path(path: &str) -> bool {
+    path.trim().trim_end_matches('/') == "/v1/videos"
+}
+
+/// `/v1/videos/{video_id}` → `video_id`（**不含** `/content` 那条）。
+pub(crate) fn openai_video_id_from_path(path: &str) -> Option<String> {
+    openai_video_segment_from_path(path, false)
+}
+
+/// `/v1/videos/{video_id}/content` → `video_id`。
+pub(crate) fn openai_video_content_id_from_path(path: &str) -> Option<String> {
+    openai_video_segment_from_path(path, true)
+}
+
+/// 两个 OpenAI 视频路径共用一份解析：摘出 id，并校验剩下的分段正好符合预期。
+///
+/// `content = false` 时要求 `{id}` 之后没有分段；`true` 时要求正好一个 `content`。
+/// 多一个分段就不认（否则 `/v1/videos/a/b/c` 会被当成 id 为 `a` 的合法请求）。
+fn openai_video_segment_from_path(path: &str, content: bool) -> Option<String> {
+    let normalized = path.trim().trim_end_matches('/');
+    let rest = normalized.strip_prefix("/v1/videos/")?;
+    let mut segments = rest.split('/');
+    let video_id = segments.next()?.trim();
+    if video_id.is_empty() {
+        return None;
+    }
+    match (content, segments.next()) {
+        (true, Some("content")) | (false, None) => {}
+        _ => return None,
+    }
+    // 再多就不认了
+    segments.next().is_none().then(|| video_id.to_string())
+}
+
+/// 加载任务，并容忍 new-api 契约 `id` 的 `video-` 前缀。
+///
+/// new-api 的 201 体里 `id` 是 `video-{task_id}`，客户端可能直接拿那个 `id`
+/// 去查 OpenAI 的 `GET /v1/videos/{id}`（两条契约指向同一套任务）。摘掉前缀再查，
+/// 比回一个「任务不存在」让用户困惑要好。task_id 是 UUID，不会以 `video-` 开头，
+/// 所以摘前缀不会误伤裸 id。
+pub(crate) async fn load_video_task(
+    state: &AppState,
+    video_id: &str,
+) -> Result<VideoTask, AppError> {
+    let trimmed = video_id.trim();
+    let task_id = trimmed
+        .strip_prefix(VIDEO_TASK_ID_PREFIX)
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(trimmed);
+    VideoGenerationRepository::get_task(&state.pool, task_id).await
+}
+
+/// OpenAI 原生契约的任务对象体（`GET /v1/videos/{video_id}` 的响应）。
+///
+/// 同步、无副作用，所以能直接拿任务行单测。
+pub(crate) fn openai_video_object(task: &VideoTask) -> Vec<u8> {
+    // 任务表里的 status 是字符串；解析不出来（脏数据）就按「进行中」处理——
+    // 让客户端继续轮询，而不是误报完成或失败。
+    let status = VideoTaskStatus::parse(&task.status).unwrap_or(VideoTaskStatus::Processing);
+    openai_video_retrieve_response(
+        &task.task_id,
+        &task.model,
+        &task.created_at,
+        status,
+        task.url.as_deref(),
+        task.error_message.as_deref(),
+        task.duration_seconds,
+        task.size.as_deref(),
+    )
+}
+
+/// 拉取上游视频字节流（`GET /v1/videos/{video_id}/content`）。
+///
+/// **自己去上游取字节再转发，而不是 302 重定向**：OpenAI 的契约是「返回视频
+/// 文件流」，而不少 SDK 的 HTTP 客户端默认不跟随重定向（Python `httpx` 就是
+/// `follow_redirects=False`），一个 302 会让它们拿到空体。
+///
+/// 目标地址来自**我们自己刚存下的上游响应**（签名 CDN 链接），不是客户端给的，
+/// 所以没有 SSRF 面；仍然加超时兜住挂死的上游。
+///
+/// 流式转发而不是先缓冲：出片动辄几十上百 MB，缓冲会把并发上限变成内存上限。
+pub(crate) async fn openai_video_content(task: &VideoTask) -> Result<(String, Body), AppError> {
+    let Some(url) = task
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    else {
+        return Err(validation(
+            "videogen.asset_not_found",
+            "The video is not ready: no output URL has been recorded for this task yet",
+        ));
+    };
+    let client = reqwest::Client::builder()
+        .timeout(CONTENT_FETCH_TIMEOUT)
+        .build()
+        .map_err(|error| validation("videogen.poll_failed", &error.to_string()))?;
+    let response = client.get(url).send().await.map_err(|error| {
+        validation(
+            "videogen.poll_failed",
+            &format!("Could not fetch the video content: {error}"),
+        )
+    })?;
+    if !response.status().is_success() {
+        return Err(validation(
+            "videogen.poll_failed",
+            &format!(
+                "The video host answered HTTP {} for the stored output URL",
+                response.status().as_u16()
+            ),
+        ));
+    }
+    // 上游给的 content-type 才准；它没给、或给的不是视频类时按契约回 mp4。
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| value.starts_with("video/") || *value == "application/octet-stream")
+        .unwrap_or("video/mp4")
+        .to_string();
+    Ok((content_type, Body::from_stream(response.bytes_stream())))
 }
 
 /// 提交：转成上游方言体 → 落任务 → 回 201 契约体。
@@ -105,12 +260,108 @@ pub(crate) async fn submit_video_generation(
     )
     .await
     {
-        Ok(body) => (
+        Ok(outcome) => (
             StatusCode::CREATED,
             [("content-type", "application/json")],
-            body,
+            outcome.body,
         )
             .into_response(),
+        Err(error) => app_error_response(error),
+    }
+}
+
+/// OpenAI 原生契约的提交（`POST /v1/videos`）。
+///
+/// 与 `submit_video_generation` 的差别只有两处：请求体按 OpenAI 的形状解析
+/// （`seconds` / `size` / `input_reference`），响应体按 OpenAI 的形状拼
+/// （`id` 是裸 task_id、状态用 `queued`、带 `seconds`/`size`/`progress`）。
+/// 平台解析、账号池、方言、落库、计费全部复用同一条路径。
+async fn submit_openai_video(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    body: axum::body::Bytes,
+) -> Response {
+    let body = match normalize_request_body(&body) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let platform = match resolve_video_platform(&state.pool, headers, uri.query(), &body).await {
+        Ok(platform) => platform,
+        Err(response) => return response,
+    };
+    let request = match video_request_from_openai(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return error_response(StatusCode::BAD_REQUEST, "invalid_request", &error);
+        }
+    };
+    // 响应体要回显 `seconds`/`size`，与落库、与上游体**共用同一份计算**
+    // （`effective_duration_seconds` / `effective_size`），否则三个地方会各算一套。
+    let duration_seconds = effective_duration_seconds(&request);
+    let size = effective_size(&request);
+    let model = request.model.trim().to_string();
+
+    match VideoGenerationService::submit(
+        state,
+        SubmitVideoInput {
+            platform,
+            request,
+            session_id: None,
+            message_id: None,
+            credential_ids: None,
+            upstream_model: None,
+            owner_user_id: None,
+        },
+    )
+    .await
+    {
+        Ok(outcome) => (
+            StatusCode::CREATED,
+            [("content-type", "application/json")],
+            openai_video_create_response(
+                &outcome.task_id,
+                &model,
+                duration_seconds,
+                size.as_deref(),
+            ),
+        )
+            .into_response(),
+        Err(error) => app_error_response(error),
+    }
+}
+
+/// OpenAI 原生契约的查询（`GET /v1/videos/{video_id}`）。
+async fn openai_video_retrieve(state: &AppState, video_id: &str) -> Response {
+    match load_video_task(state, video_id).await {
+        Ok(task) => (
+            StatusCode::OK,
+            [("content-type", "application/json")],
+            openai_video_object(&task),
+        )
+            .into_response(),
+        Err(error) => app_error_response(error),
+    }
+}
+
+/// OpenAI 原生契约的内容（`GET /v1/videos/{video_id}/content`）。
+async fn openai_video_content_response(state: &AppState, video_id: &str) -> Response {
+    let task = match load_video_task(state, video_id).await {
+        Ok(task) => task,
+        Err(error) => return app_error_response(error),
+    };
+    match openai_video_content(&task).await {
+        Ok((content_type, body)) => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", content_type)
+            .body(body)
+            .unwrap_or_else(|_| {
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "video_error",
+                    "Could not build the video content response",
+                )
+            }),
         Err(error) => app_error_response(error),
     }
 }
@@ -286,7 +537,12 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
         .into_response()
 }
 
-/// 供 `shared_fallback` 调用：按路径把视频请求分派到提交或查询。
+/// 供 `shared_fallback` 调用：按路径把视频请求分派到提交 / 查询 / 内容。
+///
+/// 两条契约在这里汇合：`/v1/video/generations`（new-api）与 `/v1/videos`
+/// （OpenAI 原生）。分派顺序是「先精确路径、再带 id 的路径」，且 `content`
+/// 必须排在裸 `{id}` 之前——虽然两个解析函数互斥（裸 id 那条会拒绝多余分段），
+/// 但顺序写清楚能避免以后有人放宽 `{id}` 的匹配时把 `/content` 吃掉。
 pub(crate) async fn handle_video_request(
     state: &AppState,
     method: axum::http::Method,
@@ -294,29 +550,43 @@ pub(crate) async fn handle_video_request(
     uri: &Uri,
     body: Body,
 ) -> Response {
+    use axum::http::Method;
+
     let path = uri.path();
+
+    // ── 提交 ──
     if is_video_submit_path(path) {
-        if method != axum::http::Method::POST {
+        if method != Method::POST {
             return error_response(
                 StatusCode::METHOD_NOT_ALLOWED,
                 "method_not_allowed",
                 "Use POST to submit a video generation",
             );
         }
-        let body = match axum::body::to_bytes(body, 4 * 1024 * 1024).await {
+        let body = match read_request_body(body).await {
             Ok(body) => body,
-            Err(_) => {
-                return error_response(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "request_limits",
-                    "Video request body exceeds the limit",
-                )
-            }
+            Err(response) => return response,
         };
         return submit_video_generation(state, headers, uri, body).await;
     }
+    if is_openai_video_submit_path(path) {
+        if method != Method::POST {
+            return error_response(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "Use POST to submit a video generation",
+            );
+        }
+        let body = match read_request_body(body).await {
+            Ok(body) => body,
+            Err(response) => return response,
+        };
+        return submit_openai_video(state, headers, uri, body).await;
+    }
+
+    // ── 查询 / 内容 ──
     if let Some(task_id) = video_task_id_from_path(path) {
-        if method != axum::http::Method::GET {
+        if method != Method::GET {
             return error_response(
                 StatusCode::METHOD_NOT_ALLOWED,
                 "method_not_allowed",
@@ -325,11 +595,53 @@ pub(crate) async fn handle_video_request(
         }
         return video_generation_status(state, uri, &task_id).await;
     }
+    if let Some(video_id) = openai_video_content_id_from_path(path) {
+        if method != Method::GET {
+            return error_response(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "Use GET to download a video",
+            );
+        }
+        return openai_video_content_response(state, &video_id).await;
+    }
+    if let Some(video_id) = openai_video_id_from_path(path) {
+        if method != Method::GET {
+            return error_response(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "Use GET to query a video generation task",
+            );
+        }
+        return openai_video_retrieve(state, &video_id).await;
+    }
+
     error_response(
         StatusCode::NOT_FOUND,
         "not_found",
         "Unknown video generation endpoint",
     )
+}
+
+/// 读请求体并施加大小上限（两条契约共用）。
+async fn read_request_body(body: Body) -> Result<axum::body::Bytes, Response> {
+    axum::body::to_bytes(body, MAX_REQUEST_BYTES).await.map_err(|_| {
+        error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request_limits",
+            "Video request body exceeds the limit",
+        )
+    })
+}
+
+/// 构造一个可恢复的校验错误（本模块只用来表达「拿不到上游产物」这类失败）。
+fn validation(code: &'static str, message: &str) -> AppError {
+    AppError::Validation {
+        code,
+        message: message.to_string(),
+        details: None,
+        recoverable: true,
+    }
 }
 
 #[cfg(test)]
@@ -444,20 +756,18 @@ mod tests {
         assert!(normalize_request_body(b"[]").is_err());
     }
 
-    /// HTTP 入口的分派与状态码映射。
+    /// 带迁移的测试状态。
     ///
-    /// 这些分支都在碰到账号池之前就返回了（平台解析失败 / 方法不对 / 路径不匹配），
-    /// 所以不需要迁移，也不需要 mock 上游。
-    #[tokio::test]
-    async fn dispatches_methods_and_maps_errors_to_status_codes() {
-        use axum::body::Body;
-        use axum::http::Method;
-
-        let state = AppState {
+    /// 需要迁移：OpenAI 原生契约的查询路径会去读 `videogen_tasks`，表不存在会
+    /// 变成 500 而不是「任务不存在」的 404 —— 那样测的就不是分派逻辑了。
+    async fn test_state() -> AppState {
+        let pool = crate::database::create_memory_pool().await.unwrap();
+        crate::database::run_migrations(&pool).await.unwrap();
+        AppState {
             paths: crate::paths::AppPaths::from_data_dir(
                 std::env::temp_dir().join("ai-switch-video-routes-test"),
             ),
-            pool: crate::database::create_memory_pool().await.unwrap(),
+            pool,
             saas: Default::default(),
             config_writes: Default::default(),
             deeplink_protocols: Default::default(),
@@ -468,8 +778,65 @@ mod tests {
             terminals: Default::default(),
             terminal_hub: Default::default(),
             event_broadcaster: Default::default(),
-        };
+        }
+    }
 
+    /// 两条契约的路径解析。
+    #[test]
+    fn recognizes_openai_video_paths() {
+        assert!(is_openai_video_submit_path("/v1/videos"));
+        assert!(is_openai_video_submit_path("/v1/videos/"));
+        assert!(!is_openai_video_submit_path("/v1/videos/t-1"));
+        // 不做无 `/v1` 前缀的别名（否则 `/videos/generations` 会被顺手放进来）
+        assert!(!is_openai_video_submit_path("/videos"));
+
+        assert_eq!(
+            openai_video_id_from_path("/v1/videos/t-1").as_deref(),
+            Some("t-1")
+        );
+        assert_eq!(openai_video_id_from_path("/v1/videos/t-1/").as_deref(), Some("t-1"));
+        // `/content` 那条不是裸 id；缺 id、多分段也都不认
+        assert_eq!(openai_video_id_from_path("/v1/videos/t-1/content"), None);
+        assert_eq!(openai_video_id_from_path("/v1/videos"), None);
+        assert_eq!(openai_video_id_from_path("/v1/videos/t-1/extra"), None);
+        assert_eq!(openai_video_id_from_path("/v1/videos//"), None);
+        assert_eq!(openai_video_id_from_path("/videos/t-1"), None);
+
+        assert_eq!(
+            openai_video_content_id_from_path("/v1/videos/t-1/content").as_deref(),
+            Some("t-1")
+        );
+        assert_eq!(openai_video_content_id_from_path("/v1/videos/t-1"), None);
+        assert_eq!(
+            openai_video_content_id_from_path("/v1/videos/t-1/content/x"),
+            None
+        );
+    }
+
+    /// 两条契约的路径族**互不匹配** —— 这是 `handle_video_request` 分派正确的前提。
+    #[test]
+    fn the_two_contract_path_families_do_not_overlap() {
+        for path in ["/v1/videos", "/v1/videos/t-1", "/v1/videos/t-1/content"] {
+            assert!(!is_video_submit_path(path), "new-api 提交路径不该匹配 {path}");
+            assert_eq!(video_task_id_from_path(path), None, "{path}");
+        }
+        for path in ["/v1/video/generations", "/v1/video/generations/t-1"] {
+            assert!(!is_openai_video_submit_path(path), "OpenAI 提交路径不该匹配 {path}");
+            assert_eq!(openai_video_id_from_path(path), None, "{path}");
+            assert_eq!(openai_video_content_id_from_path(path), None, "{path}");
+        }
+    }
+
+    /// HTTP 入口的分派与状态码映射（两条契约）。
+    ///
+    /// 这些分支都在碰到账号池之前就返回了（平台解析失败 / 方法不对 / 路径不匹配 /
+    /// 任务不存在），所以不需要 mock 上游。
+    #[tokio::test]
+    async fn dispatches_methods_and_maps_errors_to_status_codes() {
+        use axum::body::Body;
+        use axum::http::Method;
+
+        let state = test_state().await;
         let call = |method: Method, path: &str, body: &str| {
             let state = state.clone();
             let uri: Uri = path.parse().unwrap();
@@ -481,28 +848,53 @@ mod tests {
             }
         };
 
-        // 提交路径只接受 POST
+        // 提交路径只接受 POST（两条契约各一条）
         assert_eq!(
             call(Method::GET, "/v1/video/generations", "").await,
             StatusCode::METHOD_NOT_ALLOWED
         );
-        // 状态路径只接受 GET
+        assert_eq!(
+            call(Method::GET, "/v1/videos", "").await,
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        // 查询 / 内容路径只接受 GET
         assert_eq!(
             call(Method::POST, "/v1/video/generations/t-1", "{}").await,
             StatusCode::METHOD_NOT_ALLOWED
         );
-        // 两条路径都不匹配
+        assert_eq!(
+            call(Method::POST, "/v1/videos/t-1", "{}").await,
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            call(Method::POST, "/v1/videos/t-1/content", "{}").await,
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        // 路径不匹配
         assert_eq!(
             call(Method::POST, "/v1/video/generations/t-1/extra", "{}").await,
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            call(Method::GET, "/v1/videos/text2video", "").await,
+            call(Method::GET, "/v1/video/other", "").await,
             StatusCode::NOT_FOUND
         );
-        // 非 JSON 体
+        // 不存在的任务：两条契约的查询路径共用同一张表，都该是 404 而不是 500
+        assert_eq!(
+            call(Method::GET, "/v1/video/generations/t-missing", "").await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(Method::GET, "/v1/videos/t-missing", "").await,
+            StatusCode::NOT_FOUND
+        );
+        // 非 JSON 体（两条契约）
         assert_eq!(
             call(Method::POST, "/v1/video/generations", "not-json").await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(Method::POST, "/v1/videos", "not-json").await,
             StatusCode::BAD_REQUEST
         );
         // 缺平台（请求头与请求体都没有）
@@ -515,6 +907,10 @@ mod tests {
             .await,
             StatusCode::BAD_REQUEST
         );
+        assert_eq!(
+            call(Method::POST, "/v1/videos", r#"{"model":"sora-2","prompt":"fox"}"#).await,
+            StatusCode::BAD_REQUEST
+        );
         // 平台不是视频渠道
         assert_eq!(
             call(
@@ -525,5 +921,74 @@ mod tests {
             .await,
             StatusCode::BAD_REQUEST
         );
+        assert_eq!(
+            call(
+                Method::POST,
+                "/v1/videos",
+                r#"{"platform":"codex","model":"sora-2","prompt":"fox"}"#
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        // OpenAI 契约缺 `model` → 400（在碰账号池之前）
+        assert_eq!(
+            call(Method::POST, "/v1/videos", r#"{"platform":"video","prompt":"fox"}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// new-api 契约的 201 体里 `id` 是 `video-{task_id}`，客户端可能拿它来查
+    /// OpenAI 的 `GET /v1/videos/{id}`。两条契约指向同一套任务，必须能查到。
+    ///
+    /// 同时钉住落库的 `seconds`/`size` 会被回显 —— 那是迁移 `202610100003`
+    /// 加这两列的唯一理由。
+    #[tokio::test]
+    async fn openai_lookup_tolerates_the_new_api_id_prefix() {
+        use crate::videogen::models::NewVideoTask;
+
+        let state = test_state().await;
+        VideoGenerationRepository::create_task(
+            &state.pool,
+            NewVideoTask {
+                task_id: "t-1".into(),
+                session_id: None,
+                message_id: None,
+                model: "sora-2".into(),
+                upstream_model: None,
+                dialect: "sora".into(),
+                credential_id: None,
+                upstream_task_id: Some("up-1".into()),
+                duration_seconds: Some(8),
+                size: Some("1280x720".into()),
+                callback_url: None,
+                owner_user_id: None,
+            },
+        )
+        .await
+        .expect("create task");
+
+        for id in ["t-1", "video-t-1"] {
+            let task = load_video_task(&state, id).await.expect(id);
+            assert_eq!(task.task_id, "t-1");
+            let body: Value = serde_json::from_slice(&openai_video_object(&task)).expect("json");
+            assert_eq!(body["id"], "t-1");
+            assert_eq!(body["object"], "video");
+            assert_eq!(body["model"], "sora-2");
+            // 还在 processing → OpenAI 词表里是 `in_progress`
+            assert_eq!(body["status"], "in_progress");
+            assert_eq!(body["progress"], 0);
+            assert_eq!(body["seconds"], "8");
+            assert_eq!(body["size"], "1280x720");
+            assert_eq!(body["url"], Value::Null);
+        }
+
+        // 真的不存在 → 任务不存在（`app_error_response` 会映射成 404）
+        let missing = load_video_task(&state, "nope").await.unwrap_err();
+        assert_eq!(missing.code(), "videogen.task_not_found");
+
+        // 还没出片时 `/content` 应当是「拿不到产物」而不是去连一个空 URL
+        let task = load_video_task(&state, "t-1").await.unwrap();
+        let error = openai_video_content(&task).await.unwrap_err();
+        assert_eq!(error.code(), "videogen.asset_not_found");
     }
 }
