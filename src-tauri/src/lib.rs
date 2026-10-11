@@ -1,5 +1,6 @@
 mod adapters;
 mod app_state;
+mod audiogen;
 #[cfg(feature = "desktop")]
 mod commands;
 mod config_writer;

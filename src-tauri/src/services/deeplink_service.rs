@@ -254,6 +254,10 @@ fn default_deeplink_dialect(platform: PlatformId) -> ApiDialect {
         PlatformId::Video => {
             unreachable!("capability guard rejects Deeplink for video channels")
         }
+        // 音频渠道同上：能力矩阵里 deeplink 也是 Unavailable。
+        PlatformId::Audio => {
+            unreachable!("capability guard rejects Deeplink for audio channels")
+        }
     }
 }
 
@@ -299,6 +303,10 @@ fn build_model_query_pairs<'a>(
         }
         // 视频渠道没有 deeplink 形态；能力守卫在此之前已拒绝。
         PlatformId::Video => {
+            unreachable!("handled or rejected before model serialization")
+        }
+        // 音频渠道同上。
+        PlatformId::Audio => {
             unreachable!("handled or rejected before model serialization")
         }
     };

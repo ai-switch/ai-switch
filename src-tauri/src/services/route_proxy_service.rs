@@ -150,6 +150,12 @@ const ROUTE_PROXY_PLATFORM_HEADER: &str = "x-ai-switch-platform";
 /// 提成常量是因为它有**两个**必须一致的消费方：请求期的候选过滤，以及
 /// `video_route_groups`（跨供应商选号）。两处写两遍字面量迟早漂移。
 const VIDEO_GENERATE_CAPABILITY: &str = "video.generate";
+/// 音频（TTS）端点要求账号声明的能力（`requested_audio_capability` 的返回值）。
+///
+/// 与 `VIDEO_GENERATE_CAPABILITY` 同构：音频也是一个**独立平台**（池身份是
+/// `audio`），所以 `/v1/models` 与候选过滤都按这一个能力收窄。
+/// STT 是另一个能力（`audio.transcribe`），等它落地时再提常量。
+const AUDIO_GENERATE_CAPABILITY: &str = "audio.generate";
 pub const ROUTE_PROXY_TRACE_HEADER: &str = "x-ai-switch-test-trace-id";
 const ROUTE_PROXY_CORS_ALLOW_METHODS: &str = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 const ROUTE_PROXY_CORS_DEFAULT_ALLOW_HEADERS: &str =
@@ -1176,9 +1182,11 @@ pub(crate) async fn forward_request(
         state.model_match_mode,
         baseline_models.as_deref(),
     );
-    // 图像 / 视频都按能力收窄候选（视频 = G-P2c 的 `/v1/video/generations`）
-    let requested_capability =
-        requested_image_capability(&path).or_else(|| requested_video_capability(&path));
+    // 图像 / 视频 / 音频都按能力收窄候选
+    // （视频 = G-P2c 的 `/v1/video/generations`，音频 = TTS 的 `/v1/audio/speech`）
+    let requested_capability = requested_image_capability(&path)
+        .or_else(|| requested_video_capability(&path))
+        .or_else(|| requested_audio_capability(&path));
     let candidates = if let Some(capability) = requested_capability {
         filter_candidates_for_capability_with_mode(
             &platform,
@@ -5836,6 +5844,31 @@ fn requested_image_capability(path: &str) -> Option<&'static str> {
     }
 }
 
+/// 音频（TTS）能力。
+///
+/// **看的是「上游」路径**：`forward_request` 用它推导这次请求需要账号声明什么
+/// 能力。TTS 的上游路径与入站路径相同（OpenAI 兼容），所以这一个函数同时服务
+/// 两个方向，不存在视频那种「入站 `/v1/videos` 与 Sora 上游 `/v1/videos` 撞名」
+/// 的问题——但**加非兼容方言时要重新检查这一点**（那时上游路径会变成各家自己的，
+/// 与入站路径分离，就需要像视频那样拆成两个谓词）。
+///
+/// **只认带 `/v1` 前缀的那一种形态**：OpenAI 的路径永远是 `/v1/audio/speech`，
+/// 而加一个 `/audio/speech` 别名会让它在 `is_shared_model_api_path` 里也需要
+/// 一条对应规则（图像就是这么做的），换不到任何真实客户端。
+fn requested_audio_capability(path: &str) -> Option<&'static str> {
+    matches!(path.trim().trim_end_matches('/'), "/v1/audio/speech")
+        .then_some(AUDIO_GENERATE_CAPABILITY)
+}
+
+/// 入站音频端点识别（SaaS 的端点白名单要用）。
+///
+/// 与 `requested_audio_capability` 是同一个判断，但对外可见：`saas::proxy::execute`
+/// 用它决定「这把音频 key 能不能打这个端点」。**音频不需要 `web::router` 的分派**
+/// （不像视频要自己建请求体），它走 `forward_request` 的直路即可。
+pub(crate) fn is_audio_speech_path(path: &str) -> bool {
+    requested_audio_capability(path).is_some()
+}
+
 /// 视频生成能力（G-P2c）。提交与状态查询都归 `video.generate`。
 /// 状态查询路径形如 `/v1/video/generations/{task_id}`，故按前缀判断。
 ///
@@ -6336,6 +6369,21 @@ fn build_api_upstream_request(
     if platform.is_video() {
         return build_video_upstream_request(credential, path, query, headers, body, secret, config);
     }
+    // 音频（TTS）同样走直路。上游体**就是客户端给的那个 JSON**（只改写 `model`），
+    // 上游路径由方言给出，文本那一整套「协议桥接 / reasoning 清理 / 路径版本
+    // 规范化」对音频全不适用——而且 `ApiDialect::parse` 也认不出音频方言。
+    if platform.is_audio() {
+        return build_audio_upstream_request(
+            credential,
+            path,
+            query,
+            headers,
+            body,
+            secret,
+            config,
+            model_match_mode,
+        );
+    }
     let dialect = match string_value(config, "interface_format") {
         Some(value) => ApiDialect::parse(value).map_err(format_app_error)?,
         None if matches!(
@@ -6573,6 +6621,78 @@ fn build_video_upstream_request(
         target_url,
         headers: headers.clone(),
         body: body.to_vec(),
+        bridge_kind: None,
+        tool_namespaces: BTreeMap::new(),
+        streaming_request: false,
+        reasoning_sanitized: false,
+    })
+}
+
+/// 音频（TTS）的上游请求构造。**直路**，不进文本的 `ApiDialect` 体系。
+///
+/// 与 [`build_video_upstream_request`] 的差别只有一处：音频的上游体**就是客户端
+/// 给的那个 JSON**，不需要方言转换，只需要把 `model` 按账号的 `model_mappings`
+/// 改写。音频方言目前只有 OpenAI 兼容一种，它的字段名就是 OpenAI 风格的 `model`，
+/// 所以 `apply_model_mappings_with_mode` 能直接作用（可灵那条链路上它改写不到，
+/// 因为可灵用的是 `model_name`）。
+///
+/// 上游路径取自**方言**而不是入站的 `path`：现在两者相同（都是
+/// `/v1/audio/speech`），但加非兼容方言时（MiniMax `/v1/t2a_v2`、火山
+/// `/api/v1/tts`）上游路径会与入站路径分离，那时这个取值方式就不需要改。
+///
+/// 鉴权头现在硬写 `Bearer`。**加 ElevenLabs（`xi-api-key`）或 Azure
+/// （`Ocp-Apim-Subscription-Key`）时必须改成按方言取头名。**
+fn build_audio_upstream_request(
+    credential: &SelectedCredential,
+    path: &str,
+    query: Option<&str>,
+    headers: &mut HeaderMap,
+    body: &[u8],
+    secret: &Value,
+    config: &Value,
+    model_match_mode: ModelMatchMode,
+) -> Result<BuiltUpstreamRequest, String> {
+    let api_key = string_value(secret, "api_key").ok_or_else(|| {
+        format!(
+            "Route credential {} is missing api_key",
+            credential.display_name
+        )
+    })?;
+    let base_url = string_value(config, "base_url").ok_or_else(|| {
+        format!(
+            "Route credential {} is missing base_url",
+            credential.display_name
+        )
+    })?;
+    let dialect = crate::audiogen::protocol::dialect_from_interface_format(
+        string_value(config, "interface_format").unwrap_or_default(),
+    )
+    .ok_or_else(|| {
+        format!(
+            "Route credential {} has an unsupported audio interface_format '{}'; expected openai",
+            credential.display_name,
+            string_value(config, "interface_format").unwrap_or("")
+        )
+    })?;
+
+    // 校验并取字符数。**超限在这里拒绝，不是截断**：截断会让「计费的文本」与
+    // 「实际合成出去的文本」分叉（视频那条「计价口径与上游口径必须同源」的同一个
+    // 教训）。这里只需要「通过/不通过」，字符数由计费侧自己从同一份请求体再算一次
+    // —— 两边都调 `audiogen::protocol`，所以不会各算一套。
+    crate::audiogen::protocol::validate_speech_request(dialect, body)
+        .map_err(|error| format!("validation.audio_request: {error}"))?;
+
+    // `model` 改写：客户端看到的名字 → 上游认的名字。其余字段一律原样透传
+    // （`voice` 是各家私有的，统一词表是自找的抽象泄漏）。
+    let mappings = parse_model_capability_value(config).mappings;
+    let rewritten_body = apply_model_mappings_with_mode(body, &mappings, model_match_mode);
+
+    insert_header(headers, "authorization", &format!("Bearer {api_key}"))?;
+    let target_url = build_target_url(base_url, dialect.speech_path(), query);
+    Ok(BuiltUpstreamRequest {
+        target_url,
+        headers: headers.clone(),
+        body: rewritten_body,
         bridge_kind: None,
         tool_namespaces: BTreeMap::new(),
         streaming_request: false,
@@ -8137,14 +8257,19 @@ mod image_path_tests {
 
 /// `/v1/models` 要按哪个能力过滤。
 ///
-/// 视频渠道是**整平台**只做视频，而它的端点强制要求 `video.generate`，所以列出来的
-/// 必须是真能提交成功的那些。文本平台没有这一层（能力过滤只对图像/视频生效，
-/// 而图像与文本共用一个平台，没有单一正确答案），返回 `None` 保持原行为。
+/// 视频与音频渠道都是**整平台只做一种模态**，而它们的端点强制要求各自的能力，
+/// 所以列出来的必须是真能提交成功的那些。文本平台没有这一层（能力过滤只对
+/// 图像/视频/音频生效，而图像与文本共用一个平台，没有单一正确答案），
+/// 返回 `None` 保持原行为。
 pub(crate) fn models_list_capability(platform: &str) -> Option<&'static str> {
-    crate::models::platform::PlatformId::parse(platform)
-        .ok()
-        .filter(|platform| platform.is_video())
-        .map(|_| "video.generate")
+    let platform = crate::models::platform::PlatformId::parse(platform).ok()?;
+    if platform.is_video() {
+        return Some(VIDEO_GENERATE_CAPABILITY);
+    }
+    if platform.is_audio() {
+        return Some(AUDIO_GENERATE_CAPABILITY);
+    }
+    None
 }
 
 fn is_models_list_path(path: &str) -> bool {
@@ -8635,6 +8760,11 @@ fn default_official_base_url(platform: PlatformId) -> Result<&'static str, Strin
         // 视频渠道全是 API key 渠道；不存在官网上游地址可回退。
         PlatformId::Video => Err(
             "capability.unavailable: official account routing is unavailable for video channels"
+                .to_string(),
+        ),
+        // 音频渠道同上：全是 API key 渠道。
+        PlatformId::Audio => Err(
+            "capability.unavailable: official account routing is unavailable for audio channels"
                 .to_string(),
         ),
     }

@@ -1073,7 +1073,7 @@ mod tests {
     /// 视频渠道可以走导入进来：**平台是 `video`，供应商在 `interface_format` 里**。
     ///
     /// 侧边栏「视频」屏（`VideoChannelsScreen`）也能新增视频渠道，但导入是**批量**
-    /// 那条路，且它依赖 `all_with_video()` 参与去重——少了它，同一路视频账号会被
+    /// 那条路，且它依赖 `all_with_media()` 参与去重——少了它，同一路媒体账号会被
     /// 重复导入。
     #[tokio::test]
     async fn video_channels_are_importable_with_their_upstream_dialect() {
@@ -2043,10 +2043,10 @@ pub async fn preview_route_credential_import(
     input: PreviewRouteCredentialImportInput,
 ) -> Result<RouteCredentialImportPreview, AppError> {
     let normalized = normalize_transfer_items(&input.text, &input.ambiguous_platform_choices)?;
-    // 用 `all_with_video()` 而不是 `ALL`：视频渠道（`video:kling` …）也是本地
-    // 账号池的一员，导入去重必须把它们算进来，否则同一路视频账号会被重复导入。
+    // 用 `all_with_media()` 而不是 `ALL`：视频与音频渠道也是本地账号池的一员，
+    // 导入去重必须把它们算进来，否则同一路媒体账号会被重复导入。
     // 凭据的 `platform` 列写的就是 `PlatformId::as_str()`，两边字面量一致。
-    let platforms = PlatformId::all_with_video()
+    let platforms = PlatformId::all_with_media()
         .iter()
         .map(|platform| platform.as_str().to_string())
         .collect::<Vec<_>>();
@@ -3507,19 +3507,20 @@ fn resolve_api_target(
         .map_err(|issue| (issue, true))?;
 
     let mut cpa_section = section_hint.map(str::to_string);
-    // 视频条目复用 `openai-compatibility` 分区（`api-key-entries` / `base-url` 的
-    // 提取都是按分区走的，另造分区就拿不到 key），但**分区隐含的文本线协议对视频
-    // 不适用**：视频账号的 `interface_format` 是上游方言（kling / ark / …）。
-    // 所以平台声明为 video 时，跳过分区→方言的一致性检查。
-    let is_video_item = metadata.platform.is_some_and(|platform| platform.is_video());
-    let expected_dialect = if is_video_item {
+    // 媒体条目（视频 / 音频）复用 `openai-compatibility` 分区（`api-key-entries` /
+    // `base-url` 的提取都是按分区走的，另造分区就拿不到 key），但**分区隐含的文本
+    // 线协议对它们不适用**：媒体账号的 `interface_format` 是上游方言
+    // （视频：kling / ark / …；音频：openai）。
+    // 所以平台声明为媒体渠道时，跳过分区→方言的一致性检查。
+    let is_media_item = metadata.platform.is_some_and(|platform| platform.is_media());
+    let expected_dialect = if is_media_item {
         None
     } else {
         cpa_section
             .as_deref()
             .and_then(expected_dialect_for_section)
     };
-    if !is_video_item && cpa_section.is_some() && expected_dialect.is_none() {
+    if !is_media_item && cpa_section.is_some() && expected_dialect.is_none() {
         return Err((
             transfer_issue(
                 item_index,
@@ -3531,14 +3532,15 @@ fn resolve_api_target(
         ));
     }
 
-    // `interface_format` 对文本账号是线协议（`ApiDialect`），对视频账号是**上游方言**
-    // （kling / ark / …）。只按文本解析会把视频账号判成非法，整条导入路径走不通。
+    // `interface_format` 对文本账号是线协议（`ApiDialect`），对媒体账号是**上游方言**
+    // （视频：kling / ark / …；音频：openai）。只按文本解析会把媒体账号判成非法，
+    // 整条导入路径走不通。
     let metadata_interface = metadata.interface_format.as_deref().map(|value| {
         ApiDialect::parse(value)
             .map(|dialect| (value.trim().to_string(), dialect))
             .or_else(|error| {
-                if crate::videogen::protocol::dialect_from_interface_format(value).is_some() {
-                    Ok((value.trim().to_string(), VIDEO_DIALECT_PLACEHOLDER))
+                if is_media_dialect(value) {
+                    Ok((value.trim().to_string(), MEDIA_DIALECT_PLACEHOLDER))
                 } else {
                     Err(error)
                 }
@@ -4021,7 +4023,23 @@ fn fixed_platform_for_section(section: &str) -> Option<PlatformId> {
 ///
 /// 导入只需要一个「不是 Anthropic」的值（用来跳过 Anthropic 专属的
 /// `api_key_field` 处理），真正的方言串在 `interface_format` 里原样搬运。
-const VIDEO_DIALECT_PLACEHOLDER: ApiDialect = ApiDialect::OpenAi;
+/// 媒体方言（视频 / 音频）的占位符。
+///
+/// 它只是个**标记**，不代表任何真实线协议：媒体账号的 `interface_format` 是上游
+/// 方言，而这条路径后面只拿它跟「分区隐含的文本方言」比一次，而媒体条目在
+/// `expected_dialect` 那一侧永远是 `None`，所以占位符不会与任何东西相等 ——
+/// 这正是「不把它当成文本方言」的表达方式。
+const MEDIA_DIALECT_PLACEHOLDER: ApiDialect = ApiDialect::OpenAi;
+
+/// 这个 `interface_format` 是不是某个媒体渠道的上游方言。
+///
+/// 视频与音频的表**必须分开查**：两边的方言名有意不重叠（视频刻意排除了
+/// `openai`，而音频目前只有 `openai`），合起来查会让 `openai` 同时是「音频方言」
+/// 和「非法视频方言」，语义就糊了。
+fn is_media_dialect(value: &str) -> bool {
+    crate::videogen::protocol::dialect_from_interface_format(value).is_some()
+        || crate::audiogen::protocol::dialect_from_interface_format(value).is_some()
+}
 
 fn is_supported_api_section(section: &str) -> bool {
     matches!(

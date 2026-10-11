@@ -816,16 +816,21 @@ fn copied_api_payload(
         .ok_or_else(|| {
             copy_source_error("interface_format", "API account has no interface format")
         })?;
-    // 视频的 `interface_format` 是**上游方言**（kling / ark / …），不是文本的
-    // `ApiDialect`，所以视频账号原样搬运：不解析成 `ApiDialect`，也不改写 Base URL
-    // （改写是文本侧换线协议时才需要的事）。
-    let (target_interface_format, target_default_dialect) = if target_platform.is_video() {
-        if crate::videogen::protocol::dialect_from_interface_format(source_interface_format)
-            .is_none()
-        {
+    // 媒体渠道（视频 / 音频）的 `interface_format` 是**上游方言**（视频：kling / ark / …；
+    // 音频：openai），不是文本的 `ApiDialect`，所以原样搬运：不解析成 `ApiDialect`，
+    // 也不改写 Base URL（改写是文本侧换线协议时才需要的事）。
+    let (target_interface_format, target_default_dialect) = if target_platform.is_media() {
+        let supported = if target_platform.is_video() {
+            crate::videogen::protocol::dialect_from_interface_format(source_interface_format)
+                .is_some()
+        } else {
+            crate::audiogen::protocol::dialect_from_interface_format(source_interface_format)
+                .is_some()
+        };
+        if !supported {
             return Err(copy_source_error(
                 "interface_format",
-                "Video account has an unsupported upstream dialect",
+                "Media account has an unsupported upstream dialect",
             ));
         }
         (source_interface_format.to_string(), None)
@@ -1079,6 +1084,23 @@ fn validate_interface_format(platform: PlatformId, value: &str) -> Result<(), Ap
             details: Some(format!(
                 "{value} (expected kling / ark / minimax / zhipu / sora)"
             )),
+            recoverable: true,
+        });
+    }
+    // 音频（TTS）与视频同构，但**方言名不同**：`openai` 在这里是正当的音频线协议
+    // （OpenAI 兼容的 `/v1/audio/speech`），而在视频那边被刻意排除过——那里
+    // `openai` 会让 `interface_format: "openai"` 静默变成「Sora」。两处结论相反是
+    // 因为语义不同，不是笔误。
+    //
+    // 也必须显式拦：文本方言（`anthropic` / `gemini`）出现在音频账号上是静默死数据。
+    if platform.is_audio() {
+        if crate::audiogen::protocol::dialect_from_interface_format(value).is_some() {
+            return Ok(());
+        }
+        return Err(AppError::Validation {
+            code: "validation.interface_format",
+            message: "Audio accounts must declare an upstream dialect".to_string(),
+            details: Some(format!("{value} (expected openai)")),
             recoverable: true,
         });
     }

@@ -16,6 +16,12 @@ const CONFIG_WRITE_UNAVAILABLE: &str = "capability.video_no_config_write";
 const VIDEO_MODEL_TEST_UNAVAILABLE: &str = "capability.video_model_test_separate";
 /// 视频渠道专用：没有终端/会话概念。
 const VIDEO_AGENT_ONLY: &str = "capability.video_not_an_agent";
+/// 音频渠道专用：不写任何 CLI 配置。
+const AUDIO_CONFIG_WRITE_UNAVAILABLE: &str = "capability.audio_no_config_write";
+/// 音频渠道专用：模型测试走 TTS 自己的链路，不在这里。
+const AUDIO_MODEL_TEST_UNAVAILABLE: &str = "capability.audio_model_test_separate";
+/// 音频渠道专用：没有终端/会话概念。
+const AUDIO_AGENT_ONLY: &str = "capability.audio_not_an_agent";
 
 pub struct PlatformCapabilityService;
 
@@ -74,6 +80,32 @@ fn capability_for(platform: PlatformId) -> PlatformCapability {
                 model_test: unavailable(VIDEO_MODEL_TEST_UNAVAILABLE),
                 terminal_launch: unavailable(VIDEO_AGENT_ONLY),
                 session_resume: unavailable(VIDEO_AGENT_ONLY),
+            },
+        };
+    }
+
+    // 音频渠道（TTS）。能力集与视频**完全一致**，理由也一样：它走通用 API 路由
+    // （`forward_request` 需要 route_credentials + generic_api_routing 这两项），
+    // 但不是一个 CLI provider、没有官方账号、也没有终端/会话。
+    //
+    // 刻意与视频分成两个分支而不是合成一个 `is_media()`：reason code 是给用户
+    // 看的文案，把「视频渠道不是 CLI 的 provider」原样丢给音频用户是错的。
+    if platform.is_audio() {
+        return PlatformCapability {
+            platform,
+            display_name: platform.display_name().to_string(),
+            support_level: SupportLevel::Partial,
+            operations: PlatformOperations {
+                route_credentials: api_credentials_only(),
+                generic_api_routing: api_credentials_only(),
+                config_write: unavailable(AUDIO_CONFIG_WRITE_UNAVAILABLE),
+                official_import: unavailable(OFFICIAL_ACCOUNT_UNAVAILABLE),
+                official_account_routing: unavailable(OFFICIAL_ACCOUNT_UNAVAILABLE),
+                deeplink_import: unavailable(DEEPLINK_UNAVAILABLE),
+                official_quota: unavailable(QUOTA_UNAVAILABLE),
+                model_test: unavailable(AUDIO_MODEL_TEST_UNAVAILABLE),
+                terminal_launch: unavailable(AUDIO_AGENT_ONLY),
+                session_resume: unavailable(AUDIO_AGENT_ONLY),
             },
         };
     }

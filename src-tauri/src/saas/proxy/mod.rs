@@ -119,8 +119,11 @@ async fn execute(
     let video_content = video_get_method
         && crate::web::video_routes::openai_video_content_id_from_path(&path).is_some();
     let video_get = video_status || video_object || video_content;
+    // 音频（TTS）。与视频不同，它是**同步**接口：只有 POST 一个方向，没有查询与
+    // 内容下载，所以不需要 `video_get` 那种「GET 也算」的例外。
+    let audio = crate::services::route_proxy_service::is_audio_speech_path(&path);
     if (!video_get && method != Method::POST)
-        || !(anthropic || responses || chat || images || videos)
+        || !(anthropic || responses || chat || images || videos || audio)
         || (principal.platform == "claude" && !(anthropic || responses))
         || (principal.platform == "gemini" && !images)
         || (principal.platform == "codex" && anthropic)
@@ -128,6 +131,8 @@ async fn execute(
         // 由 `reserve` 的 `groups.platform IN (...)` 挡下，报出来的是
         // `saas.invalid_key`（「key 无效」）——而真正的原因是端点不对。
         || (principal.platform == crate::models::platform::VIDEO_PLATFORM && !videos)
+        // 音频 key 同理：只能打音频端点，否则会以误导性的 `saas.invalid_key` 收场。
+        || (principal.platform == crate::models::platform::AUDIO_PLATFORM && !audio)
     {
         return Err(repository::invalid(
             "saas.endpoint_not_allowed",
@@ -176,6 +181,12 @@ async fn execute(
     if videos {
         return execute_video_request(
             app_state, pool, runtime, principal, payload, &path,
+        )
+        .await;
+    }
+    if audio {
+        return execute_audio_request(
+            pool, runtime, proxy, principal, headers, uri, payload, model, &path,
         )
         .await;
     }
@@ -409,6 +420,122 @@ async fn execute_image_request(
     };
     if runtime.logs.enqueue(record).await.is_err() {
         eprintln!("SaaS request log queue rejected a completed image request");
+    }
+    parts.headers.remove(header::SET_COOKIE);
+    parts
+        .headers
+        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    parts
+        .headers
+        .insert("x-saas-request-id", request_id.parse().unwrap());
+    Ok(Response::from_parts(parts, Body::from(bytes)))
+}
+
+/// 音频（TTS）的 SaaS 执行。
+///
+/// 与 `execute_image_request` 的**根本差异**：音频的响应是**二进制字节流**，
+/// 解析不了 —— 所以这里不去数「成功了几条」（数不出来），也不改写响应体，
+/// 直接把上游的字节与 `content-type` 原样回给客户端。
+///
+/// 由此推出两条：
+///   1. **计费用量只能来自请求**（`input` 的字符数）。这不是妥协，是正确：
+///      上游也是按 `input` 收费的，两边口径一致；而「从音频时长反推字数」
+///      那种做法既不准也不必要。
+///   2. 计费是**全有或全无**：上游 2xx 就按预留的总额收款，失败整笔退款。
+///      没有「成功几个字」这种中间态（图像/视频能从响应体里数出条数，音频不能）。
+///
+/// 字符数从**同一份请求体**算（`audiogen::protocol::input_characters`），与
+/// `build_audio_upstream_request` 的校验用的是同一个函数，所以「计费的文本」与
+/// 「发给上游的文本」不会分叉。
+async fn execute_audio_request(
+    pool: &SqlitePool,
+    runtime: &SaasRuntime,
+    proxy: ProxyAppState,
+    principal: billing::ApiPrincipal,
+    mut headers: HeaderMap,
+    uri: Uri,
+    mut payload: Value,
+    model: String,
+    path: &str,
+) -> Result<Response, AppError> {
+    let object = payload.as_object_mut().ok_or_else(|| {
+        repository::invalid("saas.validation", "Request must contain a JSON object")
+    })?;
+    // 计费的字符数：按 `chars()` 数，不是 `len()`（中文按字节会多收 3 倍）。
+    let characters = object
+        .get("input")
+        .and_then(Value::as_str)
+        .map(crate::audiogen::protocol::input_characters)
+        .ok_or_else(|| repository::invalid("saas.validation", "Speech request is missing input"))?;
+    let characters = characters as i64;
+
+    let reservation = billing::reserve_audio(pool, &principal, &model, characters).await?;
+    object.insert("model".into(), json!(reservation.upstream_model));
+    let request_id = reservation.request_id.clone();
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(reservation.timeout_seconds as u64);
+    let proxy = proxy
+        .with_access_scope(
+            PlatformId::parse(&reservation.platform)?,
+            reservation.credential_ids.into_iter().collect(),
+        )
+        .with_model_match_mode(ModelMatchMode::SaasUpstream);
+    headers.remove(header::COOKIE);
+    headers.remove("x-saas-csrf");
+    headers.remove("x-ai-switch-test-trace-id");
+    headers.remove(header::CONTENT_LENGTH);
+    headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+    let started = Instant::now();
+    let created_at = chrono::Utc::now();
+    let upstream = tokio::time::timeout_at(
+        deadline,
+        proxy_handler(
+            State(proxy),
+            Method::POST,
+            headers,
+            uri,
+            Body::from(payload.to_string()),
+        ),
+    )
+    .await;
+    let response = match upstream {
+        Ok(response) => response,
+        Err(_) => {
+            // 超时：上游可能已经合成了一半，但客户端什么都没拿到 —— 整笔退。
+            let _ = billing::settle_audio(pool, &request_id, false).await;
+            return Ok((StatusCode::GATEWAY_TIMEOUT, Json(json!({"error":{"code":"saas.upstream_timeout","message":"Upstream request timed out"}}))).into_response());
+        }
+    };
+    let status = response.status();
+    let (mut parts, body) = response.into_parts();
+    // 二进制体，但也要设个上限：上游不该回一个 GB 级的音频。
+    let bytes = axum::body::to_bytes(body, 128 * 1024 * 1024)
+        .await
+        .map_err(|_| repository::invalid("saas.upstream_body", "Could not read speech response"))?;
+    let settlement = billing::settle_audio(pool, &request_id, status.is_success()).await?;
+    let record = LogRecord {
+        request_id: request_id.clone(),
+        user_id: reservation.user_id,
+        key_id: reservation.key_id,
+        group_id: reservation.group_id,
+        platform: reservation.platform,
+        model,
+        endpoint: path.to_string(),
+        created_at,
+        utc_offset_minutes: chrono::Local::now().offset().local_minus_utc() / 60,
+        duration_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+        status: status.as_u16(),
+        amount_usd_micros: settlement.price_usd_micros.unwrap_or(0),
+        settlement_status: settlement.status,
+        error_code: if status.is_success() {
+            None
+        } else {
+            Some("upstream_rejected".into())
+        },
+        ..Default::default()
+    };
+    if runtime.logs.enqueue(record).await.is_err() {
+        eprintln!("SaaS request log queue rejected a completed audio request");
     }
     parts.headers.remove(header::SET_COOKIE);
     parts

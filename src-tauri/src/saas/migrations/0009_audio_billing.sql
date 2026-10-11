@@ -1,0 +1,17 @@
+-- 音频（TTS）计费
+--
+-- TTS 按**字符**计费（OpenAI tts-1 是 $15 / 1M 字符），所以列名不是「每字符多少
+-- micros」而是「每千字符多少 micros」：
+--
+--     tts-1        $15   / 1M 字符 → 15000 micros / 1k 字符
+--     便宜模型      $0.5  / 1M 字符 →   500 micros / 1k 字符
+--
+-- 按「每字符」存会出事：$0.5/1M 是 0.5 micros/字符，整数列存不下，只能悄悄归零
+-- 或改成 REAL。每千字符让两个数量级都是舒服的整数。
+--
+-- 计价口径：单次价格 = ceil(字符数 × audio_price_micros_per_1k_chars / 1000)，
+-- 再乘组倍率。**总额在预留时就算出来冻结进预留快照**，`settle_audio` 只读快照
+-- （与视频 0008 同一个做法：单价一旦冻结，结算侧就不需要重复一遍取整规则）。
+--
+-- 纯追加：既有行 DEFAULT 0，行为零变化。
+ALTER TABLE saas_group_models ADD COLUMN audio_price_micros_per_1k_chars INTEGER NOT NULL DEFAULT 0 CHECK(audio_price_micros_per_1k_chars>=0);

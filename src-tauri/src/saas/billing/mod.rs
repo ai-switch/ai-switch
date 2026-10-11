@@ -18,6 +18,10 @@ const MAX_VIDEO_COUNT: i64 = 1;
 /// 一次视频请求可接受的时长上界（秒）。防呆用，不是产品限制：
 /// 各家方言的最长时长由上游自己拒绝，这里只挡明显异常的输入。
 const MAX_VIDEO_DURATION_SECONDS: i64 = 600;
+/// 一次 TTS 请求可接受的 `input` 字符数上界。防呆用，不是产品限制：
+/// **真正的每方言上限（OpenAI 4096、MiniMax 10000）由 `audiogen::protocol`
+/// 在发上游之前把关**，这里只挡明显异常的输入（比如把整本书塞进来）。
+const MAX_AUDIO_CHARACTERS: i64 = 20_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 #[serde(rename_all = "camelCase")]
@@ -124,7 +128,7 @@ pub async fn authenticate_key(
     }
     let mut transaction = pool.begin().await.map_err(db_error)?;
     config::require_enabled(&mut transaction).await?;
-    let principal: Option<ApiPrincipal> = sqlx::query_as("SELECT keys.user_id,keys.id AS key_id,keys.group_id,groups.platform FROM saas_api_keys keys JOIN saas_users users ON users.id=keys.user_id JOIN route_pool_groups groups ON groups.id=keys.group_id WHERE keys.token_hash=? AND keys.status='active' AND (keys.expires_at IS NULL OR keys.expires_at>?) AND users.status='active' AND (groups.platform IN ('codex','claude','gemini','video')) AND groups.is_internal=0 AND groups.deleted_at IS NULL")
+    let principal: Option<ApiPrincipal> = sqlx::query_as("SELECT keys.user_id,keys.id AS key_id,keys.group_id,groups.platform FROM saas_api_keys keys JOIN saas_users users ON users.id=keys.user_id JOIN route_pool_groups groups ON groups.id=keys.group_id WHERE keys.token_hash=? AND keys.status='active' AND (keys.expires_at IS NULL OR keys.expires_at>?) AND users.status='active' AND (groups.platform IN ('codex','claude','gemini','video','audio')) AND groups.is_internal=0 AND groups.deleted_at IS NULL")
         .bind(repository::hash_secret(plaintext_key)).bind(repository::now()).fetch_optional(&mut *transaction).await.map_err(db_error)?;
     transaction.commit().await.map_err(db_error)?;
     principal.ok_or_else(|| {
@@ -659,6 +663,142 @@ pub async fn settle_video(
         status,
         "proxy",
         Some(&format!("video_count={count};unit={unit}")),
+    )
+    .await?;
+    transaction.commit().await.map_err(db_error)?;
+    Ok(result)
+}
+
+/// 音频（TTS）的预留。
+///
+/// 与 `reserve_video` 同构：单价在**预留时**就折成最终总额并冻结进快照，结算只读
+/// 快照。差别是计价维度——视频按秒，音频按**字符**。
+///
+/// `characters` 必须由调用方从**同一份请求体**算出（`audiogen::protocol`），
+/// 这样「计费的文本」与「发给上游的文本」不会分叉（视频那条「计价口径与上游口径
+/// 必须同源」的同一个教训）。上游侧的上限校验也在那里做，这里只挡防呆上界。
+pub async fn reserve_audio(
+    pool: &SqlitePool,
+    principal: &ApiPrincipal,
+    model: &str,
+    characters: i64,
+) -> Result<Reservation, AppError> {
+    if !(1..=MAX_AUDIO_CHARACTERS).contains(&characters)
+        || model.is_empty()
+        || model.len() > 256
+    {
+        return Err(invalid(
+            "saas.request_limits",
+            "Invalid audio model or character count",
+        ));
+    }
+    let mut transaction = repository::begin(pool).await?;
+    config::require_enabled(&mut transaction).await?;
+    let limits: Option<Limits> = sqlx::query_as("SELECT users.balance_micros,users.frozen_micros AS user_frozen,keys.spent_micros,keys.frozen_micros AS key_frozen,keys.limit_micros,settings.multiplier_micros,settings.max_output_tokens,settings.timeout_seconds,settings.max_concurrency,settings.allow_subscription,settings.allow_balance FROM saas_api_keys keys JOIN saas_users users ON users.id=keys.user_id JOIN route_pool_groups groups ON groups.id=keys.group_id JOIN saas_group_settings settings ON settings.group_id=groups.id WHERE keys.id=? AND keys.user_id=? AND keys.group_id=? AND groups.platform=? AND keys.status='active' AND (keys.expires_at IS NULL OR keys.expires_at>?) AND users.status='active' AND groups.is_internal=0 AND groups.deleted_at IS NULL")
+        .bind(&principal.key_id).bind(&principal.user_id).bind(&principal.group_id).bind(&principal.platform).bind(repository::now()).fetch_optional(&mut *transaction).await.map_err(db_error)?;
+    let limits =
+        limits.ok_or_else(|| invalid("saas.invalid_key", "API key is no longer available"))?;
+    crate::saas::domain::model_sync::reconcile_group_connection(
+        &mut *transaction,
+        &principal.group_id,
+    )
+    .await?;
+    let priced: Option<(i64, String)> = sqlx::query_as(
+        "SELECT audio_price_micros_per_1k_chars,upstream_model FROM saas_group_models WHERE group_id=? AND model=? AND sync_state='active' AND enabled=1",
+    )
+    .bind(&principal.group_id)
+    .bind(model)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(db_error)?;
+    // 单价必须 > 0：0 价在 `settle` 里会被当成「没定价」，与「免费」分不开。
+    let (price_per_1k_chars, upstream_model) =
+        priced.filter(|(price, _)| *price > 0).ok_or_else(|| {
+            invalid(
+                "saas.model_not_allowed",
+                "Audio model is not priced and allowed by this group",
+            )
+        })?;
+    let credential_ids = groups::permitted_accounts_for_capability_connection(
+        &mut transaction,
+        &principal.group_id,
+        model,
+        "audio.generate",
+    )
+    .await?;
+    if credential_ids.is_empty() {
+        return Err(invalid(
+            "saas.empty_pool",
+            "No permitted account currently supports speech synthesis",
+        ));
+    }
+    // 取整方向**向上**：宁可多收一个 micro，也不漏收。取整只在这里做一次，
+    // 结果（总额）进快照，结算不再重复取整——两处各算一次迟早会分叉。
+    let base_micros = (characters as i128 * price_per_1k_chars as i128 + 999) / 1000;
+    let reserved_micros = repository::money(
+        base_micros * limits.multiplier_micros as i128 / 1_000_000_i128,
+    )?;
+    let reservation = reserve_fixed(
+        &mut transaction,
+        principal,
+        model,
+        upstream_model,
+        credential_ids,
+        reserved_micros,
+        limits,
+        serde_json::json!({
+            "kind": "audio",
+            "unitPriceMicros": price_per_1k_chars,
+            "characters": characters,
+        })
+        .to_string(),
+    )
+    .await?;
+    transaction.commit().await.map_err(db_error)?;
+    Ok(reservation)
+}
+
+/// 音频（TTS）的结算。
+///
+/// **全有或全无**：音频是同步接口，上游 2xx 就代表这单的文本已经合成完，
+/// 失败则整笔退款。没有「成功几个字」这种中间态——那是图像/视频按条数的模型，
+/// 它们能从响应体里数出成功了几条；音频的响应是二进制，数不出来（也不该去数）。
+pub async fn settle_audio(
+    pool: &SqlitePool,
+    request_id: &str,
+    success: bool,
+) -> Result<Settlement, AppError> {
+    let mut transaction = repository::begin(pool).await?;
+    let mut reservation = load_reservation(&mut transaction, request_id).await?;
+    if ["settled", "refunded"].contains(&reservation.status.as_str()) {
+        return Ok(reservation.result());
+    }
+    let snapshot: serde_json::Value = serde_json::from_str(&reservation.price_json)
+        .map_err(|_| invalid("saas.pricing_snapshot", "Invalid audio price snapshot"))?;
+    if snapshot.get("kind").and_then(serde_json::Value::as_str) != Some("audio") {
+        return Err(invalid(
+            "saas.pricing_snapshot",
+            "Reservation is not audio billing",
+        ));
+    }
+    let characters = snapshot
+        .get("characters")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    let cost = if success {
+        reservation.reserved_micros
+    } else {
+        0
+    };
+    let status = if success { "settled" } else { "refunded" };
+    let result = finish(
+        &mut transaction,
+        &reservation,
+        cost,
+        None,
+        status,
+        "proxy",
+        Some(&format!("characters={characters}")),
     )
     .await?;
     transaction.commit().await.map_err(db_error)?;

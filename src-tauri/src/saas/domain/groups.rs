@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 /// 视频只有一个平台 `video`（供应商在账号的 `interface_format` 里），
 /// 所以这里也只需要一项，不再随方言数量增长。
 fn supported_platforms() -> Vec<&'static str> {
-    PlatformId::all_with_video()
+    PlatformId::all_with_media()
         .iter()
         .map(|platform| platform.as_str())
         .collect()
@@ -61,6 +61,12 @@ pub struct GroupModel {
     /// 按秒计价（与 `video_price_micros` **相加**，见迁移 0008）
     #[serde(default)]
     pub video_price_per_second_micros: i64,
+    /// 音频（TTS）按**千字符**计价（见迁移 0009）。
+    ///
+    /// 单位是千字符而不是单字符：$0.5/1M 字符 = 0.5 micros/字符，按字符存会
+    /// 落到整数列存不下的区间。
+    #[serde(default)]
+    pub audio_price_micros_per_1k_chars: i64,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
     #[serde(default = "active_sync_state")]
@@ -168,7 +174,7 @@ async fn core_group(
         "SELECT id,name,platform,is_internal,is_active
          FROM route_pool_groups
          WHERE id=? AND deleted_at IS NULL
-           AND (platform IN ('codex','claude','gemini','video'))",
+           AND (platform IN ('codex','claude','gemini','video','audio'))",
     )
     .bind(group_id)
     .fetch_optional(&mut *connection)
@@ -196,7 +202,8 @@ async fn models(
 ) -> Result<Vec<GroupModel>, AppError> {
     sqlx::query_as(
         "SELECT model,upstream_model,input_price_micros,cache_price_micros,output_price_micros,
-                image_price_micros,video_price_micros,video_price_per_second_micros,enabled,sync_state,managed_by_pool,last_seen_at,updated_at
+                image_price_micros,video_price_micros,video_price_per_second_micros,audio_price_micros_per_1k_chars,
+                enabled,sync_state,managed_by_pool,last_seen_at,updated_at
          FROM saas_group_models WHERE group_id=? ORDER BY model",
     )
     .bind(group_id)
@@ -498,7 +505,7 @@ pub async fn list(pool: &SqlitePool, payload: Value, user_only: bool) -> Result<
         sqlx::query_as(
             "SELECT id,name,platform,is_internal,is_active
              FROM route_pool_groups
-             WHERE (platform IN ('codex','claude','gemini','video'))
+             WHERE (platform IN ('codex','claude','gemini','video','audio'))
                AND deleted_at IS NULL
              ORDER BY platform,sort_order,created_at,id",
         )
@@ -541,7 +548,7 @@ pub async fn available(pool: &SqlitePool, payload: Value) -> Result<Value, AppEr
     let rows: Vec<CoreGroup> = sqlx::query_as(
         "SELECT groups.id,groups.name,groups.platform,groups.is_internal,groups.is_active
          FROM route_pool_groups groups
-         WHERE (groups.platform IN ('codex','claude','gemini','video'))
+         WHERE (groups.platform IN ('codex','claude','gemini','video','audio'))
            AND groups.deleted_at IS NULL
            AND groups.is_internal=0
            AND NOT EXISTS (SELECT 1 FROM saas_group_models models WHERE models.group_id=groups.id)
@@ -678,6 +685,7 @@ pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> 
                 model.image_price_micros,
                 model.video_price_micros,
                 model.video_price_per_second_micros,
+                model.audio_price_micros_per_1k_chars,
             ]
             .iter()
             .any(|price| !(0..=repository::MAX_MONEY).contains(price))
@@ -779,9 +787,10 @@ pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> 
         sqlx::query(
             "INSERT INTO saas_group_models
                (group_id,model,upstream_model,input_price_micros,cache_price_micros,
-                output_price_micros,image_price_micros,video_price_micros,video_price_per_second_micros,version,enabled,sync_state,
+                output_price_micros,image_price_micros,video_price_micros,video_price_per_second_micros,
+                audio_price_micros_per_1k_chars,version,enabled,sync_state,
                 managed_by_pool,last_seen_at,updated_at)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&identifier)
         .bind(model.model)
@@ -792,6 +801,7 @@ pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> 
         .bind(model.image_price_micros)
         .bind(model.video_price_micros)
         .bind(model.video_price_per_second_micros)
+        .bind(model.audio_price_micros_per_1k_chars)
         .bind(version)
         .bind(enabled)
         .bind(sync_state)
