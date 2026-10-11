@@ -3940,6 +3940,24 @@ export function AccountsScreen({
   });
 
   const allCredentials = allCredentialsQuery.data;
+  // 这个池里声明了生图能力的公开模型名（去重）。
+  //
+  // 生图**没有自己的平台**：它是 codex / gemini 账号的一个能力，端点是
+  // `/v1/images/generations`，与文本共用同一个池和同一张 key。所以「这个池能不能
+  // 出图」只能从账号的 `model_mappings` 里读出来 —— 接入信息靠它决定要不要摊出
+  // 图片端点。
+  const poolImageModels = useMemo(() => {
+    const models = new Set<string>();
+    for (const credential of allCredentials ?? []) {
+      for (const mapping of parseModelMappingsFromConfig(credential.config_json)) {
+        const from = mapping.from.trim();
+        if (from && (mapping.capabilities ?? []).includes("image.generate")) {
+          models.add(from);
+        }
+      }
+    }
+    return [...models];
+  }, [allCredentials]);
   useEffect(() => {
     if (!allCredentials) {
       return;
@@ -9132,6 +9150,7 @@ export function AccountsScreen({
           platform={activePlatform}
           platformLabel={platformLabels[activePlatform]}
           poolApiKey={routeProxyKeyQuery.data ?? null}
+          imageModels={poolImageModels}
           poolBaseUrl={
             routeServiceReady ? routeProxyQuery.data?.base_url ?? null : null
           }

@@ -6648,6 +6648,67 @@ describe("AccountsScreen", () => {
     await userEvent.click(screen.getByLabelText("复制 API Key"));
     expect(getRouteProxyKey).toHaveBeenCalledWith("codex");
     expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith("sk-ai-switch-codex-key");
+
+    // 这个池里没有账号声明 image.generate，所以不摊图片端点 —— 给一个调不通的
+    // 地址比不给更糟。
+    expect(screen.queryByLabelText("图片端点")).not.toBeInTheDocument();
+  });
+
+  /// 生图**没有自己的平台**：它是这个池里账号的一个能力，端点是
+  /// `/v1/images/generations`，与文本共用同一个 Base URL 和同一张 key。
+  ///
+  /// 所以接入信息必须把它摊出来：界面上没有别的地方能知道这个端点存在
+  /// （「生图」那个导航入口还被插件开关挡着，而且它是工作台不是渠道管理）。
+  it("hands out the image endpoint when the pool declares image models", async () => {
+    vi.mocked(getRouteProxyStatus).mockResolvedValue({
+      running: true,
+      route_access_enabled: true,
+      bind_host: "127.0.0.1",
+      port: 43111,
+      base_url: "http://127.0.0.1:43111",
+      https_port: 43112,
+      https_base_url: "https://127.0.0.1:43112",
+      https_error: null,
+    });
+    poolStateByPlatform.set("codex", ["cred-image-1"]);
+    vi.mocked(listRouteCredentials).mockResolvedValue([
+      {
+        ...credentialsFixture[1],
+        id: "cred-image-1",
+        display_name: "Image Account",
+        config_json: JSON.stringify({
+          base_url: "https://api.example.com/v1",
+          interface_format: "openai",
+          model_mappings: [
+            { from: "gpt-5", to: "gpt-5" },
+            {
+              from: "gpt-image-1",
+              to: "gpt-image-1",
+              capabilities: ["image.generate"],
+            },
+          ],
+        }),
+      },
+    ]);
+    // 用 in_pool：出图账号在池里，测试按钮才可用（空池时它是禁用的）。
+    renderScreen("codex", "in_pool");
+
+    await waitFor(() => expect(screen.getByLabelText("真实生成测试算力池路由")).toBeEnabled());
+    await userEvent.click(screen.getByLabelText("写入路由配置文件"));
+    await screen.findByText("接入算力池");
+    await userEvent.click(screen.getByRole("tab", { name: "其他 Agent" }));
+
+    // codex 的 Base URL 已经带 /v1，所以图片端点接在它后面
+    expect(screen.getByLabelText("图片端点")).toHaveValue(
+      "http://127.0.0.1:43111/v1/images/generations",
+    );
+    await userEvent.click(screen.getByLabelText("复制 图片端点"));
+    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(
+      "http://127.0.0.1:43111/v1/images/generations",
+    );
+    // 声明了 image.generate 的模型名要列出来，否则用户不知道能用哪个
+    // （`gpt-image-1` 在账号的映射标签里也出现一次，所以要限定到这段说明上）
+    expect(screen.getByText(/可用的生图模型/)).toHaveTextContent("gpt-image-1");
   });
 
   it("tests the credential pool route with a user-specified model", async () => {

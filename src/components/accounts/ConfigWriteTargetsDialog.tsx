@@ -2,7 +2,7 @@ import { Check, Copy, Eye, EyeOff, HelpCircle, Plug, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { ConfigWriteClientStatus, RoutePoolModelMode } from "../../lib/api/types";
 import { copySensitiveText } from "../../lib/routeCredentialTransfer";
-import { routeProxyEndpointForPlatform } from "../../lib/routeProxyEndpoint";
+import { imageGenerationEndpoint, routeProxyEndpointForPlatform } from "../../lib/routeProxyEndpoint";
 
 const fileStatusLabels: Record<string, string> = {
   missing: "未建立",
@@ -208,6 +208,14 @@ type ConfigWriteTargetsDialogProps = {
   /** Why HTTPS is absent even though it was turned on. */
   httpsError?: string | null;
   poolApiKey?: string | null;
+  /**
+   * 这个池里声明了 `image.generate` 的公开模型名（去重）。
+   *
+   * 生图**没有自己的平台**：它是 codex / gemini 账号的一个能力，端点是
+   * `/v1/images/generations`，与文本共用同一个池和同一张 key。空数组表示这个池
+   * 目前出不了图 —— 那时不摊图片端点，免得给用户一个调不通的地址。
+   */
+  imageModels?: string[];
   /** Current catalog mode for this platform; `undefined` until the pool loads. */
   modelMode?: RoutePoolModelMode;
   deepSeekHarnessConfigPath?: string | null;
@@ -231,6 +239,7 @@ export function ConfigWriteTargetsDialog({
   poolHttpsBaseUrl = null,
   httpsError = null,
   poolApiKey = null,
+  imageModels,
   modelMode = "aggregate",
   modelModeSaving = false,
   deepSeekHarnessConfigPath = null,
@@ -321,6 +330,11 @@ export function ConfigWriteTargetsDialog({
   // instead of an empty field before the proxy status arrives.
   const httpEndpoint = routeProxyEndpointForPlatform(poolBaseUrl ?? "", platform) || null;
   const httpsEndpoint = routeProxyEndpointForPlatform(poolHttpsBaseUrl ?? "", platform) || null;
+  // 只有池里真有账号声明了生图能力、且代理地址已就绪时才给这一行：摊一个调不通的
+  // 端点比不摊更糟。
+  const imageEndpoint = imageModels?.length
+    ? imageGenerationEndpoint(poolBaseUrl ?? "", platform)
+    : "";
   const restartClients = clients.filter(
     (client) => client.restart_required && selected.includes(client.client_key),
   );
@@ -623,7 +637,20 @@ export function ConfigWriteTargetsDialog({
                     <EndpointRow label="HTTPS Base URL" value={httpsEndpoint} />
                   ) : null}
                   <EndpointRow label="API Key" secret value={poolApiKey} />
+                  {/* 生图与文本共用这个池和这张 key，只是路径不同。放在这里而不是
+                      一个独立的「生图」入口里，是因为生图本来就没有自己的平台 ——
+                      它就是 codex / gemini 账号的一个能力。 */}
+                  {imageEndpoint ? (
+                    <EndpointRow label="图片端点" value={imageEndpoint} />
+                  ) : null}
                 </div>
+                {imageEndpoint ? (
+                  <p className="text-[11px] leading-5 text-stone-500">
+                    图片端点走同一个池、同一张 key。可用的生图模型：
+                    {imageModels?.join("、")}。图片编辑（/v1/images/edits）目前只支持
+                    interface_format 为 openai 的账号。
+                  </p>
+                ) : null}
                 <p className="text-[11px] leading-5 text-stone-500">
                   {httpsEndpoint
                     ? "正常情况用上面的 Base URL（HTTP）即可。HTTPS 端点只给确实需要 TLS 的特殊场景，且客户端必须信任本地根证书。"
