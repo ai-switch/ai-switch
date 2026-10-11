@@ -125,6 +125,7 @@ export type ResponseBodyCleanup = {
   reclaimableBytes: number;
 };
 
+import type { AudioDialect } from "../audioPlatforms";
 import type { VideoDialect } from "../videoPlatforms";
 
 /// 账号声明的线协议。
@@ -137,7 +138,8 @@ export type InterfaceFormat =
   | "openai-responses"
   | "anthropic"
   | "gemini"
-  | VideoDialect;
+  | VideoDialect
+  | AudioDialect;
 
 export type AnthropicApiKeyField = "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN";
 

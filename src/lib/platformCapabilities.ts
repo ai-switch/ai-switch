@@ -9,6 +9,11 @@ const capabilityReasons: Record<string, string> = {
   "capability.video_no_config_write": "视频渠道不是 CLI 的 provider，不写任何客户端配置。",
   "capability.video_model_test_separate": "视频的模型测试走视频提交链路，不在账号页的模型测试里。",
   "capability.video_not_an_agent": "视频渠道没有终端与会话概念，不能启动或续跑 Agent。",
+  // 音频渠道（TTS）专用的三个。文案与视频分开是因为它们说的是不同模态的事
+  // ——把「视频渠道不是 CLI 的 provider」原样丢给音频用户是错的。
+  "capability.audio_no_config_write": "音频渠道不是 CLI 的 provider，不写任何客户端配置。",
+  "capability.audio_model_test_separate": "音频的模型测试走语音合成链路，不在账号页的模型测试里。",
+  "capability.audio_not_an_agent": "音频渠道没有终端与会话概念，不能启动或续跑 Agent。",
 };
 
 export function findPlatformCapability(

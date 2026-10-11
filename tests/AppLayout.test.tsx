@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { act } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppLayout } from "../src/components/layout/AppLayout";
+import { createDefaultAgentVisibility } from "../src/lib/agentVisibility";
 import { I18nProvider } from "../src/lib/i18n";
 
 function dispatchPointerEvent(
@@ -138,6 +139,7 @@ describe("AppLayout", () => {
         <AppLayout
           activeScreen="Codex"
           agentVisibility={{
+            ...createDefaultAgentVisibility(),
             codex: true,
             claude: false,
             grok: true,

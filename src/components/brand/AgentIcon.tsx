@@ -10,7 +10,9 @@ export type AgentIconPlatform =
   | "hermes"
   /// 视频渠道。不是某个厂商的品牌图标，而是「视频」这个模态的通用图标——
   /// 这一屏下面挂着 5 个上游方言（可灵 / 方舟 / MiniMax / 智谱 / Sora）。
-  | "video";
+  | "video"
+  /// 音频渠道（TTS）。同样是模态通用图标，不是某个厂商的品牌图标。
+  | "audio";
 
 type AgentIconProps = {
   platform: AgentIconPlatform;
@@ -160,6 +162,39 @@ function VideoAgentSvg({ size = "100%" }: AgentSvgProps) {
   );
 }
 
+/// 音频（TTS）的模态图标：一个扬声器 + 两道声波。
+function AudioAgentSvg({ size = "100%" }: AgentSvgProps) {
+  return (
+    <svg
+      fill="none"
+      height={size}
+      style={baseAgentSvgStyle}
+      viewBox="0 0 24 24"
+      width={size}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path
+        d="M4 9.4h3.1L11.9 5.5v13L7.1 14.6H4z"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="1.8"
+      />
+      <path
+        d="M15.5 9.3a3.9 3.9 0 010 5.4"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.8"
+      />
+      <path
+        d="M18.3 6.7a7.6 7.6 0 010 10.6"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.8"
+      />
+    </svg>
+  );
+}
+
 function HermesAgentSvg({ size = "100%" }: AgentSvgProps) {
   return (
     <svg
@@ -190,7 +225,8 @@ export function AgentIcon({ platform, className }: AgentIconProps) {
     platform === "gemini" ? <GeminiAgentSvg /> :
     platform === "opencode" ? <OpenCodeAgentSvg /> :
     platform === "openclaw" ? <OpenClawAgentSvg /> :
-    platform === "video" ? <VideoAgentSvg /> : <HermesAgentSvg />;
+    platform === "video" ? <VideoAgentSvg /> :
+    platform === "audio" ? <AudioAgentSvg /> : <HermesAgentSvg />;
 
   return <span aria-hidden="true" className={iconClassName}>{icon}</span>;
 }

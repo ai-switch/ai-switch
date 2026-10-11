@@ -30,6 +30,7 @@ import {
 import { I18nProvider } from "../src/lib/i18n";
 import { createQueryClient } from "../src/lib/query/queryClient";
 import { SettingsScreen } from "../src/screens/SettingsScreen";
+import { createDefaultAgentVisibility } from "../src/lib/agentVisibility";
 import { settingsFixture } from "../src/test/fixtures";
 
 vi.mock("../src/lib/api/client", () => ({
@@ -227,6 +228,7 @@ describe("SettingsScreen", () => {
         <I18nProvider initialLanguage="zh-CN">
           <SettingsScreen
             agentVisibility={{
+              ...createDefaultAgentVisibility(),
               codex: true,
               claude: true,
               grok: true,
