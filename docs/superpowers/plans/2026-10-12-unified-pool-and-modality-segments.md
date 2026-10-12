@@ -71,22 +71,51 @@
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
-| **P1** | codex 页模态分段器 + 去掉视频/音频导航项 + 生图段 | ✅ 本次（纯前端） |
-| **P2** | key 统一：`resolve_platform` 让「路径定的模态」优先于 key 的平台（一张 key 通吃） | ⬜ 未做 |
+| **P1** | codex 页模态分段器 + 去掉视频/音频导航项 + 生图段 | ✅ 完成（纯前端，`631cf64`） |
+| **P2** | ~~key 统一：`resolve_platform` 让「路径定的模态」优先~~ | ✅ **已实现，但走的是更彻底的路**（`7f5880b`，见下） |
+| **P2.5** | 模态账号禁通配映射（保住池不串味） | ✅ 完成（`c3503cc`） |
 | **P3** | SaaS 组支持平台集合（一个 key 多模态） | ⬜ 未做，代价高 |
 | **P4** | 统一账号池 + provider 分组 + 智能体对接页 | ⬜ 未做（用户方向） |
 
-### P2 的现状与代价
+### P2 实际走的路：模态成为账号属性（而非只改 key 解析）
 
-- **直连侧小**：端点路径唯一确定模态（`/v1/video/*` → video 池、`/v1/audio/speech` → audio 池），
-  所以只需在 `resolve_platform` 里加一步「路径定的模态优先」。改完 `sk-ai-switch-codex`
-  就能直接调视频 / 音频端点。
-- **SaaS 侧大**：`saas_api_keys.group_id` → `route_pool_groups.platform` 是**单值**，
-  一个 key 绑一个组 = 一个平台。要跨模态得让组支持平台集合，动到计费全链
-  （`reserve_*` 全按 `groups.platform=?`）、模型同步、6 处白名单。
-  **而且按模态分 key 在 SaaS 侧是特性不是缺陷**：组的 `multiplier_micros` /
-  `timeout_seconds` / `max_concurrency` / 订阅开关本来就按模态不同（视频 300s、文本 60s、
-  计费单位分别是条 / 秒 / 字符）。
+原计划的 P2 只动 `resolve_platform`：让「路径定的模态」优先于 key 的平台，改完
+`sk-ai-switch-codex` 就能调视频端点。**代价小，但 `PlatformId` 里仍然留着
+`Video` / `Audio` 两个变体** —— 「模态是平台」这个根因还在，每加一个模态还是要多
+一个变体、多处穷尽 match、一套能力矩阵。
+
+用户指出这点后改成**直接取消 video/audio 平台值**：模态降为账号的一个分类，
+靠 `model_mappings[*].capabilities` 里的能力声明识别。用户同时拍板**不做数据迁移**
+（video/audio 账号版本从未发布）。
+
+```
+账号
+ ├─ platform      = 池身份（codex / claude / gemini / …）   ← 与哪个 CLI 用、哪张 key、哪个 SaaS 组
+ ├─ interface_format = 协议族（openai / kling / ark / …）    ← 已有独立字段
+ └─ capabilities  = 模态分类（video.generate / audio.generate / image.generate）
+```
+
+**收益**：
+
+- `CodexChannelsScreen` 四段**全部**是 `AccountsScreen(platform="codex")`，区别只在
+  `capabilityFilter` —— 删掉 `VideoChannelsScreen` / `AudioChannelsScreen` 两屏。
+- 一把 codex key 天然能打所有模态端点（视频/音频账号就在 codex 池里）。
+- SaaS 一个 `codex` 组可同时卖文本、生图、视频与 TTS，单价挂在
+  `saas_group_models` 的对应列上。
+
+**代价（必须记住的一条）**：池不再按平台隔离，文本请求的 `requested_capability`
+是 `None`（不过滤），只靠模型名精确匹配排除异类。所以**模态账号不得配 fallback
+映射**（`from == FALLBACK_MODEL_ALIAS`，字面量 `"claude-model"`，不是 `"*"`）——
+由 `validate_model_mappings` 在创建与更新两条路径上强制（P2.5）。
+这仍是结构保证而非配置纪律：`mapping_from_matches` 只做精确匹配、没有前缀通配，
+禁掉 fallback 后文本请求命中模态账号的唯一方式就是模型名完全相同。
+
+### P2 的现状与代价（SaaS 侧，P3）
+
+SaaS 的 key → 组 → 平台仍是**单值**。要一个 key 跨组/跨模态，得让组支持平台集合，
+动到计费全链、模型同步、6 处白名单。**而且按模态分 key 在 SaaS 侧是特性不是缺陷**：
+组的 `multiplier_micros` / `timeout_seconds` / `max_concurrency` / 订阅开关本来就
+按模态不同（视频 300s、文本 60s、计费单位分别是条/秒/字符）。
 
 ## 明确不做
 
@@ -97,8 +126,10 @@
 
 ## 验证
 
+- `cargo test --lib`：1988 passed / 0 failed / 13 ignored
+- `cargo check --no-default-features --features standalone-server --bin ai-switch-server`：0 error
 - `npx tsc --noEmit`：0 error
-- `npx vitest run`：全绿（新增 `CodexChannelsScreen` 4 例 + `ImageCapabilitySegment` 4 例）
+- `npx vitest run --no-file-parallelism`：970 passed / 0 failed（84 文件）
 
 > **环境注意**：本机 vitest 偶发**静默漏收整个测试文件** —— 沙箱的 brokered-fs shim
 > 在 worker 写临时模块缓存时报 `EPERM`，worker 挂掉后那个文件不计入统计，输出仍是
