@@ -7,11 +7,12 @@ use crate::error::AppError;
 use crate::models::batch::NewBatch;
 use crate::models::platform::{ApiDialect, PlatformId, PlatformOperation};
 use crate::models::route_credential::{
-    is_masked_secret_payload, normalize_anthropic_api_key_field, CopyRouteCredentialInput,
-    CreateApiRouteCredentialInput, ImportOfficialFilesInput, ImportOfficialTextInput, ModelMapping,
-    ReorderRouteCredentialInput, RouteCredential, RouteCredentialFailurePolicy,
-    RouteCredentialImportFailure, RouteCredentialImportResult, RouteCredentialPage,
-    RouteCredentialPageRequest, UpdateRouteCredentialInput, MAX_ROUTE_CREDENTIAL_COOLDOWN_SECONDS,
+    is_fallback_mapping, is_masked_secret_payload, normalize_anthropic_api_key_field,
+    CopyRouteCredentialInput, CreateApiRouteCredentialInput, ImportOfficialFilesInput,
+    ImportOfficialTextInput, ModelMapping, ReorderRouteCredentialInput, RouteCredential,
+    RouteCredentialFailurePolicy, RouteCredentialImportFailure, RouteCredentialImportResult,
+    RouteCredentialPage, RouteCredentialPageRequest, UpdateRouteCredentialInput,
+    MAX_ROUTE_CREDENTIAL_COOLDOWN_SECONDS,
 };
 use crate::models::route_credential_model::{
     RouteCredentialModelState, MODEL_STATUS_OK, MODEL_STATUS_PAUSED,
@@ -163,7 +164,10 @@ impl RouteCredentialService {
                 .map(|mode| json!(mode))
                 .as_ref(),
         )?;
-        validate_model_mappings(&input.model_mappings_json)?;
+        validate_model_mappings(
+            &input.model_mappings_json,
+            declares_modality_capability(&input.model_mappings_json),
+        )?;
         let fetched_models = parse_fetched_models_json(input.fetched_models_json.as_deref())?;
         let api_key_field =
             validate_api_key_field(input.api_key_field.as_deref(), &input.interface_format)?;
@@ -352,6 +356,17 @@ impl RouteCredentialService {
             })?;
         }
         let mut input = input;
+        // 模态账号禁 fallback 也覆盖**更新**路径：前端编辑抽屉保存的是整个
+        // `config_json`，不在这里拦就绕过了创建时的那道关。
+        if let Ok(config) = serde_json::from_str::<Value>(&input.config_json) {
+            if let Some(mappings) = config.get("model_mappings") {
+                let encoded = mappings.to_string();
+                validate_model_mappings(
+                    &encoded,
+                    declares_modality_capability(&encoded),
+                )?;
+            }
+        }
         // A client that was handed a masked payload instead of the real secret
         // must not be able to write the mask back: the paired phone loads the same
         // edit drawer, and saving it would otherwise destroy the stored api_key.
@@ -1390,7 +1405,28 @@ fn default_api_interface_format(platform: PlatformId) -> Option<&'static str> {
     }
 }
 
-fn validate_model_mappings(value: &str) -> Result<(), AppError> {
+/// 这个账号是不是「模态账号」—— `model_mappings` 里声明了 `video.generate` /
+/// `audio.generate` / `image.generate` 中的任何一个。
+///
+/// **这是池不串味的关键判据。** 模态账号与文本账号住在同一个池里，而文本请求不做
+/// 能力过滤，只靠模型名精确匹配排除异类；所以模态账号必须**显式列出模型**。
+fn declares_modality_capability(value: &str) -> bool {
+    const MODALITY_CAPABILITIES: [&str; 3] =
+        ["video.generate", "audio.generate", "image.generate"];
+    serde_json::from_str::<Vec<ModelMapping>>(value)
+        .map(|mappings| {
+            mappings.iter().any(|mapping| {
+                mapping.capabilities.iter().any(|capability| {
+                    MODALITY_CAPABILITIES
+                        .iter()
+                        .any(|known| capability.trim().eq_ignore_ascii_case(known))
+                })
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn validate_model_mappings(value: &str, is_modality_account: bool) -> Result<(), AppError> {
     let mappings: Vec<ModelMapping> = serde_json::from_str(value)?;
     if mappings
         .iter()
@@ -1409,6 +1445,25 @@ fn validate_model_mappings(value: &str) -> Result<(), AppError> {
         return Err(AppError::Validation {
             code: "validation.model_mapping",
             message: "Model mapping uses the upstream-model placeholder".to_string(),
+            details: Some(value.to_string()),
+            recoverable: true,
+        });
+    }
+    // **模态账号不得配 fallback 映射。**
+    //
+    // 它们与文本账号共用同一批候选，而文本请求的 `requested_capability` 是 `None`
+    // （不过滤），只靠 `model_matches` 的模型名匹配排除异类；`model_matches` 的判据
+    // 是「精确命中 **或** 存在 fallback」。所以一个配了 fallback 的模态账号会被
+    // **任何**模型名的文本请求命中 —— 那会把文本请求发到可灵 / 火山上游。
+    //
+    // 这不是在求用户自觉：`mapping_from_matches` 只做精确匹配（没有前缀通配），
+    // 禁掉 fallback 之后，文本请求命中模态账号的唯一方式就是模型名完全相同。
+    if is_modality_account && mappings.iter().any(is_fallback_mapping) {
+        return Err(AppError::Validation {
+            code: "validation.model_mapping_no_fallback",
+            message: "Video / audio / image accounts must list their models explicitly; \
+                      a catch-all mapping would swallow text requests sent to the same pool"
+                .to_string(),
             details: Some(value.to_string()),
             recoverable: true,
         });
@@ -1639,7 +1694,7 @@ mod tests {
 
     #[test]
     fn accepts_empty_model_mappings() {
-        assert!(validate_model_mappings("[]").is_ok());
+        assert!(validate_model_mappings("[]", false).is_ok());
     }
 
     #[test]
@@ -1659,8 +1714,9 @@ mod tests {
 
     #[test]
     fn rejects_placeholder_model_mapping() {
-        let error = validate_model_mappings(r#"[{"from":"gpt-5","to":"upstream-model"}]"#)
-            .expect_err("placeholder should be rejected");
+        let error =
+            validate_model_mappings(r#"[{"from":"gpt-5","to":"upstream-model"}]"#, false)
+                .expect_err("placeholder should be rejected");
 
         match error {
             AppError::Validation { code, message, .. } => {
@@ -1669,6 +1725,48 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// 模态账号（视频 / 音频 / 生图）**不得配 fallback 映射**。
+    ///
+    /// 这是池不串味的关键：它们与文本账号共用同一批候选，而文本请求不做能力过滤，
+    /// 只靠模型名精确匹配排除异类 —— `model_matches` 的判据却是「精确命中 **或**
+    /// 存在 fallback」。所以一个配了 fallback 的模态账号会被任何模型名的文本请求命中。
+    #[test]
+    fn modality_accounts_may_not_declare_a_catch_all_mapping() {
+        let with_fallback = format!(
+            r#"[{{"from":"{}","to":"kling-v1","capabilities":["video.generate"]}}]"#,
+            crate::models::route_credential::FALLBACK_MODEL_ALIAS
+        );
+        let error = validate_model_mappings(&with_fallback, true)
+            .expect_err("catch-all on a video account must be rejected");
+        assert_eq!(error.code(), "validation.model_mapping_no_fallback");
+
+        // 同样的映射放在**文本**账号上仍然合法 —— catch-all 对文本池是有用功能
+        assert!(validate_model_mappings(&with_fallback, false).is_ok());
+
+        // 模态账号只列显式模型时通过
+        assert!(validate_model_mappings(
+            r#"[{"from":"kling-v1","to":"kling-v1","capabilities":["video.generate"]}]"#,
+            true,
+        )
+        .is_ok());
+    }
+
+    /// `declares_modality_capability` 是上面那条校验的判据，三种模态都要认，
+    /// 且大小写不敏感（与后端 SQL 谓词的 `lower(...) = ?` 对齐）。
+    #[test]
+    fn detects_modality_accounts_from_their_capabilities() {
+        for capability in ["video.generate", "audio.generate", "image.generate"] {
+            let encoded = format!(r#"[{{"from":"m","to":"m","capabilities":["{capability}"]}}]"#);
+            assert!(declares_modality_capability(&encoded), "{capability}");
+        }
+        // 纯文本账号与脏配置都不算
+        assert!(!declares_modality_capability(
+            r#"[{"from":"gpt-5","to":"gpt-5"}]"#
+        ));
+        assert!(!declares_modality_capability("not json"));
+        assert!(!declares_modality_capability("[]"));
     }
 
     #[test]
