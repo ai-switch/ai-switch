@@ -604,6 +604,9 @@ export type RouteCredentialPageRequest = {
   filters: string[];
   pool_scope: RouteCredentialPoolScope;
   group_id?: string | null;
+  /// 只列声明了该能力的账号（`model_mappings[*].capabilities`）。codex 页的
+  /// 「生图」段靠它把生图账号从池里筛出来；不传则与从前完全一致。
+  capability?: string | null;
 };
 
 export type ReorderRouteCredentialInput = {
@@ -615,6 +618,8 @@ export type ReorderRouteCredentialInput = {
   filters: string[];
   pool_scope: RouteCredentialPoolScope;
   page_size: number;
+  /// 与分页请求同义：拖拽排序后要回到同一批账号。
+  capability?: string | null;
 };
 
 export type RoutePoolUsageLog = {

@@ -10,7 +10,18 @@ import {
 // 四段的实体各自有测试，这里只测**外壳**：分段器、默认段、记忆、以及每段渲染的是谁。
 // 把实体 mock 掉也让这一屏不必拖进 AccountsScreen 那几十个 API 依赖。
 vi.mock("../src/screens/AccountsScreen", () => ({
-  AccountsScreen: ({ platform }: { platform?: string }) => <div>accounts:{platform}</div>,
+  AccountsScreen: ({
+    platform,
+    capabilityFilter,
+  }: {
+    platform?: string;
+    capabilityFilter?: string;
+  }) => (
+    <div>
+      accounts:{platform}
+      {capabilityFilter ? `:${capabilityFilter}` : ""}
+    </div>
+  ),
 }));
 vi.mock("../src/screens/VideoChannelsScreen", () => ({
   VideoChannelsScreen: ({ embedded }: { embedded?: boolean }) => (
@@ -51,11 +62,15 @@ describe("CodexChannelsScreen", () => {
   });
 
   /// 视频 / 音频段嵌在 codex 页里，所以要进 `embedded` 模式（标题由外层给）。
+  ///
+  /// 生图段**不是一个只读视图**：它复用账号管理屏、把列表按 `image.generate` 筛过，
+  /// 所以那里应当出现 `accounts:codex:image.generate`，而不是通用段那一个。
   it("swaps the body and embeds the channel screens", async () => {
     renderScreen();
 
     await userEvent.click(screen.getByRole("tab", { name: "生图" }));
     expect(screen.getByText("image-segment")).toBeInTheDocument();
+    expect(screen.getByText("accounts:codex:image.generate")).toBeInTheDocument();
     expect(screen.queryByText("accounts:codex")).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("tab", { name: "视频" }));

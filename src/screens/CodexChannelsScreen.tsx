@@ -124,10 +124,16 @@ export function CodexChannelsScreen({
       ) : null}
 
       {segment === "image" ? (
-        <ImageCapabilitySegment
-          imageGenerationEnabled={imageGenerationEnabled}
-          onOpenImageStudio={onOpenImageStudio}
-        />
+        <div className="space-y-3">
+          <ImageCapabilitySegment
+            imageGenerationEnabled={imageGenerationEnabled}
+            onOpenImageStudio={onOpenImageStudio}
+          />
+          {/* 生图账号就是 codex 池里**声明了 `image.generate` 的账号**，所以这里
+              直接复用账号管理屏、只把列表按能力筛过 —— 与「通用」段是同一套增删改查，
+              区别只在 `capabilityFilter`。 */}
+          <AccountsScreen capabilityFilter="image.generate" platform="codex" />
+        </div>
       ) : null}
 
       {segment === "video" ? (

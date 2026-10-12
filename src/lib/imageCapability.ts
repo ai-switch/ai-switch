@@ -30,7 +30,11 @@ export function imageCapableModels(configJson: string): string[] {
       continue;
     }
     const capabilities = Array.isArray(row.capabilities) ? row.capabilities : [];
-    if (capabilities.includes("image.generate")) {
+    // 大小写不敏感，与后端 `push_capability_predicate` 的 `lower(...) = ?` 对齐。
+    const declares = capabilities.some(
+      (value) => typeof value === "string" && value.trim().toLowerCase() === "image.generate",
+    );
+    if (declares) {
       models.push(from);
     }
   }
@@ -48,4 +52,48 @@ export function poolImageModels(
     }
   }
   return [...models];
+}
+
+/** 一个账号 `model_mappings` 里声明过的全部能力（去重、小写化）。 */
+export function declaredCapabilities(configJson: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(configJson);
+  } catch {
+    return [];
+  }
+  const mappings = (parsed as { model_mappings?: unknown } | null)?.model_mappings;
+  if (!Array.isArray(mappings)) {
+    return [];
+  }
+  const capabilities = new Set<string>();
+  for (const item of mappings) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const rows = (item as { capabilities?: unknown }).capabilities;
+    if (!Array.isArray(rows)) {
+      continue;
+    }
+    for (const value of rows) {
+      if (typeof value === "string" && value.trim()) {
+        capabilities.add(value.trim().toLowerCase());
+      }
+    }
+  }
+  return [...capabilities];
+}
+
+/**
+ * 一个账号是否声明了某个能力（大小写不敏感）。
+ *
+ * 与后端 `push_capability_predicate` 同义 —— 那边写的是 `lower(declared.value) = ?`。
+ * 两边必须一致，否则「生图段显示为空、后端却认为有账号」这种分叉会很难查。
+ */
+export function declaresCapability(configJson: string, capability: string): boolean {
+  const normalized = capability.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return declaredCapabilities(configJson).includes(normalized);
 }

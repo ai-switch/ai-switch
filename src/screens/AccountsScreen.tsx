@@ -60,7 +60,7 @@ import { CodexOAuthDialog } from "../components/accounts/CodexOAuthDialog";
 import { CodexBaselineModelsDialog } from "../components/accounts/CodexBaselineModelsDialog";
 import { DirectModeDialog, hasAcceptedDirectModeNotice, rememberDirectModeNotice } from "../components/accounts/DirectModeDialog";
 import type { DirectModeStatus } from "../lib/api/types";
-import { poolImageModels as poolImageModelsOf } from "../lib/imageCapability";
+import { declaresCapability, poolImageModels as poolImageModelsOf } from "../lib/imageCapability";
 import { ConfigWriteTargetsDialog } from "../components/accounts/ConfigWriteTargetsDialog";
 import { FormTabs, type FormTab } from "../components/accounts/FormTabs";
 import { RouteCredentialExportDialog } from "../components/accounts/RouteCredentialExportDialog";
@@ -706,6 +706,14 @@ type AccountsScreenProps = {
     scope: "in_pool" | "out_of_pool";
     nonce: number;
   } | null;
+  /// 只列**声明了该能力**的账号（`model_mappings[*].capabilities`）。
+  ///
+  /// codex 页的模态分段器用它复用这一屏：生图段传 `image.generate`，于是同一套
+  /// 增删改查、同样的模型映射编辑器，只是列表被能力筛过。生图没有自己的平台，
+  /// 所以「哪些账号能出图」只能这么问。
+  ///
+  /// 过滤在服务端做（分页与总数都在 SQL 里算），前端过滤会让页数失真。
+  capabilityFilter?: string;
 };
 
 const platformLabels: Record<PlatformKey, string> = {
@@ -3331,6 +3339,7 @@ export function AccountsScreen({
   sidebarCollapsed = false,
   onPoolScopeFocusConsumed,
   poolScopeFocus = null,
+  capabilityFilter,
 }: AccountsScreenProps) {
   const queryClient = useQueryClient();
   const activePlatform = platform;
@@ -3879,6 +3888,7 @@ export function AccountsScreen({
       accountPage,
       accountPageSize,
       accountFilters,
+      capabilityFilter ?? null,
     ],
     queryFn: async () => {
       if (typeof listRouteCredentialPage === "function") {
@@ -3889,6 +3899,7 @@ export function AccountsScreen({
           filters: accountFilters,
           pool_scope: accountScope,
           group_id: accountGroupId,
+          capability: capabilityFilter ?? null,
         });
         if (page && Array.isArray(page.items)) {
           return page;
@@ -3903,9 +3914,14 @@ export function AccountsScreen({
           ? !item.archived_at && draftPoolIds.has(item.id)
           : !item.archived_at && !draftPoolIds.has(item.id);
       });
-      const filtered = accountFilters.length
-        ? scoped.filter((item) => accountFilters.includes(credentialBatchFilterKey(item)))
+      // 能力过滤在服务端做（分页与总数都在 SQL 里算）；这里只是没有分页 command
+      // 时的等价回退，与后端 `push_capability_predicate` 同义。
+      const capable = capabilityFilter
+        ? scoped.filter((item) => declaresCapability(item.config_json, capabilityFilter))
         : scoped;
+      const filtered = accountFilters.length
+        ? capable.filter((item) => accountFilters.includes(credentialBatchFilterKey(item)))
+        : capable;
       const start = (accountPage - 1) * accountPageSize;
       return {
         items: filtered.slice(start, start + accountPageSize),
@@ -4532,6 +4548,7 @@ export function AccountsScreen({
         accountPageSize,
         accountFilters,
         poolMemberKey,
+        capabilityFilter ?? null,
       ],
       (current) => {
         if (!current) return current;
@@ -5861,6 +5878,7 @@ export function AccountsScreen({
           page.page_size,
           accountFilters,
           poolMemberKey,
+          capabilityFilter ?? null,
         ],
         page,
       );
@@ -6014,6 +6032,7 @@ export function AccountsScreen({
       filters: accountFilters,
       pool_scope: accountScope,
       page_size: accountPageSize,
+      capability: capabilityFilter ?? null,
     });
   };
 

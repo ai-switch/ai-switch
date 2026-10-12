@@ -141,6 +141,28 @@ fn push_filter_predicate(builder: &mut QueryBuilder<Sqlite>, filters: &[String])
     builder.push(")");
 }
 
+/// 只保留「声明了该能力」的账号（`config_json.model_mappings[*].capabilities` 含它）。
+///
+/// codex 页的模态分段器靠它把生图账号从池里筛出来。写的是 SQL 而不是前端过滤，
+/// 因为分页（`total` / `page_count` / 翻页边界）全在 SQL 里算 —— 前端过滤会让
+/// 总数与页数失真，翻页也会漏。
+///
+/// 认不出的 `config_json` 不算错：`json_extract` 拿不到 `model_mappings` 就返回
+/// NULL，`json_each(NULL)` 是空集，于是那个账号只是**不被选中**，而不是让整个查询
+/// 报错。这与 `imageCapableModels`（前端同义函数）的「脏配置跳过」一致。
+fn push_capability_predicate(builder: &mut QueryBuilder<Sqlite>, capability: Option<&str>) {
+    let Some(capability) = capability.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    builder.push(
+        " AND EXISTS (SELECT 1 FROM json_each(json_extract(rc.config_json, '$.model_mappings')) mapping \
+             WHERE EXISTS (SELECT 1 FROM json_each(json_extract(mapping.value, '$.capabilities')) declared \
+               WHERE lower(declared.value) = ",
+    );
+    builder.push_bind(capability.to_ascii_lowercase());
+    builder.push("))");
+}
+
 fn push_pool_scope_predicate(
     builder: &mut QueryBuilder<Sqlite>,
     scope: RouteCredentialPoolScope,
@@ -202,6 +224,7 @@ async fn boundary_id(
     query.push_bind(&request.platform);
     push_pool_scope_predicate(&mut query, request.pool_scope, request.group_id.as_deref());
     push_filter_predicate(&mut query, &request.filters);
+    push_capability_predicate(&mut query, request.capability.as_deref());
     query
         .push(" ORDER BY rc.sort_order ASC, rc.created_at DESC LIMIT 1 OFFSET ")
         .push_bind(offset);
@@ -1065,6 +1088,7 @@ impl RouteCredentialRepository {
             request.group_id.as_deref(),
         );
         push_filter_predicate(&mut count_query, &request.filters);
+        push_capability_predicate(&mut count_query, request.capability.as_deref());
         let total: i64 = count_query
             .build_query_scalar()
             .fetch_one(pool)
@@ -1094,6 +1118,7 @@ impl RouteCredentialRepository {
             request.group_id.as_deref(),
         );
         push_filter_predicate(&mut item_query, &request.filters);
+        push_capability_predicate(&mut item_query, request.capability.as_deref());
         item_query
             .push(" GROUP BY rc.id ORDER BY rc.sort_order ASC, rc.created_at DESC LIMIT ")
             .push_bind(page_size)
@@ -1322,6 +1347,7 @@ impl RouteCredentialRepository {
                 filters: input.filters,
                 pool_scope: input.pool_scope,
                 group_id: input.group_id,
+                capability: input.capability,
             },
         )
         .await
@@ -2432,6 +2458,21 @@ mod tests {
         platform: &str,
         display_name: &str,
     ) -> RouteCredential {
+        create_api_credential_with_config(
+            pool,
+            platform,
+            display_name,
+            r#"{"base_url":"https://example.com","interface_format":"openai","model_mappings":[]}"#,
+        )
+        .await
+    }
+
+    async fn create_api_credential_with_config(
+        pool: &SqlitePool,
+        platform: &str,
+        display_name: &str,
+        config_json: &str,
+    ) -> RouteCredential {
         RouteCredentialRepository::create(
             pool,
             platform,
@@ -2441,7 +2482,7 @@ mod tests {
             "ok",
             None,
             r#"{"api_key":"sk-test"}"#,
-            r#"{"base_url":"https://example.com","interface_format":"openai","model_mappings":[]}"#,
+            config_json,
             "{}",
         )
         .await
@@ -2460,6 +2501,7 @@ mod tests {
             filters: Vec::new(),
             pool_scope,
             group_id: None,
+            capability: None,
         }
     }
 
@@ -2505,6 +2547,7 @@ mod tests {
                 filters: Vec::new(),
                 pool_scope: RouteCredentialPoolScope::InPool,
                 group_id: Some(alternate_group),
+                capability: None,
             },
         )
         .await
@@ -2512,6 +2555,96 @@ mod tests {
 
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id, alternate_account);
+    }
+
+    /// 按能力过滤只留**声明了**该能力的账号。
+    ///
+    /// 这是 codex 页「生图」段的基础：生图没有自己的平台，它是池里账号的一个能力，
+    /// 所以「这个池里哪些账号能出图」只能从 `model_mappings[*].capabilities` 读。
+    ///
+    /// 断言里特意钉了两点：未声明的账号必须被排除（否则生图段会混进纯文本账号），
+    /// 且 `total` 必须跟着过滤走 —— 只过滤 `items` 而不过滤计数，前端会多出一页空白。
+    #[tokio::test]
+    async fn page_filters_accounts_by_declared_capability() {
+        let pool = crate::database::create_memory_pool().await.unwrap();
+        crate::database::run_migrations(&pool).await.unwrap();
+        let plain = create_api_credential(&pool, "codex", "Plain").await.id;
+        let image_only = create_api_credential_with_config(
+            &pool,
+            "codex",
+            "Image Only",
+            r#"{"base_url":"https://example.com","interface_format":"openai","model_mappings":[{"from":"gpt-image-2","to":"gpt-image-2","capabilities":["image.generate"]}]}"#,
+        )
+        .await
+        .id;
+        // 一个账号可以同时声明多个能力，也可以大小写不同
+        let mixed = create_api_credential_with_config(
+            &pool,
+            "codex",
+            "Mixed",
+            r#"{"base_url":"https://example.com","interface_format":"openai","model_mappings":[{"from":"gpt-5","to":"gpt-5","capabilities":["text.generate"]},{"from":"gpt-image-1","to":"gpt-image-1","capabilities":["Image.Generate"]}]}"#,
+        )
+        .await
+        .id;
+
+        let page = RouteCredentialRepository::page(
+            &pool,
+            RouteCredentialPageRequest {
+                platform: "codex".to_string(),
+                page: 1,
+                page_size: 20,
+                filters: Vec::new(),
+                pool_scope: RouteCredentialPoolScope::OutOfPool,
+                group_id: None,
+                capability: Some("image.generate".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut ids = page
+            .items
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        let mut expected = vec![image_only, mixed];
+        expected.sort();
+        assert_eq!(ids, expected);
+        assert!(!ids.contains(&plain), "未声明能力的账号不该出现");
+        assert_eq!(page.total, 2, "total 必须跟着过滤走");
+    }
+
+    /// 不传能力时行为与从前完全一致 —— 这条过滤是纯增量。
+    #[tokio::test]
+    async fn page_without_capability_returns_every_account() {
+        let pool = crate::database::create_memory_pool().await.unwrap();
+        crate::database::run_migrations(&pool).await.unwrap();
+        create_api_credential(&pool, "codex", "Plain").await;
+        create_api_credential_with_config(
+            &pool,
+            "codex",
+            "Image Only",
+            r#"{"base_url":"https://example.com","interface_format":"openai","model_mappings":[{"from":"gpt-image-2","to":"gpt-image-2","capabilities":["image.generate"]}]}"#,
+        )
+        .await;
+
+        let page = RouteCredentialRepository::page(
+            &pool,
+            RouteCredentialPageRequest {
+                platform: "codex".to_string(),
+                page: 1,
+                page_size: 20,
+                filters: Vec::new(),
+                pool_scope: RouteCredentialPoolScope::OutOfPool,
+                group_id: None,
+                capability: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(page.total, 2);
     }
 
     async fn record_request(
@@ -3634,6 +3767,7 @@ mod tests {
                 filters: Vec::new(),
                 pool_scope: RouteCredentialPoolScope::InPool,
                 page_size: 20,
+                capability: None,
             },
         )
         .await
@@ -3691,6 +3825,7 @@ mod tests {
                 filters: Vec::new(),
                 pool_scope: RouteCredentialPoolScope::OutOfPool,
                 page_size: 20,
+                capability: None,
             },
         )
         .await
@@ -3732,6 +3867,7 @@ mod tests {
                 filters: Vec::new(),
                 pool_scope: RouteCredentialPoolScope::OutOfPool,
                 page_size: 20,
+                capability: None,
             },
         )
         .await

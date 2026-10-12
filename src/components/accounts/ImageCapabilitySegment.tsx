@@ -1,26 +1,25 @@
 import { useQuery } from "@tanstack/react-query";
 import { ExternalLink } from "lucide-react";
 import { EndpointRow } from "./ConfigWriteTargetsDialog";
-import { getRouteProxyKey, getRouteProxyStatus, listRouteCredentials } from "../../lib/api/client";
-import { imageCapableModels } from "../../lib/imageCapability";
+import { getRouteProxyKey, getRouteProxyStatus } from "../../lib/api/client";
 import { useI18n } from "../../lib/i18n";
 import { imageGenerationEndpoint } from "../../lib/routeProxyEndpoint";
 
-/// 生图段服务的池。生图**没有自己的平台**，它挂在文本池上 —— 这两个是唯一有生图
-/// 桥接分支的方言（openai 直通 / openai-responses 转 Responses / gemini 转
-/// generateContent，见 `route_protocol_bridge`）。
-const IMAGE_POOLS = ["codex", "gemini"] as const;
-
 /**
- * 「生图」段：本池的生图能力视图 + 接入信息。
+ * 「生图」段的**接入信息**。
  *
- * 与「视频」「TTS」两段不同，这一屏**不管理账号** —— 因为生图账号就是文本账号
- * （同一个 key、同一个 Base URL），在「通用」段里勾一下模型映射的「图片生成」能力
- * 就够了。这里要做的是把**那个能力**摊出来：端点是什么、哪些账号有、能用哪些模型。
+ * 生图没有自己的平台：它是池里账号的一个能力，端点是 `/v1/images/generations`，
+ * 与文本共用同一个 Base URL 和同一张 key。这一段只负责把**那个能力**摊出来
+ * —— 端点是什么、用哪张 key、编辑有什么限制。
  *
- * 这也是生图此前最大的问题：链路一直是通的，但界面上没有地方能知道
- * `/v1/images/generations` 存在（那个「生图」导航入口是站内工作台，还被插件开关
- * 挡着）。所以这一屏的重点是**可发现性**，不是增删改。
+ * **账号本身由同一个段里的账号管理屏负责**：`CodexChannelsScreen` 把 `AccountsScreen`
+ * 用 `capabilityFilter="image.generate"` 挂在下面，于是生图段有和「通用」段一样的
+ * 增删改查，只是列表被能力筛过。
+ *
+ * 这里此前是一个**只读**列表，理由是「生图账号就是文本账号」。那个判断是错的：
+ * 专业生图模型（`gpt-image-2` 之类）走的是**独立的生图端点**，与 chat 模型不是
+ * 一回事 —— 同一个上游也应当分开建账号，否则「这个账号是给文本用的还是给生图用的」
+ * 在界面上无从表达。
  */
 export function ImageCapabilitySegment({
   imageGenerationEnabled,
@@ -30,15 +29,6 @@ export function ImageCapabilitySegment({
   onOpenImageStudio?: () => void;
 }) {
   const { t } = useI18n();
-  // 生图挂在文本池上，所以两个池都要看：用户可能在 codex 池里配，也可能在 gemini 池里。
-  const codexQuery = useQuery({
-    queryKey: ["image-segment-credentials", "codex"],
-    queryFn: () => listRouteCredentials("codex"),
-  });
-  const geminiQuery = useQuery({
-    queryKey: ["image-segment-credentials", "gemini"],
-    queryFn: () => listRouteCredentials("gemini"),
-  });
   const statusQuery = useQuery({
     queryKey: ["route-proxy-status"],
     queryFn: getRouteProxyStatus,
@@ -48,23 +38,10 @@ export function ImageCapabilitySegment({
     queryFn: () => getRouteProxyKey("codex"),
   });
 
-  const pools = IMAGE_POOLS.map((platform) => {
-    const credentials = (platform === "codex" ? codexQuery.data : geminiQuery.data) ?? [];
-    const accounts = credentials
-      .map((credential) => ({
-        credential,
-        models: imageCapableModels(credential.config_json),
-      }))
-      .filter((item) => item.models.length > 0);
-    return { platform, accounts };
-  });
-  const totalAccounts = pools.reduce((sum, pool) => sum + pool.accounts.length, 0);
-
   const status = statusQuery.data;
   const ready = Boolean(status?.running && status?.route_access_enabled);
-  const endpoint = ready && status?.base_url
-    ? imageGenerationEndpoint(status.base_url, "codex")
-    : null;
+  const endpoint =
+    ready && status?.base_url ? imageGenerationEndpoint(status.base_url, "codex") : null;
 
   return (
     <section className="space-y-3">
@@ -93,39 +70,9 @@ export function ImageCapabilitySegment({
         </p>
       </div>
 
-      <div className="border border-stone-200 bg-white px-3 py-3 shadow-sm">
-        <h2 className="text-[13px] font-semibold text-stone-950">
-          {t("imageSegment.accounts")}
-        </h2>
-        {totalAccounts === 0 ? (
-          <p className="mt-1 text-[12px] text-stone-500">{t("imageSegment.noAccounts")}</p>
-        ) : (
-          <div className="mt-2 space-y-1.5">
-            {pools.map((pool) =>
-              pool.accounts.map(({ credential, models }) => (
-                <div
-                  className="flex flex-wrap items-center gap-2 border-t border-stone-100 pt-1.5 text-[12px]"
-                  key={`${pool.platform}-${credential.id}`}
-                >
-                  <span className="font-semibold text-stone-800">
-                    {credential.display_name}
-                  </span>
-                  {/* 池名要标出来：同一个上游可能在 codex 池和 gemini 池各有一个账号 */}
-                  <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-semibold text-stone-600">
-                    {pool.platform}
-                  </span>
-                  <span className="font-mono text-[11px] text-stone-500">
-                    {models.join("、")}
-                  </span>
-                </div>
-              )),
-            )}
-          </div>
-        )}
-        <p className="mt-2 text-[11px] leading-5 text-stone-500">
-          {t("imageSegment.manageHint")}
-        </p>
-      </div>
+      <p className="text-[11px] leading-5 text-stone-500">
+        {t("imageSegment.manageHint")}
+      </p>
 
       <div className="flex items-center gap-2">
         {imageGenerationEnabled ? (

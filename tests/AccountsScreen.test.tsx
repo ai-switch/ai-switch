@@ -1656,6 +1656,8 @@ describe("AccountsScreen", () => {
         filters: [],
         pool_scope: "out_of_pool",
         page_size: 20,
+        // 拖拽排序要回同一批账号，所以能力过滤跟着走（这里没有过滤，故为 null）
+        capability: null,
       }),
     );
     expect(screen.queryByTestId("account-drop-placeholder")).not.toBeInTheDocument();
@@ -1688,6 +1690,8 @@ describe("AccountsScreen", () => {
         filters: [],
         pool_scope: "out_of_pool",
         page_size: 20,
+        // 拖拽排序要回同一批账号，所以能力过滤跟着走（这里没有过滤，故为 null）
+        capability: null,
       }),
     );
   });
@@ -2251,6 +2255,8 @@ describe("AccountsScreen", () => {
         filters: [],
         pool_scope: "out_of_pool",
         page_size: 20,
+        // 拖拽排序要回同一批账号，所以能力过滤跟着走（这里没有过滤，故为 null）
+        capability: null,
       }),
     );
   });
@@ -2277,6 +2283,8 @@ describe("AccountsScreen", () => {
         filters: [],
         pool_scope: "out_of_pool",
         page_size: 20,
+        // 拖拽排序要回同一批账号，所以能力过滤跟着走（这里没有过滤，故为 null）
+        capability: null,
       }),
     );
   });

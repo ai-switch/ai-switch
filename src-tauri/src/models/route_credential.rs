@@ -375,6 +375,15 @@ pub struct RouteCredentialPageRequest {
     pub pool_scope: RouteCredentialPoolScope,
     #[serde(default)]
     pub group_id: Option<String>,
+    /// 只保留「声明了该能力」的账号 —— 即 `config_json.model_mappings[*].capabilities`
+    /// 里含它（大小写不敏感）。codex 页的模态分段器用它把**生图账号**从池里筛出来。
+    ///
+    /// 与 `filters`（批次）正交：那是「哪个批次」，这是「哪种模态」。两者是 AND。
+    ///
+    /// 为什么过滤放在服务端而不是前端：分页在服务端做（`page` / `total` / `page_count`
+    /// 都是 SQL 算出来的），前端过滤会让总数与页数失真。
+    #[serde(default)]
+    pub capability: Option<String>,
 }
 
 impl RouteCredentialPageRequest {
@@ -422,6 +431,10 @@ pub struct ReorderRouteCredentialInput {
     #[serde(default)]
     pub pool_scope: RouteCredentialPoolScope,
     pub page_size: i64,
+    /// 与 `RouteCredentialPageRequest::capability` 同义：拖拽排序后要回**同一批**
+    /// 账号，少了它，模态段里拖一次就会跳回不带过滤的整页。
+    #[serde(default)]
+    pub capability: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
