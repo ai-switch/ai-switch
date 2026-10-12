@@ -1070,23 +1070,22 @@ mod tests {
         assert_eq!(preview.counts.duplicates, 1);
     }
 
-    /// 视频渠道可以走导入进来：**平台是 `video`，供应商在 `interface_format` 里**。
+    /// 视频账号可以走导入进来：**平台是池身份（`codex`），模态在能力里**，
+    /// 供应商则在 `interface_format`。
     ///
-    /// 侧边栏「视频」屏（`VideoChannelsScreen`）也能新增视频渠道，但导入是**批量**
-    /// 那条路，且它依赖 `all_with_media()` 参与去重——少了它，同一路媒体账号会被
-    /// 重复导入。
+    /// 导入是**批量**那条路，去重依赖平台清单 —— 少一项，同一路账号会被重复导入。
     #[tokio::test]
     async fn video_channels_are_importable_with_their_upstream_dialect() {
         let pool = migrated_pool().await;
 
-        let mut kling = compatibility_item_with_dialect("video", "kling", "openai-compatibility");
+        let mut kling = compatibility_item_with_dialect("codex", "kling", "openai-compatibility");
         kling.insert(
             "api-key-entries".to_string(),
             json!([{"api-key": "kling-key-material"}]),
         );
         // 别名（`seedance` → Ark）在导入时原样保留，由 `videogen` 的
         // `dialect_from_interface_format` 认——这样导入不承担归一化的责任。
-        let mut seedance = compatibility_item_with_dialect("video", "seedance", "openai-compatibility");
+        let mut seedance = compatibility_item_with_dialect("codex", "seedance", "openai-compatibility");
         seedance.insert(
             "api-key-entries".to_string(),
             json!([{"api-key": "seedance-key-material"}]),
@@ -1134,8 +1133,8 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                ("video".to_string(), "kling".to_string()),
-                ("video".to_string(), "seedance".to_string()),
+                ("codex".to_string(), "kling".to_string()),
+                ("codex".to_string(), "seedance".to_string()),
             ]
         );
     }
@@ -2043,10 +2042,10 @@ pub async fn preview_route_credential_import(
     input: PreviewRouteCredentialImportInput,
 ) -> Result<RouteCredentialImportPreview, AppError> {
     let normalized = normalize_transfer_items(&input.text, &input.ambiguous_platform_choices)?;
-    // 用 `all_with_media()` 而不是 `ALL`：视频与音频渠道也是本地账号池的一员，
-    // 导入去重必须把它们算进来，否则同一路媒体账号会被重复导入。
+    // 平台清单只有池身份 —— 视频 / 音频**不是平台**，它们住在账号的模态分类里，
+    // 所以媒体账号的 `platform` 列写的也是 `codex`（或别的池），自然落在 `ALL` 里。
     // 凭据的 `platform` 列写的就是 `PlatformId::as_str()`，两边字面量一致。
-    let platforms = PlatformId::all_with_media()
+    let platforms = PlatformId::ALL
         .iter()
         .map(|platform| platform.as_str().to_string())
         .collect::<Vec<_>>();
@@ -3507,12 +3506,17 @@ fn resolve_api_target(
         .map_err(|issue| (issue, true))?;
 
     let mut cpa_section = section_hint.map(str::to_string);
-    // 媒体条目（视频 / 音频）复用 `openai-compatibility` 分区（`api-key-entries` /
+    // 多模态条目（视频 / 音频）复用 `openai-compatibility` 分区（`api-key-entries` /
     // `base-url` 的提取都是按分区走的，另造分区就拿不到 key），但**分区隐含的文本
-    // 线协议对它们不适用**：媒体账号的 `interface_format` 是上游方言
-    // （视频：kling / ark / …；音频：openai）。
-    // 所以平台声明为媒体渠道时，跳过分区→方言的一致性检查。
-    let is_media_item = metadata.platform.is_some_and(|platform| platform.is_media());
+    // 线协议对它们不适用**：它们的 `interface_format` 是上游方言（视频：kling /
+    // ark / …；音频：openai）。
+    //
+    // 判据是**方言**，不是平台 —— 模态不是平台，多模态账号声明的 `platform` 就是
+    // 池身份（通常是 `codex`），靠平台区分不出来。
+    let is_media_item = metadata
+        .interface_format
+        .as_deref()
+        .is_some_and(is_media_dialect);
     let expected_dialect = if is_media_item {
         None
     } else {

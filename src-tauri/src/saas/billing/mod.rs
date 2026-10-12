@@ -128,7 +128,7 @@ pub async fn authenticate_key(
     }
     let mut transaction = pool.begin().await.map_err(db_error)?;
     config::require_enabled(&mut transaction).await?;
-    let principal: Option<ApiPrincipal> = sqlx::query_as("SELECT keys.user_id,keys.id AS key_id,keys.group_id,groups.platform FROM saas_api_keys keys JOIN saas_users users ON users.id=keys.user_id JOIN route_pool_groups groups ON groups.id=keys.group_id WHERE keys.token_hash=? AND keys.status='active' AND (keys.expires_at IS NULL OR keys.expires_at>?) AND users.status='active' AND (groups.platform IN ('codex','claude','gemini','video','audio')) AND groups.is_internal=0 AND groups.deleted_at IS NULL")
+    let principal: Option<ApiPrincipal> = sqlx::query_as("SELECT keys.user_id,keys.id AS key_id,keys.group_id,groups.platform FROM saas_api_keys keys JOIN saas_users users ON users.id=keys.user_id JOIN route_pool_groups groups ON groups.id=keys.group_id WHERE keys.token_hash=? AND keys.status='active' AND (keys.expires_at IS NULL OR keys.expires_at>?) AND users.status='active' AND (groups.platform IN ('codex','claude','gemini')) AND groups.is_internal=0 AND groups.deleted_at IS NULL")
         .bind(repository::hash_secret(plaintext_key)).bind(repository::now()).fetch_optional(&mut *transaction).await.map_err(db_error)?;
     transaction.commit().await.map_err(db_error)?;
     principal.ok_or_else(|| {

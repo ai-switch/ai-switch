@@ -1,26 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
+  AUDIO_CAPABILITY,
   AUDIO_DIALECTS,
   AUDIO_DIALECT_VALUES,
-  AUDIO_PLATFORM,
   audioDialectLabel,
-  isAudioPlatform,
 } from "../../src/lib/audioPlatforms";
 
 describe("audioPlatforms", () => {
-  it("has exactly one platform", () => {
-    expect(AUDIO_PLATFORM).toBe("audio");
-    expect(isAudioPlatform("audio")).toBe(true);
-    expect(isAudioPlatform("AUDIO")).toBe(true);
-    // 旧模型（供应商当平台）不再算音频平台
-    expect(isAudioPlatform("audio:minimax")).toBe(false);
-    // 视频平台不能落进音频里
-    expect(isAudioPlatform("video")).toBe(false);
-    expect(isAudioPlatform("codex")).toBe(false);
+  /// 音频账号**不能**靠 `interface_format` 识别 —— 音频的方言是 `openai`，与文本的
+  /// 线协议同名。唯一的判据是 `model_mappings` 里有没有声明 `audio.generate`。
+  /// 这就是它和视频（方言与文本不相交，可按方言判）的结构差别。
+  it("identifies an audio account by capability, not by dialect", () => {
+    expect(AUDIO_CAPABILITY).toBe("audio.generate");
+    expect(AUDIO_DIALECT_VALUES).toEqual(["openai"]);
   });
 
   it("carries the provider in the interface format, not the platform", () => {
-    expect(AUDIO_DIALECT_VALUES).toEqual(["openai"]);
     for (const item of AUDIO_DIALECTS) {
       expect(audioDialectLabel(item.dialect)).toBe(item.label);
     }

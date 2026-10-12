@@ -1,23 +1,23 @@
 /**
- * 音频渠道的方言表。
+ * 音频方言表（TTS）。
  *
- * **音频只有一个平台 `audio`。** 供应商（OpenAI / MiniMax / 火山 / Azure /
- * ElevenLabs …）之间差的是**线协议**——上游路径、鉴权头、回程是原始字节还是
- * JSON+base64——而线协议属于账号的 `config_json.interface_format`，不属于
- * `platform`。与视频同构：一个平台、一张 key，落到哪家由请求里的 `model` 名决定。
+ * **音频不是平台。** 供应商（OpenAI / MiniMax / 火山 / Azure / ElevenLabs …）
+ * 之间差的是**线协议**——上游路径、鉴权头、回程是原始字节还是 JSON+base64——
+ * 而线协议属于账号的 `config_json.interface_format`。音频账号本身住在某个
+ * **池身份**下（通常是 `codex`），靠 `model_mappings` 里声明的 `audio.generate`
+ * 能力被识别为音频账号。
  *
  * 目前只有 1 个规范值：`openai`（OpenAI 兼容的 `/v1/audio/speech`）。后端还认
  * `tts` / `speech` 这类别名，但界面只认规范值。
  *
- * **刻意与视频不同的一点**：视频那边故意**不认** `openai`（收了它
- * `interface_format: "openai"` 会静默变成「Sora」），而音频这里 `openai` 是正当
- * 取值。两处结论相反是因为语义不同，不是笔误。
+ * 注意 `openai` 在这里与**文本**线协议同名，所以「这个账号是不是音频账号」不能
+ * 靠 `interface_format` 判断，只能靠它有没有声明 `audio.generate`。
  */
 
-/// 音频的平台值（`route_credentials.platform` 与 SaaS 分组都写它）。
-export const AUDIO_PLATFORM = "audio";
-
 export type AudioDialect = "openai";
+
+/// 音频账号必须声明的能力。少了它，音频端点在候选池里选不到这个账号。
+export const AUDIO_CAPABILITY = "audio.generate";
 
 export const AUDIO_DIALECTS: ReadonlyArray<{
   dialect: AudioDialect;
@@ -32,9 +32,4 @@ export const AUDIO_DIALECT_VALUES: readonly string[] = AUDIO_DIALECTS.map(
 export function audioDialectLabel(dialect: string): string {
   const trimmed = dialect.trim().toLowerCase();
   return AUDIO_DIALECTS.find((item) => item.dialect === trimmed)?.label ?? dialect;
-}
-
-/** 该账号是不是音频渠道。 */
-export function isAudioPlatform(platform: string): boolean {
-  return platform.trim().toLowerCase() === AUDIO_PLATFORM;
 }

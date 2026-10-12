@@ -25,7 +25,7 @@ use super::repository::VideoGenerationRepository;
 use crate::app_state::AppState;
 use crate::database::repositories::route_pool_repository::RoutePoolRepository;
 use crate::error::AppError;
-use crate::models::platform::{PlatformId, VIDEO_PLATFORM};
+use crate::models::platform::PlatformId;
 use crate::services::route_proxy_service::{
     build_proxy_state, classify_proxy_failure, forward_request, video_route_plan, ProxyAppState,
     ProxyFailureKind,
@@ -139,14 +139,10 @@ impl VideoGenerationService {
         input: SubmitVideoInput,
     ) -> Result<SubmitVideoOutcome, AppError> {
         let platform = input.platform.trim();
-        if PlatformId::parse(platform).ok() != Some(PlatformId::Video) {
-            return Err(validation(
-                "validation.video_platform",
-                &format!(
-                    "Video generation requires the '{VIDEO_PLATFORM}' platform; the vendor is the account's interface_format"
-                ),
-            ));
-        }
+        // **视频不是平台**：它是账号的一个模态分类，由端点路径确定。所以这里不再
+        // 要求平台等于某个特定值，只要求它是一个已知的池身份 —— 视频账号住在哪个
+        // 池里由账号自己决定（通常是 `codex`），落到哪一家则由 `model` 名决定。
+        let _ = PlatformId::parse(platform)?;
         let request = input.request;
         let model = request.model.trim().to_string();
         if model.is_empty() {
@@ -183,7 +179,7 @@ impl VideoGenerationService {
 
         // 选号（含方言）：必须早于建体，因为上游请求体的形状由方言决定。
         let group =
-            Self::select_route_group(state, &model, input.credential_ids.as_deref()).await?;
+            Self::select_route_group(state, platform, &model, input.credential_ids.as_deref()).await?;
 
         let has_image = request.image.is_some();
         let body = upstream_body(group.dialect, &upstream_model, &request)
@@ -195,7 +191,7 @@ impl VideoGenerationService {
 
         // 轮转：`forward_request` 只看到一个账号，它的推进是 `(0+1)%1=0`，
         // 会把游标按回 0，所以这里按整个候选列表推进一格。
-        Self::advance_route_cursor(state, group.cursor, group.ready_len).await;
+        Self::advance_route_cursor(state, platform, group.cursor, group.ready_len).await;
 
         let task_id = Uuid::new_v4().to_string();
         VideoGenerationRepository::create_task(
@@ -233,13 +229,14 @@ impl VideoGenerationService {
     /// `route_priority` + 游标顺序取第一组——也就是跨供应商的轮转。
     async fn select_route_group(
         state: &AppState,
+        platform: &str,
         model: &str,
         credential_ids: Option<&[String]>,
     ) -> Result<SelectedRouteGroup, AppError> {
         // SaaS 的组白名单：`Some(空集)` 的语义是「一个都不允许」（fail closed），
         // 所以这里不能把空集归一成 `None`。
         let scope = credential_ids.map(|ids| ids.iter().cloned().collect::<std::collections::HashSet<_>>());
-        let plan = video_route_plan(&state.pool, model, scope.as_ref()).await?;
+        let plan = video_route_plan(&state.pool, platform, model, scope.as_ref()).await?;
         let Some(group) = plan.groups.into_iter().next() else {
             return Err(validation(
                 "route_pool.model_unmatched",
@@ -264,12 +261,21 @@ impl VideoGenerationService {
     }
 
     /// 成功后把跨供应商游标推进一格（见 `VideoRoutePlan` 的说明）。
-    async fn advance_route_cursor(state: &AppState, cursor: i64, ready_len: usize) {
+    ///
+    /// 游标按**池身份**命名（不是模态）：候选池就是那个池，模态只是池内的一个
+    /// 筛选条件。所以视频与文本共用一个轮询指针 —— 它只影响「从第几个账号开始
+    /// 试」，不影响选谁。
+    async fn advance_route_cursor(
+        state: &AppState,
+        platform: &str,
+        cursor: i64,
+        ready_len: usize,
+    ) {
         if ready_len == 0 {
             return;
         }
         let next = (cursor + 1) % ready_len as i64;
-        let _ = RoutePoolRepository::save_cursor_index(&state.pool, VIDEO_PLATFORM, next).await;
+        let _ = RoutePoolRepository::save_cursor_index(&state.pool, platform, next).await;
     }
 
     /// 查询任务状态（new-api 契约响应体）。
@@ -405,11 +411,27 @@ impl VideoGenerationService {
         })?;
         let path = upstream_status_path(dialect, upstream_task_id);
         // **必须回到提交时那个账号**：上游的任务是按账号隔离的，用别的账号的 key
-        // 查会拿到 404/403。平台统一成 `video` 之后账号变多，靠「按平台重选一个」
+        // 查会拿到 404/403。同一个池里可能挂着好几路视频账号，靠「按池重选一个」
         // 几乎必然选错，所以提交时就把 `credential_id` 记在了任务行上。
-        // 老行（迁移前）没有这个值，退回「只钉平台」。
-        let pinned = task.credential_id.as_deref().map(|id| vec![id.to_string()]);
-        let proxy = Self::proxy_state(state, VIDEO_PLATFORM, pinned.as_deref())?;
+        //
+        // 池身份也从它反查：候选过滤的 SQL 要求
+        // `c.platform = groups.platform = rpm.platform = ?`，池传错会拿到空候选。
+        // 任务行不单独记池，是因为「账号属于哪个池」本来就有唯一答案。
+        let credential_id = task.credential_id.as_deref().ok_or_else(|| {
+            validation(
+                "videogen.upstream_task",
+                "Task has no credential id and cannot be polled",
+            )
+        })?;
+        let platform =
+            crate::database::repositories::route_credential_repository::RouteCredentialRepository::get(
+                &state.pool,
+                credential_id,
+            )
+            .await?
+            .platform;
+        let pinned = Some(vec![credential_id.to_string()]);
+        let proxy = Self::proxy_state(state, &platform, pinned.as_deref())?;
         let headers = HeaderMap::new();
         let uri = Uri::from_str_checked(&query_path(dialect, &path, upstream_task_id))?;
         let response = forward_request(&proxy, Method::GET, headers, uri, Body::empty())
@@ -849,18 +871,13 @@ mod tests {
         // ── 真库 + 一个 video 平台、interface_format=kling 的账号（能力必须是 video.generate）──
         let pool = create_memory_pool().await.unwrap();
         run_migrations(&pool).await.unwrap();
-        sqlx::query(
-            "INSERT INTO route_pool_groups
-               (id,platform,name,sort_order,is_internal,is_active,created_at,updated_at)
-             VALUES('video-test','video','Video test',10,0,1,'2026-01-01','2026-01-01')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        // 直接用迁移种子建好的 `codex-default` 组 —— 一个平台只能有一个 active 组
+        // （`idx_route_pool_groups_one_active`），另建一个会撞唯一索引。这也正是新
+        // 架构的样子：视频账号和文本账号住在**同一个池**里，靠能力声明区分。
         sqlx::query(
             "INSERT INTO route_credentials
                (id,platform,kind,display_name,status,secret_payload_json,config_json,created_at,updated_at)
-             VALUES('kling-account','video','api','Kling','ok',?,?,'2026-01-01','2026-01-01')",
+             VALUES('kling-account','codex','api','Kling','ok',?,?,'2026-01-01','2026-01-01')",
         )
         .bind(r#"{"api_key":"upstream-video-key"}"#)
         .bind(
@@ -883,7 +900,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO route_pool_members
                (id,platform,route_credential_id,enabled,group_id,created_at,updated_at)
-             VALUES('video-member','video','kling-account',1,'video-test','2026-01-01','2026-01-01')",
+             VALUES('video-member','codex','kling-account',1,'codex-default','2026-01-01','2026-01-01')",
         )
         .execute(&pool)
         .await
@@ -895,7 +912,7 @@ mod tests {
         let outcome = VideoGenerationService::submit(
             &state,
             SubmitVideoInput {
-                platform: "video".into(),
+                platform: "codex".into(),
                 request: VideoGenerationRequest::parse(
                     json!({
                         "model": "kling-v1",

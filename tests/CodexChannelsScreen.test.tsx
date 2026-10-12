@@ -23,16 +23,6 @@ vi.mock("../src/screens/AccountsScreen", () => ({
     </div>
   ),
 }));
-vi.mock("../src/screens/VideoChannelsScreen", () => ({
-  VideoChannelsScreen: ({ embedded }: { embedded?: boolean }) => (
-    <div>video:{String(embedded)}</div>
-  ),
-}));
-vi.mock("../src/screens/AudioChannelsScreen", () => ({
-  AudioChannelsScreen: ({ embedded }: { embedded?: boolean }) => (
-    <div>audio:{String(embedded)}</div>
-  ),
-}));
 vi.mock("../src/components/accounts/ImageCapabilitySegment", () => ({
   ImageCapabilitySegment: () => <div>image-segment</div>,
 }));
@@ -61,11 +51,9 @@ describe("CodexChannelsScreen", () => {
     expect(screen.getByText("accounts:codex")).toBeInTheDocument();
   });
 
-  /// 视频 / 音频段嵌在 codex 页里，所以要进 `embedded` 模式（标题由外层给）。
-  ///
-  /// 生图段**不是一个只读视图**：它复用账号管理屏、把列表按 `image.generate` 筛过，
-  /// 所以那里应当出现 `accounts:codex:image.generate`，而不是通用段那一个。
-  it("swaps the body and embeds the channel screens", async () => {
+  /// 四段**全部**复用同一个账号管理屏，区别只在 `capabilityFilter` —— 视频 / 音频 /
+  /// 生图都不是平台，它们只是 codex 池里的一部分账号。
+  it("swaps the body by filtering the same account screen on capability", async () => {
     renderScreen();
 
     await userEvent.click(screen.getByRole("tab", { name: "生图" }));
@@ -74,10 +62,12 @@ describe("CodexChannelsScreen", () => {
     expect(screen.queryByText("accounts:codex")).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("tab", { name: "视频" }));
-    expect(screen.getByText("video:true")).toBeInTheDocument();
+    expect(screen.getByText("accounts:codex:video.generate")).toBeInTheDocument();
+    expect(screen.queryByText("image-segment")).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("tab", { name: "TTS" }));
-    expect(screen.getByText("audio:true")).toBeInTheDocument();
+    expect(screen.getByText("accounts:codex:audio.generate")).toBeInTheDocument();
+    expect(screen.queryByText("accounts:codex:video.generate")).not.toBeInTheDocument();
   });
 
   /// 记住上次选的段：常切的人不用每次重新点，也不至于每次进 codex 都被弹走。
@@ -88,7 +78,7 @@ describe("CodexChannelsScreen", () => {
     first.unmount();
 
     renderScreen();
-    expect(screen.getByText("video:true")).toBeInTheDocument();
+    expect(screen.getByText("accounts:codex:video.generate")).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "视频" })).toHaveAttribute("aria-selected", "true");
   });
 

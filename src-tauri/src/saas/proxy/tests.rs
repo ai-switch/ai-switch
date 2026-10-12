@@ -537,18 +537,11 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
     sqlx::query("UPDATE saas_settings SET value_json=json_set(value_json,'$.logs',json(?)) WHERE key='config'")
         .bind(json!({"directory":directory.path()}).to_string()).execute(&pool).await.unwrap();
 
-    sqlx::query(
-        "INSERT INTO route_pool_groups
-           (id,platform,name,sort_order,is_internal,is_active,created_at,updated_at)
-         VALUES('video-saas','video','Video SaaS',10,0,1,'2026-01-01','2026-01-01')",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    // 复用迁移种子里的 `codex-default` 组：一个平台只能有一个 active 组。
     sqlx::query(
         "INSERT INTO route_credentials
            (id,platform,kind,display_name,status,secret_payload_json,config_json,created_at,updated_at)
-         VALUES('video-account','video','api','Kling','ok',?,?,'2026-01-01','2026-01-01')",
+         VALUES('video-account','codex','api','Kling','ok',?,?,'2026-01-01','2026-01-01')",
     )
     .bind(r#"{"api_key":"upstream-video-key"}"#)
     .bind(
@@ -569,7 +562,7 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
     sqlx::query(
         "INSERT INTO route_pool_members
            (id,platform,route_credential_id,enabled,group_id,created_at,updated_at)
-         VALUES('video-member','video','video-account',1,'video-saas','2026-01-01','2026-01-01')",
+         VALUES('video-member','codex','video-account',1,'codex-default','2026-01-01','2026-01-01')",
     )
     .execute(&pool)
     .await
@@ -581,7 +574,7 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
         &pool,
         "groups.save",
         json!({
-            "id": "video-saas",
+            "id": "codex-default",
             "multiplierMicros": 1_000_000,
             "maxOutputTokens": 4096,
             "timeoutSeconds": 120,
@@ -602,7 +595,7 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
     )
     .await
     .expect("video group is saveable");
-    assert_eq!(saved["id"], "video-saas");
+    assert_eq!(saved["id"], "codex-default");
 
     let user_id = uuid::Uuid::new_v4().to_string();
     sqlx::query("INSERT INTO saas_users(id,github_id,login,github_created_at,created_at,updated_at) VALUES(?,?,'video-tester','2020-01-01T00:00:00Z',?,?)")
@@ -614,7 +607,7 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
         &pool,
         &user_id,
         "keys.create",
-        json!({"name":"video","groupId":"video-saas"}),
+        json!({"name":"video","groupId":"codex-default"}),
     )
     .await
     .expect("a video group can issue a key");
@@ -626,7 +619,7 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
     )
     .await
     .expect("video key authenticates");
-    assert_eq!(principal.platform, "video");
+    assert_eq!(principal.platform, "codex");
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -704,92 +697,18 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
     assert_eq!(logs.total, 1);
     assert_eq!(logs.items[0].amount_usd_micros, 60_000);
     assert_eq!(logs.items[0].model, "kling-v1");
-    assert_eq!(logs.items[0].platform, "video");
+    assert_eq!(logs.items[0].platform, "codex");
 
     upstream.abort();
 }
 
-/// 视频 key 打文本端点必须被端点白名单拒掉，而不是掉进文本预留后
-/// 报一个误导性的「key 无效」。
-#[tokio::test]
-async fn saas_video_key_cannot_reach_text_endpoints() {
-    let pool = repository::test_pool().await;
-    // `test_pool()` 只跑 SaaS 迁移；`route_pool_groups` / `route_credentials`
-    // 这些核心表在 `database::run_migrations` 里。
-    crate::database::run_migrations(&pool).await.unwrap();
-    repository::test_enable(&pool).await;
-    let directory = canonical_test_directory();
-    sqlx::query("UPDATE saas_settings SET value_json=json_set(value_json,'$.logs',json(?)) WHERE key='config'")
-        .bind(json!({"directory":directory.path()}).to_string()).execute(&pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO route_pool_groups
-           (id,platform,name,sort_order,is_internal,is_active,created_at,updated_at)
-         VALUES('video-saas','video','Video SaaS',10,0,1,'2026-01-01','2026-01-01')",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    domain::admin(
-        &pool,
-        "groups.save",
-        json!({
-            "id": "video-saas",
-            "multiplierMicros": 1_000_000,
-            "maxOutputTokens": 4096,
-            "timeoutSeconds": 120,
-            "maxConcurrency": 10,
-            "models": [{
-                "model": "kling-v1",
-                "upstreamModel": "kling-v1",
-                "inputPriceMicros": 0,
-                "cachePriceMicros": 0,
-                "outputPriceMicros": 0,
-                "videoPriceMicros": 10_000,
-                "videoPricePerSecondMicros": 5_000,
-                "enabled": true,
-            }],
-        }),
-    )
-    .await
-    .unwrap();
-    let user_id = uuid::Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO saas_users(id,github_id,login,github_created_at,created_at,updated_at) VALUES(?,?,'video-tester','2020-01-01T00:00:00Z',?,?)")
-        .bind(&user_id).bind(&user_id).bind("2026-01-01").bind("2026-01-01")
-        .execute(&pool).await.unwrap();
-    sqlx::query("UPDATE saas_users SET balance_micros=1000000 WHERE id=?")
-        .bind(&user_id).execute(&pool).await.unwrap();
-    let key = domain::user(
-        &pool,
-        &user_id,
-        "keys.create",
-        json!({"name":"video","groupId":"video-saas"}),
-    )
-    .await
-    .unwrap();
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::AUTHORIZATION,
-        format!("Bearer {}", key["plaintextKey"].as_str().unwrap())
-            .parse()
-            .unwrap(),
-    );
-
-    let state = test_app_state(pool.clone());
-    let runtime = SaasRuntime::default();
-    let proxy = build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default());
-    let error = execute(
-        &state,
-        &runtime,
-        proxy,
-        Method::POST,
-        headers,
-        "/v1/chat/completions".parse().unwrap(),
-        Body::from(json!({"model":"kling-v1","messages":[]}).to_string()),
-    )
-    .await
-    .expect_err("video key must not reach the text endpoint");
-    assert_eq!(error.code(), "saas.endpoint_not_allowed");
-}
+// 这里原本有一个 `saas_video_key_cannot_reach_text_endpoints`：它建一个
+// `platform='video'` 的组，断言视频 key 打文本端点会被端点白名单拒掉。
+//
+// 它的前提已经消失 —— **视频不再是平台**，而是账号的模态分类。同一个 `codex`
+// 组里同时挂着文本账号与视频账号，所以「一把 key 只能打一种模态」这个约束不再
+// 成立（这正是「一个 key 通吃」）。剩下的跨平台守卫（claude 只打 anthropic /
+// responses、gemini 只打 images）另有测试覆盖。
 
 /// 建一个最小的视频 SaaS 环境：`video:kling` 组 + 一个支持 `video.generate`
 /// 的账号 + 给定定价 + 一个能认证的 key。
@@ -802,18 +721,11 @@ async fn video_billing_fixture(
     let pool = repository::test_pool().await;
     crate::database::run_migrations(&pool).await.unwrap();
     repository::test_enable(&pool).await;
-    sqlx::query(
-        "INSERT INTO route_pool_groups
-           (id,platform,name,sort_order,is_internal,is_active,created_at,updated_at)
-         VALUES('video-saas','video','Video SaaS',10,0,1,'2026-01-01','2026-01-01')",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    // 复用迁移种子里的 `codex-default` 组：一个平台只能有一个 active 组。
     sqlx::query(
         "INSERT INTO route_credentials
            (id,platform,kind,display_name,status,secret_payload_json,config_json,created_at,updated_at)
-         VALUES('video-account','video','api','Kling','ok','{}',?,'2026-01-01','2026-01-01')",
+         VALUES('video-account','codex','api','Kling','ok','{}',?,'2026-01-01','2026-01-01')",
     )
     .bind(
         json!({
@@ -833,7 +745,7 @@ async fn video_billing_fixture(
     sqlx::query(
         "INSERT INTO route_pool_members
            (id,platform,route_credential_id,enabled,group_id,created_at,updated_at)
-         VALUES('video-member','video','video-account',1,'video-saas','2026-01-01','2026-01-01')",
+         VALUES('video-member','codex','video-account',1,'codex-default','2026-01-01','2026-01-01')",
     )
     .execute(&pool)
     .await
@@ -842,7 +754,7 @@ async fn video_billing_fixture(
         &pool,
         "groups.save",
         json!({
-            "id": "video-saas",
+            "id": "codex-default",
             "multiplierMicros": 1_000_000,
             "maxOutputTokens": 4096,
             "timeoutSeconds": 120,
@@ -872,7 +784,7 @@ async fn video_billing_fixture(
         &pool,
         &user_id,
         "keys.create",
-        json!({"name":"video","groupId":"video-saas"}),
+        json!({"name":"video","groupId":"codex-default"}),
     )
     .await
     .unwrap();

@@ -20,10 +20,13 @@ use std::collections::BTreeSet;
 /// 于是视频渠道被**每一处各自**挡掉，直到集成测试才发现整条链路不可达
 /// （见计划文档「遗留 0」）。
 ///
-/// 视频只有一个平台 `video`（供应商在账号的 `interface_format` 里），
-/// 所以这里也只需要一项，不再随方言数量增长。
+/// SaaS 能服务的平台 = 全部**池身份**。
+///
+/// 视频 / 音频不在这里：它们不是平台，而是账号的模态分类。所以 SaaS 侧也不需要
+/// 为每个模态各建一组 —— 一个 `codex` 组就能同时卖文本、生图、视频与 TTS，
+/// 各自的单价挂在 `saas_group_models` 的对应列上。
 fn supported_platforms() -> Vec<&'static str> {
-    PlatformId::all_with_media()
+    PlatformId::ALL
         .iter()
         .map(|platform| platform.as_str())
         .collect()

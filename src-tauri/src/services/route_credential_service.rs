@@ -816,32 +816,41 @@ fn copied_api_payload(
         .ok_or_else(|| {
             copy_source_error("interface_format", "API account has no interface format")
         })?;
-    // 媒体渠道（视频 / 音频）的 `interface_format` 是**上游方言**（视频：kling / ark / …；
-    // 音频：openai），不是文本的 `ApiDialect`，所以原样搬运：不解析成 `ApiDialect`，
-    // 也不改写 Base URL（改写是文本侧换线协议时才需要的事）。
-    let (target_interface_format, target_default_dialect) = if target_platform.is_media() {
-        let supported = if target_platform.is_video() {
-            crate::videogen::protocol::dialect_from_interface_format(source_interface_format)
+    // 账号的 `interface_format` 有两种：文本线协议（`ApiDialect`）与**模态方言**
+    // （视频的 kling / ark / …）。后者不是「平台」的区别 —— 模态住在**账号**上，
+    // 所以这里按「方言认不认得出来」判断，与账号住在哪个池无关。
+    //
+    // 顺序很关键：文本的 `openai` 与音频方言的 `openai` **同名**。先试文本那边，
+    // 命中就走文本的逻辑（按平台推导默认方言、必要时改写 Base URL）；只有文本
+    // 解析不出来时，才当成模态方言原样搬运（不改写 Base URL —— 那是文本侧换线
+    // 协议时才需要的事）。
+    let (target_interface_format, target_default_dialect) =
+        match ApiDialect::parse(source_interface_format) {
+            Ok(source_dialect) => {
+                let default = target_platform.default_api_credential_dialect();
+                (
+                    default.unwrap_or(source_dialect).as_str().to_string(),
+                    default,
+                )
+            }
+            Err(_) => {
+                let known = crate::videogen::protocol::dialect_from_interface_format(
+                    source_interface_format,
+                )
                 .is_some()
-        } else {
-            crate::audiogen::protocol::dialect_from_interface_format(source_interface_format)
-                .is_some()
+                    || crate::audiogen::protocol::dialect_from_interface_format(
+                        source_interface_format,
+                    )
+                    .is_some();
+                if !known {
+                    return Err(copy_source_error(
+                        "interface_format",
+                        "Account has an unsupported upstream dialect",
+                    ));
+                }
+                (source_interface_format.to_string(), None)
+            }
         };
-        if !supported {
-            return Err(copy_source_error(
-                "interface_format",
-                "Media account has an unsupported upstream dialect",
-            ));
-        }
-        (source_interface_format.to_string(), None)
-    } else {
-        let source_dialect = ApiDialect::parse(source_interface_format)?;
-        let default = target_platform.default_api_credential_dialect();
-        (
-            default.unwrap_or(source_dialect).as_str().to_string(),
-            default,
-        )
-    };
     let source_base_url = source_config
         .get("base_url")
         .and_then(Value::as_str)
@@ -1065,54 +1074,31 @@ fn validate_failure_policy_config(config_json: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-/// `interface_format` 的合法取值**按平台分**。
+/// `interface_format` 的合法取值 = 文本线协议 ∪ 视频方言。
 ///
-///   - 文本平台：`openai` / `openai-responses` / `anthropic` / `gemini`（即 `ApiDialect`）；
-///   - 视频平台：上游方言 `kling` / `ark` / `minimax` / `zhipu` / `sora`。
+/// **不再按平台分派。** 模态不是平台 —— 视频账号住在某个池身份下（通常是
+/// `codex`），所以「平台是 codex 就只认 openai」这条规则会把 `kling` 拒掉，
+/// 而那正是视频账号该有的值。
 ///
-/// 必须分开校验，两个方向都是错的：
-///   - 视频方言塞进 `ApiDialect` 会污染文本侧的路径规范化（`normalize_api_upstream_path`）；
-///   - 文本方言出现在视频账号上，意味着这个账号永远不会被 `videogen` 选中（静默死数据）。
-fn validate_interface_format(platform: PlatformId, value: &str) -> Result<(), AppError> {
-    if platform.is_video() {
-        if crate::videogen::protocol::dialect_from_interface_format(value).is_some() {
-            return Ok(());
-        }
-        return Err(AppError::Validation {
-            code: "validation.interface_format",
-            message: "Video accounts must declare an upstream dialect".to_string(),
-            details: Some(format!(
-                "{value} (expected kling / ark / minimax / zhipu / sora)"
-            )),
-            recoverable: true,
-        });
+/// 放宽的代价很小：一个 claude 账号配 `kling` 是用户的配置错误，但不会造成
+/// 「静默选错账号」—— 候选过滤同时要求能力声明与模型名精确匹配（见
+/// `push_capability_predicate` 与 `model_matches`）。
+///
+/// 音频方言只有 `openai`，与文本的 `openai` **同名**，所以不需要单独一条。
+fn validate_interface_format(_platform: PlatformId, value: &str) -> Result<(), AppError> {
+    if matches!(value, "openai" | "openai-responses" | "anthropic" | "gemini")
+        || crate::videogen::protocol::dialect_from_interface_format(value).is_some()
+    {
+        return Ok(());
     }
-    // 音频（TTS）与视频同构，但**方言名不同**：`openai` 在这里是正当的音频线协议
-    // （OpenAI 兼容的 `/v1/audio/speech`），而在视频那边被刻意排除过——那里
-    // `openai` 会让 `interface_format: "openai"` 静默变成「Sora」。两处结论相反是
-    // 因为语义不同，不是笔误。
-    //
-    // 也必须显式拦：文本方言（`anthropic` / `gemini`）出现在音频账号上是静默死数据。
-    if platform.is_audio() {
-        if crate::audiogen::protocol::dialect_from_interface_format(value).is_some() {
-            return Ok(());
-        }
-        return Err(AppError::Validation {
-            code: "validation.interface_format",
-            message: "Audio accounts must declare an upstream dialect".to_string(),
-            details: Some(format!("{value} (expected openai)")),
-            recoverable: true,
-        });
-    }
-    match value {
-        "openai" | "openai-responses" | "anthropic" | "gemini" => Ok(()),
-        _ => Err(AppError::Validation {
-            code: "validation.interface_format",
-            message: "Interface format is not supported".to_string(),
-            details: Some(value.to_string()),
-            recoverable: true,
-        }),
-    }
+    Err(AppError::Validation {
+        code: "validation.interface_format",
+        message: "Interface format is not supported".to_string(),
+        details: Some(format!(
+            "{value} (expected openai / openai-responses / anthropic / gemini, or a video dialect: kling / ark / minimax / zhipu / sora)"
+        )),
+        recoverable: true,
+    })
 }
 
 fn validate_api_key_field(

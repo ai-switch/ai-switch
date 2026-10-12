@@ -1,20 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
+  VIDEO_CAPABILITY,
   VIDEO_DIALECTS,
   VIDEO_DIALECT_VALUES,
-  VIDEO_PLATFORM,
-  isVideoPlatform,
+  isVideoDialect,
   videoDialectLabel,
 } from "../../src/lib/videoPlatforms";
 
 describe("videoPlatforms", () => {
-  it("has exactly one platform", () => {
-    expect(VIDEO_PLATFORM).toBe("video");
-    expect(isVideoPlatform("video")).toBe(true);
-    expect(isVideoPlatform("VIDEO")).toBe(true);
-    // 旧模型（供应商当平台）不再算视频平台
-    expect(isVideoPlatform("video:kling")).toBe(false);
-    expect(isVideoPlatform("codex")).toBe(false);
+  /// 视频账号靠**能力**被识别，不靠平台 —— 平台只剩池身份。
+  it("identifies a video account by its dialect, not by a platform value", () => {
+    expect(VIDEO_CAPABILITY).toBe("video.generate");
+    for (const dialect of VIDEO_DIALECT_VALUES) {
+      expect(isVideoDialect(dialect)).toBe(true);
+    }
+    // 文本线协议不是视频方言
+    expect(isVideoDialect("openai")).toBe(false);
+    expect(isVideoDialect("anthropic")).toBe(false);
+    expect(isVideoDialect("nope")).toBe(false);
   });
 
   it("carries the provider in the interface format, not the platform", () => {

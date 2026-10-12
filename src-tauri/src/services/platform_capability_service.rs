@@ -57,59 +57,9 @@ impl PlatformCapabilityService {
 }
 
 fn capability_for(platform: PlatformId) -> PlatformCapability {
-    // 视频渠道（G-P1）。它和文本平台的能力集**完全不同**：
-    //   - 有账号池（route_credentials）、走通用 API 路由（generic_api_routing）
-    //     ——这正是 `forward_request` 需要的那两项；
-    //   - 没有任何「官方账号」概念：视频上游都是 API key 渠道；
-    //   - 不写 CLI 配置（视频不是 CLI 的 provider）、不支持 deeplink 导入、
-    //     不支持终端启动/会话续跑（那是 Agent 才有的东西）；
-    //   - 模型测试走 `videogen` 自己的提交链路，不进 `route_model_test_service`。
-    if platform.is_video() {
-        return PlatformCapability {
-            platform,
-            display_name: platform.display_name().to_string(),
-            support_level: SupportLevel::Partial,
-            operations: PlatformOperations {
-                route_credentials: api_credentials_only(),
-                generic_api_routing: api_credentials_only(),
-                config_write: unavailable(CONFIG_WRITE_UNAVAILABLE),
-                official_import: unavailable(OFFICIAL_ACCOUNT_UNAVAILABLE),
-                official_account_routing: unavailable(OFFICIAL_ACCOUNT_UNAVAILABLE),
-                deeplink_import: unavailable(DEEPLINK_UNAVAILABLE),
-                official_quota: unavailable(QUOTA_UNAVAILABLE),
-                model_test: unavailable(VIDEO_MODEL_TEST_UNAVAILABLE),
-                terminal_launch: unavailable(VIDEO_AGENT_ONLY),
-                session_resume: unavailable(VIDEO_AGENT_ONLY),
-            },
-        };
-    }
-
-    // 音频渠道（TTS）。能力集与视频**完全一致**，理由也一样：它走通用 API 路由
-    // （`forward_request` 需要 route_credentials + generic_api_routing 这两项），
-    // 但不是一个 CLI provider、没有官方账号、也没有终端/会话。
-    //
-    // 刻意与视频分成两个分支而不是合成一个 `is_media()`：reason code 是给用户
-    // 看的文案，把「视频渠道不是 CLI 的 provider」原样丢给音频用户是错的。
-    if platform.is_audio() {
-        return PlatformCapability {
-            platform,
-            display_name: platform.display_name().to_string(),
-            support_level: SupportLevel::Partial,
-            operations: PlatformOperations {
-                route_credentials: api_credentials_only(),
-                generic_api_routing: api_credentials_only(),
-                config_write: unavailable(AUDIO_CONFIG_WRITE_UNAVAILABLE),
-                official_import: unavailable(OFFICIAL_ACCOUNT_UNAVAILABLE),
-                official_account_routing: unavailable(OFFICIAL_ACCOUNT_UNAVAILABLE),
-                deeplink_import: unavailable(DEEPLINK_UNAVAILABLE),
-                official_quota: unavailable(QUOTA_UNAVAILABLE),
-                model_test: unavailable(AUDIO_MODEL_TEST_UNAVAILABLE),
-                terminal_launch: unavailable(AUDIO_AGENT_ONLY),
-                session_resume: unavailable(AUDIO_AGENT_ONLY),
-            },
-        };
-    }
-
+    // **这里没有视频 / 音频分支** —— 它们不是平台。多模态账号住在某个池身份下
+    // （通常是 `codex`），能力集就是那个平台的能力集；模态只是账号上的一个分类，
+    // 由端点路径 + 账号的能力声明共同确定，不影响平台能力矩阵。
     let partial = matches!(
         platform,
         PlatformId::OpenCode | PlatformId::OpenClaw | PlatformId::Hermes

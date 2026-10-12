@@ -1,18 +1,13 @@
 export type SaasLocale = "zh" | "en";
-import { AUDIO_PLATFORM } from "../lib/audioPlatforms";
-import { VIDEO_PLATFORM } from "../lib/videoPlatforms";
 
-/// SaaS 能服务的平台。与后端 `supported_platforms()` 对齐：3 个文本平台 + 媒体渠道
-/// （视频 / 音频）。
+/// SaaS 能服务的平台。与后端 `supported_platforms()` 对齐：**全部池身份**。
+///
+/// **视频 / 音频不在这里** —— 它们不是平台，而是账号的模态分类。一个 `codex` 组就能
+/// 同时卖文本、生图、视频与 TTS，各自的单价挂在 `saas_group_models` 的对应列上。
 ///
 /// **这是个容易漏的镜像**：后端白名单改完，这里也要跟上，否则类型层面看着对、
 /// 实际拿不到数据。
-export type SaasEndpoint =
-  | "codex"
-  | "claude"
-  | "gemini"
-  | typeof VIDEO_PLATFORM
-  | typeof AUDIO_PLATFORM;
+export type SaasEndpoint = "codex" | "claude" | "gemini";
 export interface SaasHostProps { onConfigChanged?: () => void }
 export interface PageResult<Item> { items: Item[]; total: number; page?: number; pageSize?: number }
 export interface SaasErrorEnvelope { code: string; message: string; details?: unknown }

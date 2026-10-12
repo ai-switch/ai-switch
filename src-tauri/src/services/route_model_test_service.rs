@@ -1257,20 +1257,6 @@ fn interface_format_for(
                 recoverable: true,
             })
         }
-        // 视频渠道只有 API key 渠道，没有「官方账号」这一半。
-        PlatformId::Video => Err(AppError::Validation {
-            code: "capability.unavailable",
-            message: "Official account routing is unavailable for video channels".to_string(),
-            details: Some(platform.as_str().to_string()),
-            recoverable: true,
-        }),
-        // 音频渠道同上：只有 API key 渠道。
-        PlatformId::Audio => Err(AppError::Validation {
-            code: "capability.unavailable",
-            message: "Official account routing is unavailable for audio channels".to_string(),
-            details: Some(platform.as_str().to_string()),
-            recoverable: true,
-        }),
     }
 }
 

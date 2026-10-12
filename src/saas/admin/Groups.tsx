@@ -3,21 +3,18 @@ import { Layers3, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { adminCall } from "../api";
 import type { PageResult, SaasCatalog, SaasGroup } from "../types";
 import { decimalToInteger, formatCount, formatMoney, integerToDecimal } from "../format";
-import { AUDIO_PLATFORM } from "../../lib/audioPlatforms";
-import { VIDEO_PLATFORM } from "../../lib/videoPlatforms";
 import { useSaasLocale } from "../i18n";
 import { ActionFeedback, Button, Card, CheckField, Dialog, Empty, ErrorState, Field, Loading, Notice, Pagination, Table, useAction, useResource } from "../components/ui";
 
 /// 平台串 → 展示名。
 ///
-/// 原来是个 `codex ? … : gemini ? … : "Claude"` 的三元表达式，于是视频渠道
-/// （`video:kling` 这类「模态:协议」值）会被显示成 "Claude"。
+/// 只列**池身份** —— 视频 / 音频 / 生图是账号的模态分类，不是平台，所以它们不会
+/// 出现在 SaaS 的组列表里（一个 `codex` 组就能同时卖文本、生图、视频与 TTS，
+/// 各自的单价挂在 `saas_group_models` 的对应列上）。
 function platformLabel(platform: string): string {
   if (platform === "codex") return "Codex";
   if (platform === "gemini") return "Gemini";
   if (platform === "claude") return "Claude";
-  if (platform === VIDEO_PLATFORM) return "Video";
-  if (platform === AUDIO_PLATFORM) return "Audio";
   return platform;
 }
 

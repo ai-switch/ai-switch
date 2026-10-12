@@ -66,28 +66,15 @@ async fn execute(
         .fetch_all(pool)
         .await
         .map_err(repository::db_error)?;
-        // 列表判定必须与提交时一致。视频提交走
-        // `permitted_accounts_for_capability_connection(..., "video.generate")`，
-        // 列表若只看 `permitted_accounts_for_model`（不校验能力），就会列出
-        // 「看得见、提交必失败」的模型。
-        let capability =
-            crate::services::route_proxy_service::models_list_capability(&principal.platform);
+        // 列表判定要与提交时一致。**但这里不再按模态过滤** —— 模态不是平台，
+        // 一个 `codex` 组里同时挂着文本、生图、视频、TTS 的模型，每个模态的提交
+        // 各自要求自己的能力声明，而 `permitted_accounts_for_model` 列的正是
+        // 「组里至少有一个账号声明了这个模型名」的那些，提交时的能力过滤会命中
+        // 同一批账号。曾经需要过滤，是因为模态被钉在组上（视频组只该列视频模型）。
         let mut available = Vec::new();
         for model in models {
-            let permitted = match capability {
-                Some(capability) => {
-                    groups::permitted_accounts_for_capability(
-                        pool,
-                        &principal.group_id,
-                        &model,
-                        capability,
-                    )
-                    .await?
-                }
-                None => {
-                    groups::permitted_accounts_for_model(pool, &principal.group_id, &model).await?
-                }
-            };
+            let permitted =
+                groups::permitted_accounts_for_model(pool, &principal.group_id, &model).await?;
             if !permitted.is_empty() {
                 available.push(json!({"id":model,"object":"model","owned_by":"ai-switch"}));
             }
@@ -122,17 +109,14 @@ async fn execute(
     // 音频（TTS）。与视频不同，它是**同步**接口：只有 POST 一个方向，没有查询与
     // 内容下载，所以不需要 `video_get` 那种「GET 也算」的例外。
     let audio = crate::services::route_proxy_service::is_audio_speech_path(&path);
+    // 这里**不再有**「视频 key 只能打视频端点」这类守卫 —— 视频 / 音频不是平台，
+    // 它们住在账号的模态分类里，所以没有专属的 key 需要约束。一把 codex key
+    // 本来就该能打这个池里的所有模态，这正是「一个 key 通吃」的落点。
     if (!video_get && method != Method::POST)
         || !(anthropic || responses || chat || images || videos || audio)
         || (principal.platform == "claude" && !(anthropic || responses))
         || (principal.platform == "gemini" && !images)
         || (principal.platform == "codex" && anthropic)
-        // 视频 key 只能打视频端点。不加这条的话它会一路走到文本预留，
-        // 由 `reserve` 的 `groups.platform IN (...)` 挡下，报出来的是
-        // `saas.invalid_key`（「key 无效」）——而真正的原因是端点不对。
-        || (principal.platform == crate::models::platform::VIDEO_PLATFORM && !videos)
-        // 音频 key 同理：只能打音频端点，否则会以误导性的 `saas.invalid_key` 收场。
-        || (principal.platform == crate::models::platform::AUDIO_PLATFORM && !audio)
     {
         return Err(repository::invalid(
             "saas.endpoint_not_allowed",

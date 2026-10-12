@@ -3,21 +3,22 @@ import { AgentIcon, type AgentIconPlatform } from "../components/brand/AgentIcon
 import { ImageCapabilitySegment } from "../components/accounts/ImageCapabilitySegment";
 import type { PlatformId } from "../lib/api/types";
 import { useI18n, type TranslationKey } from "../lib/i18n";
+import { AUDIO_CAPABILITY } from "../lib/audioPlatforms";
+import { VIDEO_CAPABILITY } from "../lib/videoPlatforms";
 import { AccountsScreen } from "./AccountsScreen";
-import { AudioChannelsScreen } from "./AudioChannelsScreen";
-import { VideoChannelsScreen } from "./VideoChannelsScreen";
 
 /// codex 页的模态分段器。
 ///
-/// **为什么在这里分。** 视频 / 音频是独立平台（上游是另一家公司），生图是文本池里
-/// 账号的一个能力。它们曾经各占一个侧边栏入口，于是导航第一层里混了两种东西
-/// ——「池身份」（Codex / Claude / …）和「模态」（Video / Audio）——每加一个模态就
-/// 多一个入口。这一屏把模态收进分段器，侧边栏只留池身份。
+/// **为什么在这里分。** 视频 / 音频 / 生图是三种模态，不是三种平台。它们曾经各占一个
+/// 侧边栏入口，于是导航第一层里混了两种东西——「池身份」（Codex / Claude / …）和
+/// 「模态」（Video / Audio）——每加一个模态就多一个入口、多一张 key。这一屏把模态收进
+/// 分段器，侧边栏只留池身份。
 ///
-/// **这是过渡形态。** 目标架构是「网关统一账号池 → provider 分组 → 多模态 → 账号」：
-/// 那时 codex 页会成为账号池的唯一载体、其余平台降级成 provider 来源。在那之前，
-/// 「视频」「TTS」两段里显示的仍然是它们自己平台（`video` / `audio`）的账号，段内
-/// 会写明这一点，免得用户以为它们属于 codex 池。
+/// **四段共用同一套账号管理**：都是 `AccountsScreen(platform="codex")`，区别只在
+/// `capabilityFilter`。这不是巧合——视频 / 音频账号本来就住在 codex 池里，靠
+/// `model_mappings` 里声明的 `video.generate` / `audio.generate` / `image.generate`
+/// 被识别。账号列表的差别只是筛出来的那一部分。
+///
 /// 分段选择的持久化键。导出是为了让测试能直接播种/断言，而不必去猜字面量。
 export const CODEX_SEGMENT_STORAGE_KEY = "ai-switch.codex-channel-segment";
 
@@ -137,11 +138,19 @@ export function CodexChannelsScreen({
       ) : null}
 
       {segment === "video" ? (
-        <VideoChannelsScreen embedded hint={t("codex.segment.videoHint")} />
+        <div className="space-y-3">
+          {/* 视频账号住在 codex 池里，靠 `video.generate` 被识别 —— 所以这一段和
+              「通用」段是同一套账号管理，只是列表按能力筛过。 */}
+          <AccountsScreen capabilityFilter={VIDEO_CAPABILITY} platform="codex" />
+        </div>
       ) : null}
 
       {segment === "audio" ? (
-        <AudioChannelsScreen embedded hint={t("codex.segment.audioHint")} />
+        <div className="space-y-3">
+          {/* 同视频：音频账号的 `interface_format` 是 `openai`（与文本同名），所以
+              识别它的唯一依据就是 `audio.generate` 这个能力声明。 */}
+          <AccountsScreen capabilityFilter={AUDIO_CAPABILITY} platform="codex" />
+        </div>
       ) : null}
     </div>
   );

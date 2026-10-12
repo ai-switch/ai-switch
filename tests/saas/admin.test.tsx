@@ -234,7 +234,10 @@ describe("SaaS administrator", () => {
     expect(payload.models[0]).toEqual(expect.objectContaining({ videoPriceMicros: 0, videoPricePerSecondMicros: 0 }));
   });
 
-  it("labels a video group as Video instead of Claude", async () => {
+  /// 视频 / 音频**不再是平台**，所以「视频组」就是一个普通的 codex 组 —— 徽标显示
+  /// 它的**池身份**，不会再被误标成别的（`videoGroup` 的 platform 已改成 `codex`，
+  /// 但名字仍叫 Kling SaaS，视频定价列也照旧）。
+  it("labels a video-priced group by its pool identity", async () => {
     const original = invoke.getMockImplementation()!;
     invoke.mockImplementation(async (command, request) => {
       if (request?.operation === "groups.list") return page([videoGroup]);
@@ -242,8 +245,7 @@ describe("SaaS administrator", () => {
     });
     render(<SaasAdmin />);
     await userEvent.click(screen.getByRole("button", { name: /^groups & pricing$/i }));
-    // 原来的三元表达式会把视频分组（非 codex/gemini）显示成 "Claude"
-    expect(await screen.findByText("Video")).toBeInTheDocument();
+    expect(await screen.findByText("Codex")).toBeInTheDocument();
     expect(screen.queryByText("Claude")).not.toBeInTheDocument();
   });
 

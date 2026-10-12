@@ -411,24 +411,21 @@ async fn resolve_video_platform(
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
-                "A video channel platform is required: authenticate with a video channel key \
-                 (Authorization: Bearer sk-ai-switch-…), or send x-ai-switch-platform: video",
+                "A route pool platform is required: authenticate with a pool key \
+                 (Authorization: Bearer sk-ai-switch-…), or send x-ai-switch-platform: codex",
             ))
         }
     };
-    // 平台只有一个 `video`；供应商由请求里的 `model` 名决定，不由调用方指定。
-    if crate::models::platform::PlatformId::parse(&platform).ok()
-        != Some(crate::models::platform::PlatformId::Video)
-    {
-        return Err(error_response(
+    // 只要求平台是一个**已知的池身份**。**视频不是平台**，它是账号的模态分类 ——
+    // 所以 `codex` / `claude` / … 都行，只要那个池里有声明了 `video.generate` 的账号；
+    // 落到哪一家由请求里的 `model` 名决定。这也是「一把 key 通吃所有模态」的落点。
+    crate::models::platform::PlatformId::parse(&platform).map_err(|error| {
+        error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            &format!(
-                "Video generation requires the '{}' platform; got '{platform}'",
-                crate::models::platform::VIDEO_PLATFORM
-            ),
-        ));
-    }
+            &error.to_string(),
+        )
+    })?;
     Ok(platform)
 }
 
@@ -694,6 +691,9 @@ mod tests {
     /// 这条曾经是坏的：key 通过了 `shared_fallback` 的鉴权，但平台解析只认
     /// 请求头/请求体字段，于是合法 key 换回一个 400 —— 端点对 OpenAI 兼容客户端
     /// 完全不可用。
+    ///
+    /// **任何池的 key 都能调视频端点**：视频不是平台，它是账号的模态分类。
+    /// 所以这里断言的是「key 解析出了它所属的池」，而不是「只有视频 key 能用」。
     #[tokio::test]
     async fn resolves_the_platform_from_a_route_proxy_key() {
         use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
@@ -702,7 +702,7 @@ mod tests {
 
         let pool = create_memory_pool().await.expect("pool");
         run_migrations(&pool).await.expect("migrations");
-        let key = RouteProxyKeyRepository::ensure_platform_key(&pool, "video", "sk-ai-switch-video")
+        let key = RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-codex")
             .await
             .expect("mint key");
 
@@ -717,22 +717,7 @@ mod tests {
                 .await
                 .ok()
                 .as_deref(),
-            Some("video")
-        );
-
-        // 文本平台的 key 不该能用来调视频端点
-        RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "sk-ai-switch-codex")
-            .await
-            .expect("mint codex key");
-        let mut text_headers = HeaderMap::new();
-        text_headers.insert(
-            AUTHORIZATION,
-            "Bearer sk-ai-switch-codex".parse().unwrap(),
-        );
-        assert!(
-            resolve_video_platform(&pool, &text_headers, None, b"{}")
-                .await
-                .is_err()
+            Some("codex")
         );
 
         // 无效 key 且没有头/体字段 → 拒绝
@@ -744,7 +729,7 @@ mod tests {
     #[test]
     fn strips_platform_field_and_rejects_bad_metadata() {
         let normalized = normalize_request_body(
-            br#"{"platform":"video:kling","model":"kling-v2-6","prompt":"fox"}"#,
+            br#"{"platform":"codex","model":"kling-v2-6","prompt":"fox"}"#,
         )
         .expect("normalized");
         let value: Value = serde_json::from_slice(&normalized).expect("json");

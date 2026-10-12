@@ -19,7 +19,7 @@ import type {
   RouteCredentialImportPreviewItem,
   TransferPlatformChoice,
 } from "../../lib/api/types";
-import { VIDEO_PLATFORM } from "../../lib/videoPlatforms";
+import { VIDEO_DIALECTS } from "../../lib/videoPlatforms";
 
 export type RouteCredentialImportDialogProps = {
   open: boolean;
@@ -36,18 +36,18 @@ const platformOptions: ReadonlyArray<{ value: string; label: string }> = [
   { value: "opencode", label: "OpenCode" },
   { value: "openclaw", label: "OpenClaw" },
   { value: "hermes", label: "Hermes" },
-  // 视频渠道（5 个方言）。导入时它和文本平台没有区别——后端按
-  // `PlatformId::parse` 认 `video:kling` 这类「模态:协议」串，别名也会归一。
-  // 视频只有一个平台：供应商在 `interface_format` 里，由条目自己声明
-  { value: VIDEO_PLATFORM, label: "Video" },
 ];
-const interfaceOptions = [
+const interfaceOptions: ReadonlyArray<{ value: string; label: string }> = [
   { value: "", label: "自动判断" },
   { value: "openai", label: "OpenAI" },
   { value: "openai-responses", label: "OpenAI Responses" },
   { value: "anthropic", label: "Anthropic" },
   { value: "gemini", label: "Gemini" },
-] as const;
+  // 多模态账号的上游方言。它们和文本线协议**同属** `interface_format` 这一个字段，
+  // 只是取值不同 —— 视频/音频账号住在某个池身份下（通常是 codex），靠
+  // `model_mappings` 里声明的能力被识别，不占平台选项。
+  ...VIDEO_DIALECTS.map((item) => ({ value: item.dialect, label: `视频 · ${item.label}` })),
+];
 
 type ChoiceMap = Record<string, TransferPlatformChoice>;
 type ImportStage = "input" | "preview" | "complete";

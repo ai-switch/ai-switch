@@ -5403,10 +5403,13 @@ pub(crate) struct VideoRoutePlan {
 
 pub(crate) async fn video_route_plan(
     pool: &SqlitePool,
+    platform: &str,
     model: &str,
     credential_ids: Option<&HashSet<String>>,
 ) -> Result<VideoRoutePlan, AppError> {
-    let platform = crate::models::platform::VIDEO_PLATFORM;
+    // 候选池是**池身份**（通常是 `codex`），里面同时挂着文本账号和视频账号 ——
+    // 视频不是平台，只是账号的一个模态分类。所以下面那一步能力筛选是**必需的**，
+    // 不是可有可无的收窄：少了它，文本账号会进入视频的候选集。
     let candidates = load_scoped_candidates(pool, platform, credential_ids).await?;
     // 只留「这个 model 在它自己的方言下可用、且声明了 video.generate」的账号
     let matched = candidates
@@ -6362,17 +6365,12 @@ fn build_api_upstream_request(
     let platform = PlatformId::parse(platform).map_err(format_app_error)?;
     PlatformCapabilityService::require(platform, PlatformOperation::GenericApiRouting)
         .map_err(format_app_error)?;
-    // 视频走一条直路。账号的 `interface_format` 是**上游方言**（kling / ark / …），
-    // 不是文本的 `ApiDialect`（下面那句 `ApiDialect::parse` 会直接失败）；而且文本
-    // 那一整套「协议桥接 / 模型改写 / reasoning 清理 / 路径版本规范化」对视频全不
-    // 适用——请求体已经由 `videogen::protocol::upstream_body` 按方言建好了。
-    if platform.is_video() {
-        return build_video_upstream_request(credential, path, query, headers, body, secret, config);
-    }
-    // 音频（TTS）同样走直路。上游体**就是客户端给的那个 JSON**（只改写 `model`），
-    // 上游路径由方言给出，文本那一整套「协议桥接 / reasoning 清理 / 路径版本
-    // 规范化」对音频全不适用——而且 `ApiDialect::parse` 也认不出音频方言。
-    if platform.is_audio() {
+    // 多模态各走一条直路，判据是**端点路径 + 账号方言**，不是平台 ——
+    // 模态不是平台，视频账号住在哪个池里都可能。
+    //
+    // 音频先判：它的方言是 `openai`，与文本**同名**，只能靠端点路径区分。
+    // 上游体就是客户端给的那个 JSON（只改写 `model`），路径由方言给出。
+    if is_audio_speech_path(path) {
         return build_audio_upstream_request(
             credential,
             path,
@@ -6383,6 +6381,19 @@ fn build_api_upstream_request(
             config,
             model_match_mode,
         );
+    }
+    // 视频的方言是 kling / ark / minimax / zhipu / sora —— 与文本方言**不相交**，
+    // 所以按账号的 `interface_format` 判定是可靠的。文本那一整套「协议桥接 /
+    // reasoning 清理 / 路径版本规范化」对视频全不适用，请求体已经由
+    // `videogen::protocol::upstream_body` 按方言建好了。
+    if config
+        .get("interface_format")
+        .and_then(Value::as_str)
+        .is_some_and(|format| {
+            crate::videogen::protocol::dialect_from_interface_format(format).is_some()
+        })
+    {
+        return build_video_upstream_request(credential, path, query, headers, body, secret, config);
     }
     let dialect = match string_value(config, "interface_format") {
         Some(value) => ApiDialect::parse(value).map_err(format_app_error)?,
@@ -8255,23 +8266,6 @@ mod image_path_tests {
     }
 }
 
-/// `/v1/models` 要按哪个能力过滤。
-///
-/// 视频与音频渠道都是**整平台只做一种模态**，而它们的端点强制要求各自的能力，
-/// 所以列出来的必须是真能提交成功的那些。文本平台没有这一层（能力过滤只对
-/// 图像/视频/音频生效，而图像与文本共用一个平台，没有单一正确答案），
-/// 返回 `None` 保持原行为。
-pub(crate) fn models_list_capability(platform: &str) -> Option<&'static str> {
-    let platform = crate::models::platform::PlatformId::parse(platform).ok()?;
-    if platform.is_video() {
-        return Some(VIDEO_GENERATE_CAPABILITY);
-    }
-    if platform.is_audio() {
-        return Some(AUDIO_GENERATE_CAPABILITY);
-    }
-    None
-}
-
 fn is_models_list_path(path: &str) -> bool {
     matches!(path.trim().trim_end_matches('/'), "/models" | "/v1/models")
 }
@@ -8306,7 +8300,11 @@ fn build_models_list_payload_with_baseline(
         &members,
         mode,
         baseline_models,
-        models_list_capability(platform),
+        // **不再按模态过滤**。曾经「视频平台只列视频模型」成立，是因为模态就是
+        // 平台；现在一个池里同时挂着文本、生图、视频、TTS 的模型，没有「单一
+        // 正确答案」可言 —— 这与图像当初的判断一致（图像与文本共用一个平台，
+        // 所以 `/v1/models` 对它也从不做能力过滤）。
+        None,
     )
     .into_iter()
     .map(|entry| {
@@ -8757,16 +8755,6 @@ fn default_official_base_url(platform: PlatformId) -> Result<&'static str, Strin
         PlatformId::OpenCode | PlatformId::OpenClaw | PlatformId::Hermes => {
             Err("capability.unavailable: official account routing is unavailable".to_string())
         }
-        // 视频渠道全是 API key 渠道；不存在官网上游地址可回退。
-        PlatformId::Video => Err(
-            "capability.unavailable: official account routing is unavailable for video channels"
-                .to_string(),
-        ),
-        // 音频渠道同上：全是 API key 渠道。
-        PlatformId::Audio => Err(
-            "capability.unavailable: official account routing is unavailable for audio channels"
-                .to_string(),
-        ),
     }
 }
 
