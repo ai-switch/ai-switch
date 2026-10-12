@@ -192,6 +192,66 @@ async fn retention_deletes_only_expired_canonical_logs() {
     assert!(root.join("not-a-date/09.log").exists());
 }
 
+/// 多模态的三个计费端点必须**原样**留在日志里，不能落进 `/other`。
+///
+/// 管理端按端点筛流量时，音频 / 视频 / 生图全变成 `/other` 等于这三条链路的用量
+/// 不可分辨。这是加模态时最容易漏的一张表 —— 三个端点都是后加的，而端点白名单
+/// （`LogRecord` 的清洗）只认文本时代的六个。
+#[tokio::test]
+async fn multimodal_billing_endpoints_survive_the_endpoint_allow_list() {
+    let directory = canonical_test_directory();
+    let store = FileLogStore::open(directory.path().join("logs"))
+        .await
+        .unwrap();
+    let records = [
+        "/v1/images/generations",
+        "/v1/images/edits",
+        "/v1/video/generations",
+        "/v1/videos",
+        "/v1/audio/speech",
+        "/audio/speech",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, endpoint)| {
+        let mut value = record(&format!("multimodal-{index}"), "owner");
+        value.endpoint = endpoint.into();
+        value
+    })
+    .collect::<Vec<_>>();
+    store.append_batch(&records).await.unwrap();
+    let queried = store.query(LogQuery::for_user("owner")).await.unwrap();
+    let mut endpoints = queried
+        .items
+        .iter()
+        .map(|item| item.endpoint.clone())
+        .collect::<Vec<_>>();
+    endpoints.sort();
+    assert_eq!(
+        endpoints,
+        vec![
+            "/audio/speech".to_string(),
+            "/v1/audio/speech".to_string(),
+            "/v1/images/edits".to_string(),
+            "/v1/images/generations".to_string(),
+            "/v1/video/generations".to_string(),
+            "/v1/videos".to_string(),
+        ],
+    );
+
+    // 带着 ID 的视频状态查询仍走 `/other`：那条路径不计费，而白名单是精确匹配。
+    let mut status = record("video-status", "owner");
+    status.endpoint = "/v1/videos/abc123/content".into();
+    store.append_batch(&[status]).await.unwrap();
+    let queried = store.query(LogQuery::for_user("owner")).await.unwrap();
+    let status_item = queried
+        .items
+        .iter()
+        .find(|item| item.request_id == "video-status")
+        .expect("status query is logged");
+    assert_eq!(status_item.endpoint, "/other");
+}
+
 #[tokio::test]
 async fn records_redact_free_text_and_reject_negative_counters() {
     let directory = canonical_test_directory();

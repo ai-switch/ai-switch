@@ -234,10 +234,11 @@ pub async fn reserve_video(
     }
     let mut transaction = repository::begin(pool).await?;
     config::require_enabled(&mut transaction).await?;
-    // 这里刻意不限定 `groups.platform`：视频渠道的 platform 值由谁配置决定
-    // （`video:kling` / `video:seedance` …），硬编码白名单会把新方言漏在门外。
-    // 平台一致性由下面的 `permitted_accounts_for_capability_connection` 收窄：
-    // 它按组的 platform 去账号池里找支持 `video.generate` 的账号。
+    // `groups.platform` 绑的是 `principal.platform`（key 所属组的平台），所以这条
+    // 查询本身就是「key 的组与这个组对得上」的一致性检查。视频账号搬进 codex 池之后
+    // 这点更重要：一个 codex 组的 key 也能为视频请求付费，靠的不是 video 平台值，
+    // 而是下面 `permitted_accounts_for_capability_connection` 按能力找账号。
+    // （原注释说这里「刻意不限定 platform」，与 SQL 正好相反 —— 一直如此，本轮改正。）
     let limits: Option<Limits> = sqlx::query_as("SELECT users.balance_micros,users.frozen_micros AS user_frozen,keys.spent_micros,keys.frozen_micros AS key_frozen,keys.limit_micros,settings.multiplier_micros,settings.max_output_tokens,settings.timeout_seconds,settings.max_concurrency,settings.allow_subscription,settings.allow_balance FROM saas_api_keys keys JOIN saas_users users ON users.id=keys.user_id JOIN route_pool_groups groups ON groups.id=keys.group_id JOIN saas_group_settings settings ON settings.group_id=groups.id WHERE keys.id=? AND keys.user_id=? AND keys.group_id=? AND groups.platform=? AND keys.status='active' AND (keys.expires_at IS NULL OR keys.expires_at>?) AND users.status='active' AND groups.is_internal=0 AND groups.deleted_at IS NULL")
         .bind(&principal.key_id).bind(&principal.user_id).bind(&principal.group_id).bind(&principal.platform).bind(repository::now()).fetch_optional(&mut *transaction).await.map_err(db_error)?;
     let limits =

@@ -280,6 +280,21 @@ impl LogRecord {
                 | "/messages"
                 | "/embeddings"
                 | "/completions"
+                // 多模态的三个计费端点。少了它们，音频 / 视频 / 生图的用量在日志里
+                // 全落进 `/other`，管理端按端点筛的时候就分不清是哪一模态的流量。
+                // 视频的状态查询（`/v1/video/generations/{id}`、`/v1/videos/{id}`、
+                // `/v1/videos/{id}/content`）不计费，路径里又带着 ID，所以仍走
+                // `/other` —— 那是这个兜底桶的正常用途，不是漏配。
+                | "/v1/images/generations"
+                | "/images/generations"
+                | "/v1/images/edits"
+                | "/images/edits"
+                | "/v1/video/generations"
+                | "/video/generations"
+                | "/v1/videos"
+                | "/videos"
+                | "/v1/audio/speech"
+                | "/audio/speech"
                 | "/other"
         ) {
             record.endpoint = "/other".into();

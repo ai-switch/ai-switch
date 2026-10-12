@@ -698,6 +698,8 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
     assert_eq!(logs.items[0].amount_usd_micros, 60_000);
     assert_eq!(logs.items[0].model, "kling-v1");
     assert_eq!(logs.items[0].platform, "codex");
+    // 端点也必须是原样的那条，而不是被清洗兜底成 `/other`
+    assert_eq!(logs.items[0].endpoint, "/v1/video/generations");
 
     upstream.abort();
 }
@@ -1073,6 +1075,337 @@ async fn saas_video_request_rejects_more_than_one_clip() {
     assert_eq!(error.code(), "saas.request_limits");
 
     // 拒绝必须发生在预留之前：账上不能留下任何冻结
+    let reservations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM saas_billing_reservations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(reservations, 0);
+}
+
+/// 建一个最小的音频（TTS）SaaS 环境：`codex` 账号 + `audio.generate` 能力 + 定价 + key。
+///
+/// `base_url` 由调用方给 —— 成功路径要打 mock 上游，失败路径用一个必然连不上的地址。
+/// 只在预留/结算层面用时传 `None`（不发上游）。
+async fn audio_billing_fixture(
+    base_url: &str,
+    price_per_1k_chars: i64,
+) -> (SqlitePool, String, tempfile::TempDir) {
+    let pool = repository::test_pool().await;
+    crate::database::run_migrations(&pool).await.unwrap();
+    repository::test_enable(&pool).await;
+    // 日志存储是**按目录的文件存储**，默认根目录是所有测试共用的。不隔离的话，
+    // 并行跑起来的其他 SaaS 测试会往同一个目录里写记录，`logs.total` 就成了别人
+    // 的数量（实测 8/9/10 不等，随并行调度变化）。视频那条测试就是这么做的。
+    let directory = canonical_test_directory();
+    sqlx::query("UPDATE saas_settings SET value_json=json_set(value_json,'$.logs',json(?)) WHERE key='config'")
+        .bind(json!({"directory":directory.path()}).to_string()).execute(&pool).await.unwrap();
+    // 复用迁移种子里的 `codex-default` 组：一个平台只能有一个 active 组。
+    // 音频账号**不再是独立平台**，它住在这个 codex 组里，靠 `audio.generate` 被认出。
+    sqlx::query(
+        "INSERT INTO route_credentials
+           (id,platform,kind,display_name,status,secret_payload_json,config_json,created_at,updated_at)
+         VALUES('audio-account','codex','api','TTS','ok',?,?,'2026-01-01','2026-01-01')",
+    )
+    .bind(r#"{"api_key":"upstream-tts-key"}"#)
+    .bind(
+        json!({
+            "base_url": base_url,
+            "interface_format": "openai",
+            "model_mappings": [{
+                "from": "tts-1",
+                "to": "tts-1-upstream",
+                "capabilities": ["audio.generate"],
+            }],
+        })
+        .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO route_pool_members
+           (id,platform,route_credential_id,enabled,group_id,created_at,updated_at)
+         VALUES('audio-member','codex','audio-account',1,'codex-default','2026-01-01','2026-01-01')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // 每千字符 15_000 micros（= $15/1M，OpenAI tts-1 的价位）
+    domain::admin(
+        &pool,
+        "groups.save",
+        json!({
+            "id": "codex-default",
+            "multiplierMicros": 1_000_000,
+            "maxOutputTokens": 4096,
+            "timeoutSeconds": 120,
+            "maxConcurrency": 10,
+            "models": [{
+                "model": "tts-1",
+                "upstreamModel": "tts-1-upstream",
+                "inputPriceMicros": 0,
+                "cachePriceMicros": 0,
+                "outputPriceMicros": 0,
+                "audioPriceMicrosPer1kChars": price_per_1k_chars,
+                "enabled": true,
+            }],
+        }),
+    )
+    .await
+    .expect("audio group is saveable");
+
+    let user_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO saas_users(id,github_id,login,github_created_at,created_at,updated_at) VALUES(?,?,'audio-tester','2020-01-01T00:00:00Z',?,?)")
+        .bind(&user_id).bind(&user_id).bind("2026-01-01").bind("2026-01-01")
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE saas_users SET balance_micros=1000000 WHERE id=?")
+        .bind(&user_id).execute(&pool).await.unwrap();
+    let key = domain::user(
+        &pool,
+        &user_id,
+        "keys.create",
+        json!({"name":"audio","groupId":"codex-default"}),
+    )
+    .await
+    .unwrap();
+    (pool, key["plaintextKey"].as_str().unwrap().to_string(), directory)
+}
+
+/// 音频（TTS）的 SaaS 端到端：认证 → 预留 → 合成 → 按字符计费 → 落账 → 落日志。
+///
+/// 视频那条（`saas_video_request_authenticates_reserves_submits_and_bills_per_video`）
+/// 在账号还是独立平台时就写好了，音频这条一直没有。而音频账号搬进 codex 组之后，
+/// `reserve_audio` 的 `groups.platform=?` 绑的是 `principal.platform`（现在是
+/// `codex`）—— 没有任何测试证明这条路真的通。
+///
+/// 同时钉住三件容易回退的事：
+///   1. **计费按字符不按字节**：`你好世界` 是 4 个字符、12 个 UTF-8 字节。
+///      15_000 micros/千字符 → 4 字符 = 60，按字节会是 180。
+///   2. **响应体是二进制，必须原样回到客户端**（`Content-Type` 也一起带回）。
+///   3. 上游体里的模型名必须被改写成定价行的 `upstream_model`。
+#[tokio::test]
+async fn saas_audio_request_authenticates_reserves_synthesizes_and_bills_per_character() {
+    let upstream_hits = Arc::new(AtomicUsize::new(0));
+    let hits = upstream_hits.clone();
+    let app = Router::new().route(
+        "/v1/audio/speech",
+        post(move |Json(payload): Json<Value>| {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                // 模型被改写成定价行的 upstream_model；其余字段原样透传
+                assert_eq!(payload["model"], "tts-1-upstream");
+                assert_eq!(payload["input"], "你好世界");
+                assert_eq!(payload["voice"], "alloy");
+                ([(header::CONTENT_TYPE, "audio/mpeg")], b"ID3-fake-mp3".as_slice())
+                    .into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let (pool, plaintext, _log_dir) =
+        audio_billing_fixture(&format!("http://{address}/v1"), 15_000).await;
+
+    // 认证必须认出这个 codex 组（`authenticate_key` 的第一道白名单）
+    let principal = crate::saas::billing::authenticate_key(&pool, &plaintext)
+        .await
+        .expect("audio key authenticates");
+    assert_eq!(principal.platform, "codex");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {plaintext}").parse().unwrap(),
+    );
+
+    // ── 真正打一次 SaaS 音频请求 ──
+    let state = test_app_state(pool.clone());
+    let runtime = SaasRuntime::default();
+    let proxy = build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default());
+    let response = execute(
+        &state,
+        &runtime,
+        proxy,
+        Method::POST,
+        headers,
+        "/v1/audio/speech".parse().unwrap(),
+        Body::from(json!({"model":"tts-1","input":"你好世界","voice":"alloy"}).to_string()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    // 二进制体原样回来，Content-Type 也是上游那份（不是硬编码 audio/mpeg）
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(content_type.as_deref(), Some("audio/mpeg"));
+    assert_eq!(&bytes[..], b"ID3-fake-mp3");
+    assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
+
+    // 计费：4 个字符 × 15_000 micros/千字符 = 60
+    let reservation: (String, i64) = sqlx::query_as(
+        "SELECT status,reserved_micros FROM saas_billing_reservations",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reservation, ("settled".to_string(), 60));
+    let ledger: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*),COALESCE(SUM(amount_micros),0) FROM saas_wallet_ledger WHERE kind='usage'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ledger, (1, -60));
+
+    // 日志里要能对上这一单
+    runtime.logs.shutdown().await.unwrap();
+    let logs = runtime
+        .logs
+        .query(crate::saas::logs::LogQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(logs.total, 1);
+    assert_eq!(logs.items[0].amount_usd_micros, 60);
+    assert_eq!(logs.items[0].model, "tts-1");
+    assert_eq!(logs.items[0].platform, "codex");
+    assert_eq!(logs.items[0].endpoint, "/v1/audio/speech");
+
+    upstream.abort();
+}
+
+/// 上游合成失败：预留必须**全退**，账上一分不留。
+///
+/// 音频的响应体是二进制，数不出「成功合成了几个字」，所以结算只能全有或全无
+/// （`settle_audio` 不看响应内容）。这条测试就是那个决策的守卫。
+#[tokio::test]
+async fn saas_audio_request_refunds_the_whole_reservation_when_the_upstream_fails() {
+    let upstream_hits = Arc::new(AtomicUsize::new(0));
+    let hits = upstream_hits.clone();
+    let app = Router::new().route(
+        "/v1/audio/speech",
+        post(move || {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    r#"{"error":{"code":"upstream_boom"}}"#,
+                )
+                    .into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let (pool, plaintext, _log_dir) =
+        audio_billing_fixture(&format!("http://{address}/v1"), 15_000).await;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {plaintext}").parse().unwrap(),
+    );
+
+    let state = test_app_state(pool.clone());
+    let runtime = SaasRuntime::default();
+    let response = execute(
+        &state,
+        &runtime,
+        build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default()),
+        Method::POST,
+        headers,
+        "/v1/audio/speech".parse().unwrap(),
+        Body::from(json!({"model":"tts-1","input":"你好世界","voice":"alloy"}).to_string()),
+    )
+    .await
+    .unwrap();
+
+    // 上游的 5xx 是可重试的（`should_retry = !status.is_success()`），所以见到的不是
+    // 原样的 500，而是重试用尽后的 502。三次 = 1 次首发 + `DEFAULT_ROUTE_CREDENTIAL_
+    // RETRY_COUNT`(2) 次同账号重试。
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(upstream_hits.load(Ordering::SeqCst), 3);
+
+    let reservation: (String, i64) = sqlx::query_as(
+        "SELECT status,reserved_micros FROM saas_billing_reservations",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reservation, ("refunded".to_string(), 60));
+    // 没有 usage 记账，冻结解除后余额回到原值
+    let ledger: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*),COALESCE(SUM(amount_micros),0) FROM saas_wallet_ledger WHERE kind='usage'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ledger, (0, 0));
+    let frozen: i64 = sqlx::query_scalar("SELECT frozen_micros FROM saas_api_keys")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(frozen, 0);
+    let balance: i64 = sqlx::query_scalar("SELECT balance_micros FROM saas_users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(balance, 1_000_000);
+
+    runtime.logs.shutdown().await.unwrap();
+    let logs = runtime
+        .logs
+        .query(crate::saas::logs::LogQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(logs.total, 1);
+    assert_eq!(logs.items[0].amount_usd_micros, 0);
+    assert_eq!(logs.items[0].status, 502);
+
+    upstream.abort();
+}
+
+/// `reserve_audio` 在没有账号支持 `audio.generate` 时必须报 `saas.empty_pool`，
+/// 而不是放一个空候选集过去（后者会在上游才失败，钱已经预留了）。
+#[tokio::test]
+async fn audio_reservation_rejects_a_group_without_any_audio_account() {
+    let (pool, _plaintext, _log_dir) =
+        audio_billing_fixture("http://127.0.0.1:1/v1", 15_000).await;
+    // 把账号唯一的能力声明摘掉 —— 现在这个池里没有任何账号能合成
+    sqlx::query(
+        "UPDATE route_credentials
+         SET config_json=json_set(config_json,'$.model_mappings[0].capabilities','[]')
+         WHERE id='audio-account'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let principal = crate::saas::billing::authenticate_key(&pool, &_plaintext)
+        .await
+        .unwrap();
+    let error = crate::saas::billing::reserve_audio(&pool, &principal, "tts-1", 4)
+        .await
+        .expect_err("no account supports audio.generate");
+    assert_eq!(error.code(), "saas.empty_pool");
+
+    // 拒绝发生在预留之前：账上什么都没留下
     let reservations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM saas_billing_reservations")
         .fetch_one(&pool)
         .await
