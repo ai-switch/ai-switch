@@ -1895,6 +1895,26 @@ describe("AccountsScreen", () => {
     expect(latency.compareDocumentPosition(reset) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it("shows a friendly subscription type and keeps the raw value in hover metadata", async () => {
+    vi.mocked(listRouteCredentials).mockResolvedValue([
+      { ...credentialsFixture[0], subscription_type: "self_serve_business_prolite" },
+      credentialsFixture[1],
+    ]);
+    renderScreen();
+
+    const badge = await screen.findByTestId("account-subscription-type-cred-official-1");
+    expect(badge).toHaveTextContent("订阅 Business 高级版");
+    expect(badge).not.toHaveTextContent("self_serve_business_prolite");
+    expect(badge).toHaveAttribute(
+      "title",
+      "订阅类型：Business 高级版\n原始订阅类型：self_serve_business_prolite",
+    );
+    expect(badge).toHaveAttribute(
+      "aria-label",
+      "订阅类型：Business 高级版；原始订阅类型：self_serve_business_prolite",
+    );
+  });
+
   it("shows Codex credits and reset-card count only when the API returns them", async () => {
     vi.mocked(listRouteCredentials).mockResolvedValue([
       {

@@ -102,6 +102,7 @@ import {
   CODEX_REASONING_LEVEL_OPTIONS,
 } from "../lib/codexModelCapability";
 import { defaultSupportsImageInput } from "../lib/modelImageInput";
+import { formatSubscriptionType } from "../lib/subscriptionType";
 import {
   createBatch,
   copyRouteCredential,
@@ -7424,6 +7425,7 @@ export function AccountsScreen({
           >
           {credentials.map((credential, credentialIndex) => {
                   const subscriptionType = officialSubscriptionType(credential);
+                  const subscriptionTypeDisplay = formatSubscriptionType(subscriptionType);
                   const primaryRemain = officialPrimaryRemain(credential);
                   const weeklyRemain = officialWeeklyRemain(credential);
                   const latestReset = officialLatestResetLabel(credential);
@@ -7933,12 +7935,14 @@ export function AccountsScreen({
                             </span>
                           </span>
                         )}
-                        {subscriptionType && (
+                        {subscriptionTypeDisplay && (
                           <span
+                            aria-label={subscriptionTypeDisplay.ariaLabel}
                             className="rounded-full bg-sky-50 px-2 py-0.5 text-[11px] font-semibold text-sky-800"
-                            title="订阅类型"
+                            data-testid={`account-subscription-type-${credential.id}`}
+                            title={subscriptionTypeDisplay.title}
                           >
-                            订阅 {subscriptionType}
+                            订阅 {subscriptionTypeDisplay.label}
                           </span>
                         )}
                         {primaryRemain != null && (
