@@ -659,6 +659,10 @@ export type RoutePoolState = {
   active_group_id?: string | null;
   account_ids: string[];
   model_mode: RoutePoolModelMode;
+  /** Ordered baseline model ids used when an account has no explicit mapping. */
+  baseline_models: string[];
+  /** Built-in defaults for the platform, used by the editor's reset action. */
+  default_baseline_models: string[];
   stats: RoutePoolStats;
 };
 
@@ -694,6 +698,11 @@ export type DeleteRoutePoolGroupInput = {
   id: string;
 };
 
+export type SetRoutePoolBaselineModelsInput = {
+  platform: string;
+  /** Ordered model ids; blank rows are ignored and an all-blank list resets defaults. */
+  models: string[];
+};
 export type SetRoutePoolGroupMembersInput = {
   platform: string;
   group_id: string;

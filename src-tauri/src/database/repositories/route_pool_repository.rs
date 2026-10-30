@@ -3,6 +3,9 @@ use crate::models::route_pool::{
     ProxyRequestRow, RoutePoolGroup, RoutePoolMemberAccount, RoutePoolStats, RoutePoolUsageLog,
     RouteUsageBreakdown,
 };
+use crate::services::route_pool_baseline_models::{
+    default_models, normalize_models, resolve_stored_models,
+};
 use crate::services::route_pool_model_mode::PoolModelMode;
 use chrono::Utc;
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool, Transaction};
@@ -860,6 +863,64 @@ impl RoutePoolRepository {
         Ok(())
     }
 
+    /// Load the configured baseline model list. Missing, empty, malformed, or
+    /// duplicate stored data falls back to the platform defaults.
+    pub async fn baseline_models(
+        pool: &SqlitePool,
+        platform: &str,
+    ) -> Result<Vec<String>, AppError> {
+        let fallback = default_models(platform);
+        let row =
+            sqlx::query("SELECT models_json FROM route_pool_baseline_models WHERE platform = ?")
+                .bind(platform)
+                .fetch_optional(pool)
+                .await
+                .map_err(|err| AppError::Database {
+                    code: "database.route_pool_baseline_models_get",
+                    message: "Could not load route pool baseline models".to_string(),
+                    details: Some(err.to_string()),
+                    recoverable: true,
+                })?;
+
+        let Some(row) = row else {
+            return Ok(fallback);
+        };
+        let raw: String = row.get("models_json");
+        Ok(resolve_stored_models(platform, Some(&raw)))
+    }
+
+    pub async fn save_baseline_models(
+        pool: &SqlitePool,
+        platform: &str,
+        models: &[String],
+    ) -> Result<(), AppError> {
+        let normalized = normalize_models(models)?;
+        let models = if normalized.is_empty() {
+            default_models(platform)
+        } else {
+            normalized
+        };
+        let models_json = serde_json::to_string(&models)?;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO route_pool_baseline_models (platform, models_json, updated_at)
+             VALUES (?, ?, ?)
+             ON CONFLICT(platform) DO UPDATE SET models_json = excluded.models_json,
+                 updated_at = excluded.updated_at",
+        )
+        .bind(platform)
+        .bind(models_json)
+        .bind(now)
+        .execute(pool)
+        .await
+        .map_err(|err| AppError::Database {
+            code: "database.route_pool_baseline_models_save",
+            message: "Could not save route pool baseline models".to_string(),
+            details: Some(err.to_string()),
+            recoverable: true,
+        })?;
+        Ok(())
+    }
     pub async fn next_cursor_index(pool: &SqlitePool, platform: &str) -> Result<i64, AppError> {
         let row = sqlx::query("SELECT next_index FROM route_pool_cursors WHERE platform = ?")
             .bind(platform)
@@ -1256,6 +1317,52 @@ mod tests {
         .id
     }
 
+    #[tokio::test]
+    async fn baseline_models_fall_back_to_defaults_and_round_trip_custom_order() {
+        let pool = crate::database::create_memory_pool().await.unwrap();
+        crate::database::run_migrations(&pool).await.unwrap();
+        let defaults = vec![
+            "gpt-6-astra".to_string(),
+            "gpt-5.6-sol".to_string(),
+            "gpt-5.6-terra".to_string(),
+            "gpt-5.6-luna".to_string(),
+            "gpt-5.5".to_string(),
+        ];
+
+        assert_eq!(
+            RoutePoolRepository::baseline_models(&pool, "codex")
+                .await
+                .unwrap(),
+            defaults
+        );
+
+        RoutePoolRepository::save_baseline_models(
+            &pool,
+            "codex",
+            &["custom-z".to_string(), "custom-a".to_string()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            RoutePoolRepository::baseline_models(&pool, "codex")
+                .await
+                .unwrap(),
+            vec!["custom-z", "custom-a"]
+        );
+
+        sqlx::query("UPDATE route_pool_baseline_models SET models_json = ? WHERE platform = ?")
+            .bind("not-json")
+            .bind("codex")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            RoutePoolRepository::baseline_models(&pool, "codex")
+                .await
+                .unwrap(),
+            defaults
+        );
+    }
     #[tokio::test]
     async fn model_mode_defaults_to_aggregate_and_survives_a_round_trip() {
         let pool = crate::database::create_memory_pool().await.unwrap();

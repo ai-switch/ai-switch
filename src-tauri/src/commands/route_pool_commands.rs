@@ -3,8 +3,9 @@ use crate::error::{ApiError, AppError};
 use crate::models::route_pool::{
     CreateRoutePoolGroupInput, DeleteRoutePoolGroupInput, FetchedRouteModel,
     RouteModelsFetchRequest, RoutePoolModelTestOutcome, RoutePoolModelTestRequest,
-    RoutePoolRouteOutcome, RoutePoolRouteRequest, RoutePoolState, SetRoutePoolGroupMembersInput,
-    SetRoutePoolMembersInput, SetRoutePoolModelModeInput, UpdateRoutePoolGroupInput,
+    RoutePoolRouteOutcome, RoutePoolRouteRequest, RoutePoolState, SetRoutePoolBaselineModelsInput,
+    SetRoutePoolGroupMembersInput, SetRoutePoolMembersInput, SetRoutePoolModelModeInput,
+    UpdateRoutePoolGroupInput,
 };
 use crate::services::route_model_fetch_service::RouteModelFetchService;
 use crate::services::route_model_test_service::RouteModelTestService;
@@ -133,6 +134,15 @@ pub async fn set_route_pool_model_mode(
         .map_err(ApiError::from)
 }
 
+#[tauri::command]
+pub async fn set_route_pool_baseline_models(
+    state: State<'_, AppState>,
+    input: SetRoutePoolBaselineModelsInput,
+) -> Result<RoutePoolState, ApiError> {
+    RoutePoolService::set_baseline_models(&state.pool, input)
+        .await
+        .map_err(ApiError::from)
+}
 #[tauri::command]
 pub async fn route_pool_route_once(
     state: State<'_, AppState>,

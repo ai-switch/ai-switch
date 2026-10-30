@@ -28,6 +28,7 @@ import {
   ScanText,
   ScrollText,
   Send,
+  Settings2,
   SlidersHorizontal,
   Square,
   Trash2,
@@ -56,6 +57,7 @@ import {
   useExternalClientImportPreview,
 } from "../components/accounts/ExternalClientImportPanel";
 import { CodexOAuthDialog } from "../components/accounts/CodexOAuthDialog";
+import { CodexBaselineModelsDialog } from "../components/accounts/CodexBaselineModelsDialog";
 import { DirectModeDialog, hasAcceptedDirectModeNotice, rememberDirectModeNotice } from "../components/accounts/DirectModeDialog";
 import type { DirectModeStatus } from "../lib/api/types";
 import { ConfigWriteTargetsDialog } from "../components/accounts/ConfigWriteTargetsDialog";
@@ -135,6 +137,7 @@ import {
   saveSettings,
   setRouteCredentialStatuses,
   moveRoutePoolGroupMembers,
+  setRoutePoolBaselineModels,
   setRoutePoolModelMode,
   startRouteProxy,
   stopRouteProxy,
@@ -3519,6 +3522,7 @@ export function AccountsScreen({
   const [modelTestDialogOpen, setModelTestDialogOpen] = useState(false);
   const [modelTestToolCall, setModelTestToolCall] = useState(false);
   const [routePoolModelsDialogOpen, setRoutePoolModelsDialogOpen] = useState(false);
+  const [baselineModelsDialogOpen, setBaselineModelsDialogOpen] = useState(false);
   const [liveLogOpen, setLiveLogOpen] = useState(false);
   const [liveLogEntries, setLiveLogEntries] = useState<RouteProxyLiveLogEntry[]>([]);
   const [expandedLiveLogId, setExpandedLiveLogId] = useState<string | null>(null);
@@ -4334,12 +4338,14 @@ export function AccountsScreen({
       }
     }
 
-    for (const baseline of baselineModelsForPlatform(activePlatform)) {
+    const configuredBaselineModels =
+      activePlatform === "codex" ? routePoolQuery.data?.baseline_models : undefined;
+    for (const baseline of baselineModelsForPlatform(activePlatform, configuredBaselineModels)) {
       addAlias(baseline);
     }
 
     return Array.from(seen.values());
-  }, [activePlatform, draftPoolIds, modelTestAccount, modelTestCredentials]);
+  }, [activePlatform, draftPoolIds, modelTestAccount, modelTestCredentials, routePoolQuery.data?.baseline_models]);
   const accountFilterOptions = useMemo(
     () => (accountPageData?.filter_options ?? []).map((option) => option.key),
     [accountPageData?.filter_options],
@@ -5249,6 +5255,18 @@ export function AccountsScreen({
       void queryClient.invalidateQueries({ queryKey: ["route-config-stale"] });
     },
     onError: (error) => setConfigWriteError(formatApiError(error, "切换模型清单模式失败。")),
+  });
+
+  const saveBaselineModelsMutation = useMutation({
+    mutationFn: (models: string[]) =>
+      setRoutePoolBaselineModels({ platform: "codex", models }),
+    onSuccess: (state) => {
+      queryClient.setQueryData(["route-pool", "codex", "active"], state);
+      void queryClient.invalidateQueries({ queryKey: ["route-pool", "codex"] });
+      void queryClient.invalidateQueries({ queryKey: ["route-credential-page", "codex"] });
+      void queryClient.invalidateQueries({ queryKey: ["route-config-stale"] });
+      setBaselineModelsDialogOpen(false);
+    },
   });
   // Config is written on demand, so mapping and client-config edits sit unapplied
   // until the user asks for a write. The backend answers this by rendering through
@@ -6746,15 +6764,30 @@ export function AccountsScreen({
             </div>
           </div>
           <div className={`flex min-w-0 flex-1 justify-end motion-control duration-300 max-[599px]:hidden ${toolbarAutoHidden ? "pointer-events-none -translate-y-3 opacity-0" : "translate-y-0 opacity-100"}`}>
-            <button
-              aria-label="会话管理"
-              className="grid h-7 w-7 shrink-0 place-items-center border border-stone-300 bg-white text-stone-700 motion-control hover:bg-stone-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-400"
-              onClick={() => onOpenSessions?.(activePlatform)}
-              title="会话管理"
-              type="button"
-            >
-              <MessageSquareText aria-hidden="true" className="h-3.5 w-3.5" />
-            </button>
+            {activePlatform === "codex" ? (
+              <button
+                aria-label="配置 Codex 基线模型"
+                className="grid h-7 w-7 shrink-0 place-items-center border border-stone-300 bg-white text-stone-700 motion-control hover:bg-stone-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-400"
+                onClick={() => {
+                  saveBaselineModelsMutation.reset();
+                  setBaselineModelsDialogOpen(true);
+                }}
+                title="配置 Codex 基线模型"
+                type="button"
+              >
+                <Settings2 aria-hidden="true" className="h-3.5 w-3.5" />
+              </button>
+            ) : (
+              <button
+                aria-label="会话管理"
+                className="grid h-7 w-7 shrink-0 place-items-center border border-stone-300 bg-white text-stone-700 motion-control hover:bg-stone-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-400"
+                onClick={() => onOpenSessions?.(activePlatform)}
+                title="会话管理"
+                type="button"
+              >
+                <MessageSquareText aria-hidden="true" className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -7781,7 +7814,11 @@ export function AccountsScreen({
                   // four tags on its own, and inline it pushed the status badges past a
                   // wrap where they were easy to miss.
                   const modelListBlock = accountDisplayPreferences.showModelList ? (
-                    <ModelMappingSummary platform={activePlatform} mappings={modelMappings} />
+                    <ModelMappingSummary
+                      baselineModels={activePlatform === "codex" ? routePoolQuery.data?.baseline_models : undefined}
+                      platform={activePlatform}
+                      mappings={modelMappings}
+                    />
                   ) : null;
                   // Switch 显示模型列表 off and the models have nowhere left to go, so the
                   // stats line doubles as their slot: click it to swap the numbers for a
@@ -7793,7 +7830,11 @@ export function AccountsScreen({
                     ? null
                     : (() => {
                         const summary = statsLineShowsModels
-                          ? modelSummaryLine(activePlatform, modelMappings)
+                          ? modelSummaryLine(
+                              activePlatform,
+                              modelMappings,
+                              activePlatform === "codex" ? routePoolQuery.data?.baseline_models : undefined,
+                            )
                           : null;
                         return {
                           showsModels: statsLineShowsModels,
@@ -8863,6 +8904,20 @@ export function AccountsScreen({
             </div>
           </div>
         </div>
+      )}
+      {baselineModelsDialogOpen && (
+        <CodexBaselineModelsDialog
+          defaultModels={routePoolQuery.data?.default_baseline_models ?? []}
+          error={
+            saveBaselineModelsMutation.error
+              ? formatApiError(saveBaselineModelsMutation.error, "保存 Codex 基线模型失败。")
+              : null
+          }
+          loading={saveBaselineModelsMutation.isPending}
+          models={routePoolQuery.data?.baseline_models ?? []}
+          onClose={() => setBaselineModelsDialogOpen(false)}
+          onSave={(models) => saveBaselineModelsMutation.mutate(models)}
+        />
       )}
       {routePoolModelsDialogOpen && (
         <div className="motion-overlay fixed inset-0 z-50 grid place-items-center bg-stone-950/35 p-4 backdrop-blur-sm"

@@ -3,20 +3,21 @@ use commands::batch_commands::{
     create_batch, create_official_account, create_provider, get_official_account,
     list_batch_groups, update_official_account,
 };
+use commands::codex_oauth_commands::{
+    cancel_codex_oauth, get_codex_oauth_status, start_codex_oauth,
+};
 use commands::direct_mode_commands::{enable_client_direct_mode, get_client_direct_modes};
 use commands::disk_space_commands::get_disk_space_status;
 use commands::external_client_import_commands::{
     import_external_client_accounts, preview_external_client_import,
 };
-use commands::import_commands::import_example_json;
 use commands::imagegen_commands::{
-    imagegen_create_session, imagegen_delete_session, imagegen_generate,
-    imagegen_get_conversation, imagegen_list_models, imagegen_list_sessions,
-    imagegen_read_asset, imagegen_update_session,
+    imagegen_create_session, imagegen_delete_session, imagegen_generate, imagegen_get_conversation,
+    imagegen_list_models, imagegen_list_sessions, imagegen_read_asset, imagegen_update_session,
 };
+use commands::import_commands::import_example_json;
 use commands::notification_commands::test_notification;
 use commands::platform_commands::list_platform_capabilities;
-use commands::codex_oauth_commands::{cancel_codex_oauth, get_codex_oauth_status, start_codex_oauth};
 use commands::route_credential_commands::{
     archive_route_credentials, clear_route_credential_failure_state,
     clear_route_credential_model_state, copy_route_credential, create_api_route_credential,
@@ -35,8 +36,9 @@ use commands::route_credential_transfer_commands::{
 use commands::route_pool_commands::{
     create_route_pool_group, delete_route_pool_group, fetch_route_models, get_route_pool,
     move_route_pool_group_members, route_pool_route_once, route_pool_test_model,
-    set_route_pool_group_members, set_route_pool_members, set_route_pool_model_mode,
-    subscribe_route_proxy_live_log, unsubscribe_route_proxy_live_log, update_route_pool_group,
+    set_route_pool_baseline_models, set_route_pool_group_members, set_route_pool_members,
+    set_route_pool_model_mode, subscribe_route_proxy_live_log, unsubscribe_route_proxy_live_log,
+    update_route_pool_group,
 };
 use commands::route_proxy_commands::{
     get_route_proxy_key, get_route_proxy_status, route_config_write_is_stale, start_route_proxy,
@@ -66,8 +68,8 @@ use commands::usage_stats_commands::{
 };
 use commands::web_service_commands::{
     create_mobile_pairing, disconnect_tailscale, get_tailscale_status, get_web_server_status,
-    get_web_service_config, save_web_service_config, start_tailscale_login,
-    start_tailscale_with_auth_key, start_web_server, stop_web_server, set_route_access,
+    get_web_service_config, save_web_service_config, set_route_access, start_tailscale_login,
+    start_tailscale_with_auth_key, start_web_server, stop_web_server,
 };
 use database::open_migrated_pool;
 use mcp::command::{
@@ -313,10 +315,9 @@ pub fn run() {
     // Read once here so the close handler, which runs on the main thread and
     // cannot await, has an answer from the very first click. Unreadable settings
     // fall back to the tray, which is what the app did before this was an option.
-    let startup_settings = tauri::async_runtime::block_on(
-        services::settings_service::SettingsService::load(&paths),
-    )
-    .ok();
+    let startup_settings =
+        tauri::async_runtime::block_on(services::settings_service::SettingsService::load(&paths))
+            .ok();
     let close_to_tray = CloseToTrayRuntime::new(
         startup_settings
             .as_ref()
@@ -602,6 +603,7 @@ pub fn run() {
             set_route_pool_group_members,
             move_route_pool_group_members,
             set_route_pool_members,
+            set_route_pool_baseline_models,
             set_route_pool_model_mode,
             route_pool_route_once,
             route_pool_test_model,

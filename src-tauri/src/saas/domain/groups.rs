@@ -1,9 +1,11 @@
 use crate::error::AppError;
 use crate::saas::repository::{self, db_error, invalid};
 use crate::services::route_model_capability::{
-    advertised_model_ids, catalog_members, model_state_key, supports_requested_capability,
-    supports_requested_model, CatalogMemberInput,
+    advertised_model_ids_with_baseline, catalog_members, model_state_key,
+    supports_requested_capability, supports_requested_model_with_mode_with_baseline,
+    CatalogMemberInput, ModelMatchMode,
 };
+use crate::services::route_pool_baseline_models::resolve_stored_models;
 use crate::services::route_pool_model_mode::PoolModelMode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -11,6 +13,22 @@ use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use std::collections::BTreeSet;
 
 const SUPPORTED_PLATFORMS: [&str; 3] = ["codex", "claude", "gemini"];
+
+async fn codex_baseline_models(
+    connection: &mut SqliteConnection,
+    platform: &str,
+) -> Result<Option<Vec<String>>, AppError> {
+    if !platform.eq_ignore_ascii_case("codex") {
+        return Ok(None);
+    }
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT models_json FROM route_pool_baseline_models WHERE platform = ?")
+            .bind(platform)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(db_error)?;
+    Ok(Some(resolve_stored_models(platform, raw.as_deref())))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -246,10 +264,17 @@ pub(crate) async fn permitted_accounts_connection(
             })
             .collect::<Vec<_>>(),
     );
+    let baseline_models = codex_baseline_models(connection, &group.platform).await?;
     let mut permitted = Vec::new();
     for (account, member) in accounts.iter().zip(members) {
         if let Some(model) = upstream_model.as_deref() {
-            if !supports_requested_model(&group.platform, &member.capability, Some(model)) {
+            if !supports_requested_model_with_mode_with_baseline(
+                &group.platform,
+                &member.capability,
+                Some(model),
+                ModelMatchMode::ClientFacing,
+                baseline_models.as_deref(),
+            ) {
                 continue;
             }
             let upstream =
@@ -508,7 +533,13 @@ pub async fn catalog(pool: &SqlitePool, payload: Value) -> Result<Value, AppErro
             })
             .collect::<Vec<_>>(),
     );
-    let models = advertised_model_ids(&group.platform, &members, PoolModelMode::Aggregate);
+    let baseline_models = codex_baseline_models(&mut *connection, &group.platform).await?;
+    let models = advertised_model_ids_with_baseline(
+        &group.platform,
+        &members,
+        PoolModelMode::Aggregate,
+        baseline_models.as_deref(),
+    );
     Ok(json!({
         "platforms": SUPPORTED_PLATFORMS,
         "platform": group.platform,

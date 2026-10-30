@@ -27,7 +27,7 @@ use crate::services::route_credential_activity::{
 };
 use crate::services::route_failure_scope::is_account_scoped_failure;
 use crate::services::route_model_capability::{
-    known_upstream_models, model_state_key, parse_model_capability,
+    known_upstream_models_with_baseline, model_state_key, parse_model_capability,
 };
 use crate::services::route_protocol_bridge::transform_response as transform_protocol_bridge_response;
 use crate::services::route_proxy_service::{
@@ -289,8 +289,8 @@ impl RouteModelTestService {
             }
         };
 
-        let compression_config: Value = serde_json::from_str(&credential.config_json)
-            .unwrap_or(Value::Null);
+        let compression_config: Value =
+            serde_json::from_str(&credential.config_json).unwrap_or(Value::Null);
         let send_result = send_model_test_request(
             client,
             &target_url,
@@ -1741,7 +1741,19 @@ async fn finish_outcome(
             RouteCredentialRepository::update_status(pool, &credential.id, "ok").await?;
         }
     } else {
-        let siblings = known_upstream_models(platform, &capability, &credential.kind);
+        let baseline_models = if platform.eq_ignore_ascii_case("codex") {
+            RoutePoolRepository::baseline_models(pool, platform)
+                .await
+                .ok()
+        } else {
+            None
+        };
+        let siblings = known_upstream_models_with_baseline(
+            platform,
+            &capability,
+            &credential.kind,
+            baseline_models.as_deref(),
+        );
         let scope_for = |kind: &str, status: Option<u16>| match (
             &model_key,
             is_account_scoped_failure(kind, status),
@@ -1986,7 +1998,6 @@ fn metadata_json(
     })
     .to_string()
 }
-
 
 fn fallback_request_parts(
     credential: &SelectedCredential,

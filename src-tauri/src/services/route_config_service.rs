@@ -20,9 +20,10 @@ use crate::services::config_write_service::{
 use crate::services::direct_mode_service::DirectModeService;
 use crate::services::platform_capability_service::PlatformCapabilityService;
 use crate::services::route_model_capability::{
-    advertised_model_catalog_entries, catalog_member_inputs, catalog_members,
-    client_facing_model_catalog_entries, codex_default_context_window, codex_model_catalog_payload,
-    default_third_party_reasoning_levels, normalize_reasoning_levels, parse_model_capability,
+    advertised_model_catalog_entries_with_baseline, catalog_member_inputs, catalog_members,
+    client_facing_model_catalog_entries, codex_default_context_window,
+    codex_model_catalog_payload_with_baseline, default_third_party_reasoning_levels,
+    normalize_reasoning_levels, parse_model_capability,
 };
 use crate::services::settings_service::SettingsService;
 use directories::BaseDirs;
@@ -597,10 +598,20 @@ impl RouteConfigService {
         // the model id, not the Claude Code alias (``from``).  Other platforms
         // keep using ``advertised_model_catalog_entries`` because their ``from``
         // IS the model name users want.
+        let baseline_models = if platform == PlatformId::Codex {
+            Some(RoutePoolRepository::baseline_models(pool, platform.as_str()).await?)
+        } else {
+            None
+        };
         let entries = if platform == PlatformId::Claude {
             client_facing_model_catalog_entries(platform.as_str(), &members, mode)
         } else {
-            advertised_model_catalog_entries(platform.as_str(), &members, mode)
+            advertised_model_catalog_entries_with_baseline(
+                platform.as_str(),
+                &members,
+                mode,
+                baseline_models.as_deref(),
+            )
         };
 
         Ok(entries
@@ -626,8 +637,7 @@ impl RouteConfigService {
                     // get an extra `max` tier on top of that ladder. A genuinely
                     // declared empty list is treated the same as "none declared":
                     // the user wants the choice, not an empty menu.
-                    let declared =
-                        normalize_reasoning_levels(model.reasoning_levels.as_deref());
+                    let declared = normalize_reasoning_levels(model.reasoning_levels.as_deref());
                     if declared.is_empty() {
                         default_third_party_reasoning_levels(&model.upstream_model)
                     } else {
@@ -721,7 +731,10 @@ impl RouteConfigService {
         let credentials = Self::pool_member_credentials(pool, PlatformId::Codex).await?;
         let members = catalog_members(&catalog_member_inputs(&credentials));
         let mode = RoutePoolRepository::model_mode(pool, PlatformId::Codex.as_str()).await?;
-        let payload = codex_model_catalog_payload(&members, mode);
+        let baseline_models =
+            RoutePoolRepository::baseline_models(pool, PlatformId::Codex.as_str()).await?;
+        let payload =
+            codex_model_catalog_payload_with_baseline(&members, mode, Some(&baseline_models));
         // The desktop build filters every model's ladder through a global
         // enabled-efforts set that defaults to low/medium/high/xhigh/ultra/
         // persistent and therefore has no `max`. A model that declares `max`
@@ -860,9 +873,8 @@ const ATOM_KEY: &str = "enabled-reasoning-efforts";
 /// The desktop's built-in enabled-effort set. Mirrored so the merge above has a
 /// starting point when the client has not written the atom yet; `max` is absent
 /// on purpose, which is the whole bug this guards against.
-const CODEX_DESKTOP_DEFAULT_REASONING_EFFORTS: &[&str] = &[
-    "low", "medium", "high", "xhigh", "ultra", "persistent",
-];
+const CODEX_DESKTOP_DEFAULT_REASONING_EFFORTS: &[&str] =
+    &["low", "medium", "high", "xhigh", "ultra", "persistent"];
 
 fn codex_global_state_path(home: &Path) -> PathBuf {
     home.join(".codex").join(".codex-global-state.json")
@@ -1097,7 +1109,15 @@ mod tests {
         // `max` joins the set; nothing the client already had is dropped.
         assert_eq!(
             atom["enabled-reasoning-efforts"],
-            serde_json::json!(["low", "medium", "high", "xhigh", "ultra", "persistent", "max"])
+            serde_json::json!([
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "ultra",
+                "persistent",
+                "max"
+            ])
         );
         // Unrelated atoms and top-level keys survive the rewrite.
         assert_eq!(atom["diff-filter"], serde_json::json!("last-turn"));
@@ -1133,7 +1153,9 @@ mod tests {
         let written: Value =
             serde_json::from_str(&std::fs::read_to_string(&state_path).expect("read"))
                 .expect("parse");
-        let atom = written["electron-persisted-atom-state"].as_object().expect("atom");
+        let atom = written["electron-persisted-atom-state"]
+            .as_object()
+            .expect("atom");
         assert_eq!(
             atom["enabled-reasoning-efforts"],
             serde_json::json!(["low", "high", "max"])
@@ -1173,7 +1195,15 @@ mod tests {
         // and gains only what the catalog adds.
         assert_eq!(
             written["electron-persisted-atom-state"]["enabled-reasoning-efforts"],
-            serde_json::json!(["low", "medium", "high", "xhigh", "ultra", "persistent", "max"])
+            serde_json::json!([
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "ultra",
+                "persistent",
+                "max"
+            ])
         );
     }
 
@@ -1665,7 +1695,10 @@ command = "npx"
         let codex_path = codex_dir.join("config.toml");
         // No auth.json at all, or an apikey-mode one: both mean there is no
         // ChatGPT credential to hand off to.
-        for auth in [None, Some(r#"{"OPENAI_API_KEY":"sk-upstream","auth_mode":"apikey"}"#)] {
+        for auth in [
+            None,
+            Some(r#"{"OPENAI_API_KEY":"sk-upstream","auth_mode":"apikey"}"#),
+        ] {
             match auth {
                 Some(contents) => {
                     tokio::fs::write(codex_dir.join("auth.json"), contents)
@@ -2752,10 +2785,7 @@ command = "npx"
                 .collect::<Vec<_>>(),
             vec!["zcode_codex"]
         );
-        assert!(fixture
-            .home
-            .join(".zcode/v2/provider_config.json")
-            .exists());
+        assert!(fixture.home.join(".zcode/v2/provider_config.json").exists());
         // Neither the CLI config nor the catalog it references belongs to this write.
         assert!(!fixture.home.join(".codex/config.toml").exists());
         assert!(!fixture
@@ -2765,7 +2795,8 @@ command = "npx"
     }
 
     #[tokio::test]
-    async fn zcode_writes_the_declared_reasoning_levels_verbatim_and_falls_back_to_a_default_ladder_when_none() {
+    async fn zcode_writes_the_declared_reasoning_levels_verbatim_and_falls_back_to_a_default_ladder_when_none(
+    ) {
         // The third-party ZCode config mirrors the account exactly for models that
         // declare efforts (no baseline-profile padding). A model that declares
         // none no longer gets *no* reasoning control — a bare on/off toggle — but
@@ -2948,10 +2979,7 @@ command = "npx"
                 ..
             }
         ));
-        assert!(!fixture
-            .home
-            .join(".zcode/v2/provider_config.json")
-            .exists());
+        assert!(!fixture.home.join(".zcode/v2/provider_config.json").exists());
     }
 
     #[tokio::test]
@@ -2985,7 +3013,10 @@ command = "npx"
             rule["config"]["api"]["headers"]["ai-switch-managed"],
             "codex"
         );
-        assert_eq!(rule["config"]["personalModelIds"], serde_json::json!(["gpt-5.6-sol"]));
+        assert_eq!(
+            rule["config"]["personalModelIds"],
+            serde_json::json!(["gpt-5.6-sol"])
+        );
         let model_rule = json["config"]["modelConfigRules"]["providerModelRules"]
             .as_array()
             .expect("provider model rules")
@@ -2997,10 +3028,7 @@ command = "npx"
             128000
         );
         // Same Codex default the CLI catalog writes for a passthrough gpt id.
-        assert_eq!(
-            model_rule["config"]["properties"]["contextWindow"],
-            272000
-        );
+        assert_eq!(model_rule["config"]["properties"]["contextWindow"], 272000);
     }
 
     #[tokio::test]
@@ -3227,12 +3255,18 @@ model_provider = "ai-switch"
             .expect("model ids");
         // One entry per account, so a request names the account it wants. The
         // aggregated id is gone: keeping it would leave a rotating door open.
-        assert!(models.contains(&serde_json::json!("Grox/gpt-5.6-sol")), "models={models:?}");
+        assert!(
+            models.contains(&serde_json::json!("Grox/gpt-5.6-sol")),
+            "models={models:?}"
+        );
         assert!(
             models.contains(&serde_json::json!("247-Kan/gpt-5.6-sol")),
             "models={models:?}"
         );
-        assert!(!models.contains(&serde_json::json!("gpt-5.6-sol")), "models={models:?}");
+        assert!(
+            !models.contains(&serde_json::json!("gpt-5.6-sol")),
+            "models={models:?}"
+        );
 
         // The Codex CLI reads its own catalog file, which has to agree — a bare
         // `--model` would otherwise not be in the list the CLI offers.
@@ -3463,7 +3497,10 @@ model_provider = "ai-switch"
             .iter()
             .find(|entry| entry["modelId"] == "gpt-5.5")
             .expect("gpt-5.5 rule");
-        assert_eq!(zcode_rule["config"]["properties"]["contextWindow"], 1_000_000);
+        assert_eq!(
+            zcode_rule["config"]["properties"]["contextWindow"],
+            1_000_000
+        );
 
         let harness: serde_yaml::Value = serde_yaml::from_slice(
             &tokio::fs::read(fixture.home.join(".dsh/settings.yaml"))

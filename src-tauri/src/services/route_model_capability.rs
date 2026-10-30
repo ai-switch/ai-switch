@@ -447,7 +447,20 @@ pub(crate) fn codex_model_catalog_payload(
     members: &[ModelCatalogMember],
     mode: PoolModelMode,
 ) -> Value {
-    let models = advertised_model_catalog_entries("codex", members, mode)
+    codex_model_catalog_payload_with_baseline(members, mode, None)
+}
+
+pub(crate) fn codex_model_catalog_payload_with_baseline(
+    members: &[ModelCatalogMember],
+    mode: PoolModelMode,
+    baseline_models: Option<&[String]>,
+) -> Value {
+    let models = advertised_model_catalog_entries_with_baseline(
+        "codex",
+        members,
+        mode,
+        baseline_models,
+    )
         .into_iter()
         .enumerate()
         .map(|(index, model)| {
@@ -564,6 +577,16 @@ pub(crate) fn model_matches(
     requested_model: Option<&str>,
     mode: ModelMatchMode,
 ) -> bool {
+    model_matches_with_baseline(platform, capability, requested_model, mode, None)
+}
+
+pub(crate) fn model_matches_with_baseline(
+    platform: &str,
+    capability: &ModelCapability,
+    requested_model: Option<&str>,
+    mode: ModelMatchMode,
+    baseline_models: Option<&[String]>,
+) -> bool {
     let Some(requested_model) = requested_model
         .map(str::trim)
         .filter(|model| !model.is_empty())
@@ -572,7 +595,7 @@ pub(crate) fn model_matches(
     };
 
     if capability.mappings.is_empty() {
-        return default_client_models(platform)
+        return effective_baseline_models(platform, baseline_models)
             .iter()
             .any(|model| model.eq_ignore_ascii_case(requested_model));
     }
@@ -600,7 +623,23 @@ pub(crate) fn supports_requested_model_with_mode(
     requested_model: Option<&str>,
     mode: ModelMatchMode,
 ) -> bool {
-    model_matches(platform, capability, requested_model, mode)
+    supports_requested_model_with_mode_with_baseline(
+        platform,
+        capability,
+        requested_model,
+        mode,
+        None,
+    )
+}
+
+pub(crate) fn supports_requested_model_with_mode_with_baseline(
+    platform: &str,
+    capability: &ModelCapability,
+    requested_model: Option<&str>,
+    mode: ModelMatchMode,
+    baseline_models: Option<&[String]>,
+) -> bool {
+    model_matches_with_baseline(platform, capability, requested_model, mode, baseline_models)
 }
 
 pub(crate) fn supports_requested_capability(
@@ -752,13 +791,19 @@ pub(crate) fn aliases_for_model_key(capability: &ModelCapability, model_key: &st
 pub(crate) fn known_upstream_models(
     platform: &str,
     capability: &ModelCapability,
+    kind: &str,
+) -> Vec<String> {
+    known_upstream_models_with_baseline(platform, capability, kind, None)
+}
+
+pub(crate) fn known_upstream_models_with_baseline(
+    platform: &str,
+    capability: &ModelCapability,
     _kind: &str,
+    baseline_models: Option<&[String]>,
 ) -> Vec<String> {
     if capability.mappings.is_empty() {
-        return default_client_models(platform)
-            .iter()
-            .map(|model| (*model).to_string())
-            .collect();
+        return effective_baseline_models(platform, baseline_models);
     }
 
     let mut models = Vec::new();
@@ -777,7 +822,16 @@ pub(crate) fn advertised_model_ids(
     members: &[ModelCatalogMember],
     mode: PoolModelMode,
 ) -> Vec<String> {
-    advertised_model_catalog_entries(platform, members, mode)
+    advertised_model_ids_with_baseline(platform, members, mode, None)
+}
+
+pub(crate) fn advertised_model_ids_with_baseline(
+    platform: &str,
+    members: &[ModelCatalogMember],
+    mode: PoolModelMode,
+    baseline_models: Option<&[String]>,
+) -> Vec<String> {
+    advertised_model_catalog_entries_with_baseline(platform, members, mode, baseline_models)
         .into_iter()
         .map(|model| model.id)
         .collect()
@@ -796,6 +850,15 @@ pub(crate) fn advertised_model_catalog_entries(
     platform: &str,
     members: &[ModelCatalogMember],
     mode: PoolModelMode,
+) -> Vec<AdvertisedModel> {
+    advertised_model_catalog_entries_with_baseline(platform, members, mode, None)
+}
+
+pub(crate) fn advertised_model_catalog_entries_with_baseline(
+    platform: &str,
+    members: &[ModelCatalogMember],
+    mode: PoolModelMode,
+    baseline_models: Option<&[String]>,
 ) -> Vec<AdvertisedModel> {
     let mut models = Vec::new();
     let mut seen = HashSet::new();
@@ -816,7 +879,8 @@ pub(crate) fn advertised_model_catalog_entries(
         if !capability.mappings.is_empty() && fallback_target.is_none() {
             continue;
         }
-        for model in default_client_models(platform) {
+        for model in effective_baseline_models(platform, baseline_models) {
+            let model = model.as_str();
             let id = catalog_entry_id(mode, member, model);
             push_unique_model(
                 platform,
@@ -969,6 +1033,19 @@ fn catalog_entry_id(mode: PoolModelMode, member: &ModelCatalogMember, alias: &st
     match mode {
         PoolModelMode::Aggregate => alias.to_string(),
         PoolModelMode::Precise => format!("{}/{}", member.prefix, alias),
+    }
+}
+
+/// Resolve the baseline list for a call site. An absent or empty override keeps
+/// the platform's built-in defaults, so legacy callers and unconfigured pools
+/// behave exactly as before.
+fn effective_baseline_models(platform: &str, baseline_models: Option<&[String]>) -> Vec<String> {
+    match baseline_models.filter(|models| !models.is_empty()) {
+        Some(models) => models.to_vec(),
+        None => default_client_models(platform)
+            .iter()
+            .map(|model| (*model).to_string())
+            .collect(),
     }
 }
 
@@ -1236,6 +1313,67 @@ mod tests {
 
     fn codex_model_catalog_payload(capabilities: &[ModelCapability]) -> Value {
         super::codex_model_catalog_payload(&api_members(capabilities), PoolModelMode::Aggregate)
+    }
+    #[test]
+    fn configured_baseline_models_match_requests_without_mappings() {
+        let capability = parse_model_capability("{}");
+        let configured = vec!["custom-z".to_string()];
+
+        assert!(super::supports_requested_model_with_mode_with_baseline(
+            "codex",
+            &capability,
+            Some("custom-z"),
+            ModelMatchMode::ClientFacing,
+            Some(&configured),
+        ));
+        assert!(!super::supports_requested_model_with_mode_with_baseline(
+            "codex",
+            &capability,
+            Some("gpt-5.5"),
+            ModelMatchMode::ClientFacing,
+            Some(&configured),
+        ));
+    }
+
+    #[test]
+    fn configured_codex_baseline_models_replace_the_hardcoded_defaults() {
+        let capability = parse_model_capability("{}");
+        let members = api_members(&[capability.clone()]);
+        let configured = vec!["custom-z".to_string(), "custom-a".to_string()];
+
+        assert_eq!(
+            super::advertised_model_ids_with_baseline(
+                "codex",
+                &members,
+                PoolModelMode::Aggregate,
+                Some(&configured),
+            ),
+            vec!["custom-z", "custom-a"]
+        );
+        assert_eq!(
+            super::known_upstream_models_with_baseline(
+                "codex",
+                &capability,
+                "api",
+                Some(&configured),
+            ),
+            vec!["custom-z", "custom-a"]
+        );
+        assert_eq!(
+            super::advertised_model_ids_with_baseline(
+                "codex",
+                &members,
+                PoolModelMode::Aggregate,
+                None,
+            ),
+            vec![
+                "gpt-6-astra",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+            ]
+        );
     }
 
     /// One pool member for the precise-mode tests, which do care about kinds.

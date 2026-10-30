@@ -76,6 +76,8 @@ describe("DeepLinkImportDialog", () => {
       active_group_id: null,
       account_ids: ["existing-account"],
       model_mode: "aggregate",
+      baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
+      default_baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
       stats: {
         member_count: 1,
         request_count: 0,

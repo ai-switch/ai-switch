@@ -46,12 +46,14 @@ use crate::services::route_credential_activity::{
 };
 use crate::services::route_failure_scope::is_account_scoped_failure;
 use crate::services::route_model_capability::{
-    advertised_model_catalog_entries, catalog_members, codex_effective_context_window,
-    codex_reasoning_metadata, effective_context_window_for_upstream, known_upstream_models,
-    mapping_declares_one_m_context, model_matches, model_state_key_with_mode,
+    advertised_model_catalog_entries_with_baseline, catalog_members,
+    codex_effective_context_window, codex_reasoning_metadata,
+    effective_context_window_for_upstream, known_upstream_models_with_baseline,
+    mapping_declares_one_m_context, model_matches_with_baseline, model_state_key_with_mode,
     parse_model_capability, parse_model_capability_value, requested_model_from_body,
-    resolve_mapping_target, supports_requested_capability_with_mode, supports_requested_model,
-    CatalogMemberInput, ModelCapability, ModelMatchMode, CODEX_ONE_M_CONTEXT_WINDOW,
+    resolve_mapping_target, supports_requested_capability_with_mode,
+    supports_requested_model_with_mode_with_baseline, CatalogMemberInput, ModelCapability,
+    ModelMatchMode, CODEX_ONE_M_CONTEXT_WINDOW,
 };
 use crate::services::route_pool_model_mode::{
     accepted_prefixes, is_official_model_prefix, split_prefixed_model, strip_vendor_model_tag,
@@ -1059,11 +1061,21 @@ pub(crate) async fn forward_request(
         let mode = RoutePoolRepository::model_mode(pool, &platform)
             .await
             .map_err(|err| err.to_string())?;
-        return Ok(json_models_list_response(
+        let baseline_models = if platform.eq_ignore_ascii_case("codex") {
+            Some(
+                RoutePoolRepository::baseline_models(pool, &platform)
+                    .await
+                    .map_err(|err| err.to_string())?,
+            )
+        } else {
+            None
+        };
+        return Ok(json_models_list_response_with_baseline(
             &platform,
             &credentials,
             mode,
             query.as_deref(),
+            baseline_models.as_deref(),
         ));
     }
 
@@ -1120,17 +1132,32 @@ pub(crate) async fn forward_request(
     // Precise-mode addressing, before anything reads the model name: a
     // `<账号>/<别名>` request pins the pool to that one account and continues as if
     // the client had asked for the bare alias.
-    let (candidates, requested_model, body_bytes) =
-        resolve_account_scoped_model(&platform, candidates, requested_model, body_bytes);
+    let baseline_models = if platform.eq_ignore_ascii_case("codex") {
+        Some(
+            RoutePoolRepository::baseline_models(pool, &platform)
+                .await
+                .map_err(|err| err.to_string())?,
+        )
+    } else {
+        None
+    };
+    let (candidates, requested_model, body_bytes) = resolve_account_scoped_model(
+        &platform,
+        candidates,
+        requested_model,
+        body_bytes,
+        baseline_models.as_deref(),
+    );
     // Model filtering must run before cooldown partitioning: the model a request
     // asks for decides which cooldown applies, so an account cannot be judged
     // before its model key is known. It also means the all-cooling probe below
     // is now scoped to accounts that can actually serve this model.
-    let candidates = filter_candidates_for_model_with_mode(
+    let candidates = filter_candidates_for_model_with_mode_with_baseline(
         &platform,
         candidates,
         requested_model.as_deref(),
         state.model_match_mode,
+        baseline_models.as_deref(),
     );
     let candidates = if let Some(capability) = requested_image_capability(&path) {
         filter_candidates_for_capability_with_mode(
@@ -2354,8 +2381,9 @@ pub(crate) async fn forward_request(
             continue;
         }
         if let Some(failure) = semantic_failure.as_ref() {
-            let can_retry_same_credential =
-                !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN);
+            let can_retry_same_credential = !matches!(status, StatusCode::UNAUTHORIZED
+                | StatusCode::FORBIDDEN)
+                && !is_invalid_parameter_failure(status, &failure.message);
             if can_retry_same_credential
                 && credential_retry_count < failure_policy.retry_count as usize
             {
@@ -4770,6 +4798,28 @@ pub(crate) fn should_retry_same_credential_status(status: StatusCode) -> bool {
     !status.is_success() && !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
 }
 
+/// A `4xx` whose body names an invalid parameter or bad request is a
+/// deterministic client error: the request itself is malformed for this
+/// upstream, so retrying the same credential can never flip the verdict. Keeping
+/// it out of the same-credential retry budget avoids hammering the upstream and
+/// returning a slow, misleading "transient" failure. Auth (`401`/`403`) and
+/// rate-limit (`429`) are intentionally excluded — those are still worth a
+/// retry, and server errors fall through to the normal retry path.
+fn is_invalid_parameter_failure(status: StatusCode, message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    let bad_request_body = lower.contains("invalid_parameter")
+        || lower.contains("invalid_request")
+        || lower.contains("bad request");
+    if !bad_request_body {
+        return false;
+    }
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS => false,
+        s if s.is_client_error() => true,
+        _ => false,
+    }
+}
+
 /// Account-level retry eligibility. `partition_by_cooldown` supersedes this for
 /// selection — it has to, because it also weighs the requested model — so this
 /// now only pins down the account-level rule the partition inherits.
@@ -4834,11 +4884,21 @@ async fn record_route_credential_failure_with_status(
 ) {
     // Without a model name there is nothing to charge but the account — Gemini
     // keeps its model in the path, and some routes carry none at all.
+    let baseline_models = if platform.eq_ignore_ascii_case("codex") {
+        RoutePoolRepository::baseline_models(pool, platform).await.ok()
+    } else {
+        None
+    };
     let siblings = (!is_account_scoped_failure(kind, status))
         .then(|| {
             model_key.map(|_| {
                 let capability = parse_model_capability(&credential.config_json);
-                known_upstream_models(platform, &capability, &credential.kind)
+                known_upstream_models_with_baseline(
+                    platform,
+                    &capability,
+                    &credential.kind,
+                    baseline_models.as_deref(),
+                )
             })
         })
         .flatten();
@@ -5383,6 +5443,7 @@ fn resolve_account_scoped_model(
     candidates: Vec<PoolCandidate>,
     requested_model: Option<String>,
     body: axum::body::Bytes,
+    baseline_models: Option<&[String]>,
 ) -> (Vec<PoolCandidate>, Option<String>, axum::body::Bytes) {
     let Some(model) = requested_model else {
         return (candidates, None, body);
@@ -5426,11 +5487,14 @@ fn resolve_account_scoped_model(
         .iter()
         .zip(matched.iter())
         .any(|(candidate, hit)| {
-            *hit && supports_requested_model(
-                platform,
-                &candidate_capability(candidate),
-                Some(alias),
-            )
+            *hit
+                && supports_requested_model_with_mode_with_baseline(
+                    platform,
+                    &candidate_capability(candidate),
+                    Some(alias),
+                    ModelMatchMode::ClientFacing,
+                    baseline_models,
+                )
         });
     if !servable {
         return (candidates, Some(model), body);
@@ -5509,6 +5573,22 @@ fn filter_candidates_for_model_with_mode(
     requested_model: Option<&str>,
     mode: ModelMatchMode,
 ) -> Vec<PoolCandidate> {
+    filter_candidates_for_model_with_mode_with_baseline(
+        platform,
+        candidates,
+        requested_model,
+        mode,
+        None,
+    )
+}
+
+fn filter_candidates_for_model_with_mode_with_baseline(
+    platform: &str,
+    candidates: Vec<PoolCandidate>,
+    requested_model: Option<&str>,
+    mode: ModelMatchMode,
+    baseline_models: Option<&[String]>,
+) -> Vec<PoolCandidate> {
     let Some(requested_model) = requested_model else {
         return candidates;
     };
@@ -5517,7 +5597,13 @@ fn filter_candidates_for_model_with_mode(
         .into_iter()
         .filter_map(|mut candidate| {
             let capability = candidate_capability(&candidate);
-            if !model_matches(platform, &capability, Some(requested_model), mode) {
+            if !model_matches_with_baseline(
+                platform,
+                &capability,
+                Some(requested_model),
+                mode,
+                baseline_models,
+            ) {
                 return None;
             }
             candidate.model_key = Some(model_state_key_with_mode(
@@ -7632,6 +7718,15 @@ fn build_models_list_payload(
     credentials: &[SelectedCredential],
     mode: PoolModelMode,
 ) -> Value {
+    build_models_list_payload_with_baseline(platform, credentials, mode, None)
+}
+
+fn build_models_list_payload_with_baseline(
+    platform: &str,
+    credentials: &[SelectedCredential],
+    mode: PoolModelMode,
+    baseline_models: Option<&[String]>,
+) -> Value {
     let created = Utc::now().timestamp();
     let inputs = credentials
         .iter()
@@ -7643,7 +7738,12 @@ fn build_models_list_payload(
         })
         .collect::<Vec<_>>();
     let members = catalog_members(&inputs);
-    let data: Vec<Value> = advertised_model_catalog_entries(platform, &members, mode)
+    let data: Vec<Value> = advertised_model_catalog_entries_with_baseline(
+        platform,
+        &members,
+        mode,
+        baseline_models,
+    )
         .into_iter()
         .map(|entry| {
             let mut model = json!({
@@ -7691,7 +7791,16 @@ fn build_route_models_list_payload(
     credentials: &[SelectedCredential],
     mode: PoolModelMode,
 ) -> Value {
-    build_models_list_payload(platform, credentials, mode)
+    build_route_models_list_payload_with_baseline(platform, credentials, mode, None)
+}
+
+fn build_route_models_list_payload_with_baseline(
+    platform: &str,
+    credentials: &[SelectedCredential],
+    mode: PoolModelMode,
+    baseline_models: Option<&[String]>,
+) -> Value {
+    build_models_list_payload_with_baseline(platform, credentials, mode, baseline_models)
 }
 
 fn json_models_list_response(
@@ -7700,7 +7809,22 @@ fn json_models_list_response(
     mode: PoolModelMode,
     _query: Option<&str>,
 ) -> Response {
-    let payload = build_route_models_list_payload(platform, credentials, mode);
+    json_models_list_response_with_baseline(platform, credentials, mode, _query, None)
+}
+
+fn json_models_list_response_with_baseline(
+    platform: &str,
+    credentials: &[SelectedCredential],
+    mode: PoolModelMode,
+    _query: Option<&str>,
+    baseline_models: Option<&[String]>,
+) -> Response {
+    let payload = build_route_models_list_payload_with_baseline(
+        platform,
+        credentials,
+        mode,
+        baseline_models,
+    );
     (
         StatusCode::OK,
         [("content-type", "application/json")],
@@ -8662,6 +8786,41 @@ mod tests {
         credentials: &[SelectedCredential],
     ) -> Value {
         super::build_route_models_list_payload(platform, credentials, PoolModelMode::Aggregate)
+    }
+
+    #[tokio::test]
+    async fn saved_baseline_models_change_the_models_payload_without_restart() {
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let credential = api_credential_with_config(
+            "wildcard",
+            r#"{"base_url":"https://api.example.com/v1","interface_format":"openai","model_mappings":[]}"#,
+        );
+
+        RoutePoolRepository::save_baseline_models(
+            &pool,
+            "codex",
+            &["custom-z".to_string(), "custom-a".to_string()],
+        )
+        .await
+        .expect("save baseline models");
+        let baseline_models = RoutePoolRepository::baseline_models(&pool, "codex")
+            .await
+            .expect("load baseline models");
+        let payload = super::build_models_list_payload_with_baseline(
+            "codex",
+            &[credential],
+            PoolModelMode::Aggregate,
+            Some(&baseline_models),
+        );
+        let ids: Vec<&str> = payload["data"]
+            .as_array()
+            .expect("data array")
+            .iter()
+            .filter_map(|model| model["id"].as_str())
+            .collect();
+
+        assert_eq!(ids, vec!["custom-z", "custom-a"]);
     }
     use crate::database::{create_memory_pool, run_migrations};
     use crate::models::route_credential::{
@@ -18020,6 +18179,7 @@ data: [DONE]\n\n";
                 .collect(),
             Some(requested_model.to_string()),
             axum::body::Bytes::from(body.to_string()),
+            None,
         );
         (
             candidates

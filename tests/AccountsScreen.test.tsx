@@ -42,6 +42,7 @@ import {
   setRouteCredentialCooldown,
   setRouteCredentialStatuses,
   moveRoutePoolGroupMembers,
+  setRoutePoolBaselineModels,
   setRoutePoolMembers,
   setRoutePoolModelMode,
   startRouteProxy,
@@ -128,6 +129,7 @@ vi.mock("../src/lib/api/client", () => ({
   setRouteCredentialStatuses: vi.fn(),
   moveRoutePoolGroupMembers: vi.fn(),
   setRoutePoolMembers: vi.fn(),
+  setRoutePoolBaselineModels: vi.fn(),
   setRoutePoolModelMode: vi.fn(),
   startRouteProxy: vi.fn(),
   stopRouteProxy: vi.fn(),
@@ -664,6 +666,7 @@ describe("AccountsScreen", () => {
         return () => undefined;
       },
     );
+    vi.mocked(setRoutePoolBaselineModels).mockReset();
     vi.mocked(setRoutePoolMembers).mockReset();
     vi.mocked(createRoutePoolGroup).mockReset();
     vi.mocked(updateRoutePoolGroup).mockReset();
@@ -788,6 +791,8 @@ describe("AccountsScreen", () => {
       active_group_id: `${platform}-default`,
       account_ids: accountIds,
       model_mode: "aggregate",
+      baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
+      default_baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
       stats: statsFixture({
         member_count: accountIds.length,
       }),
@@ -862,6 +867,8 @@ describe("AccountsScreen", () => {
         active_group_id: null,
         account_ids: [...input.account_ids],
         model_mode: "aggregate",
+      baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
+      default_baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
         stats: statsFixture({
           member_count: input.account_ids.length,
           request_count: 1,
@@ -887,6 +894,8 @@ describe("AccountsScreen", () => {
         active_group_id: `${input.platform}-default`,
         account_ids: [...input.account_ids],
         model_mode: "aggregate",
+      baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
+      default_baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
         stats: statsFixture({
           member_count: input.account_ids.length,
         }),
@@ -962,14 +971,14 @@ describe("AccountsScreen", () => {
     expect(workspace).toHaveClass("bg-transparent");
     expect(scrollRegion).toHaveClass("bg-transparent");
     expect(screen.getByTestId("account-workspace-toolbar")).toContainElement(
-      screen.getByRole("button", { name: "会话管理" }),
+      screen.getByRole("button", { name: "配置 Codex 基线模型" }),
     );
     expect(screen.getByTestId("pool-status-strip")).toHaveClass(
       "max-[599px]:mx-0",
       "max-[599px]:max-w-none",
       "max-[599px]:flex-1",
     );
-    expect(screen.getByRole("button", { name: "会话管理" }).parentElement).toHaveClass("max-[599px]:hidden");
+    expect(screen.getByRole("button", { name: "配置 Codex 基线模型" }).parentElement).toHaveClass("max-[599px]:hidden");
     expect(screen.getByLabelText("刷新账号列表")).toBeInTheDocument();
     expect(screen.queryByRole("menu", { name: "刷新操作" })).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("打开刷新菜单")).toBeEnabled());
@@ -2272,6 +2281,59 @@ describe("AccountsScreen", () => {
     );
   });
 
+  it("keeps session management on non-Codex platforms", async () => {
+    renderScreen("claude");
+
+    expect(await screen.findByRole("button", { name: "会话管理" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "配置 Codex 基线模型" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens the Codex baseline model editor and saves ordered models", async () => {
+    const user = userEvent.setup();
+    vi.mocked(setRoutePoolBaselineModels).mockImplementation(async ({ platform, models }) => ({
+      platform,
+      groups: [],
+      group_id: null,
+      active_group_id: null,
+      account_ids: [],
+      model_mode: "aggregate",
+      baseline_models: models,
+      default_baseline_models: [
+        "gpt-6-astra",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+      ],
+      stats: statsFixture({}),
+    }));
+    renderScreen();
+
+    await user.click(await screen.findByRole("button", { name: "配置 Codex 基线模型" }));
+    expect(await screen.findByRole("dialog", { name: "Codex 基线模型" })).toBeInTheDocument();
+    expect(screen.getByLabelText("基线模型 1")).toHaveValue("gpt-6-astra");
+
+    await user.click(screen.getByRole("button", { name: "添加模型" }));
+    await user.type(screen.getByLabelText("基线模型 6"), "custom-x");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(setRoutePoolBaselineModels).toHaveBeenCalledWith({
+        platform: "codex",
+        models: [
+          "gpt-6-astra",
+          "gpt-5.6-sol",
+          "gpt-5.6-terra",
+          "gpt-5.6-luna",
+          "gpt-5.5",
+          "custom-x",
+        ],
+      }),
+    );
+  });
+
   it("keeps side toolbar content visible when the window is not pinned to the top", () => {
     vi.useFakeTimers();
     renderScreen();
@@ -2286,7 +2348,7 @@ describe("AccountsScreen", () => {
     expect(workspace).toHaveStyle("grid-template-rows: 60px minmax(0, 1fr) 32px");
     expect(toolbar).toContainElement(screen.getByTestId("pool-status-strip"));
     expect(screen.getByTestId("workspace-toolbar-leading")).toHaveClass("opacity-100");
-    expect(screen.getByRole("button", { name: "会话管理" }).parentElement).toHaveClass("opacity-100");
+    expect(screen.getByRole("button", { name: "配置 Codex 基线模型" }).parentElement).toHaveClass("opacity-100");
   });
 
   it("fills the account list area and centers the empty state when no accounts exist", async () => {
@@ -2575,6 +2637,8 @@ describe("AccountsScreen", () => {
       active_group_id: "codex-default",
       account_ids: [],
       model_mode: "aggregate",
+      baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
+      default_baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
       stats: statsFixture(),
     });
     await userEvent.click(
@@ -2606,6 +2670,8 @@ describe("AccountsScreen", () => {
       active_group_id: "codex-default",
       account_ids: ["cred-official-1"],
       model_mode: "aggregate",
+      baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
+      default_baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
       stats: statsFixture(),
     });
     await userEvent.click(
@@ -2688,6 +2754,8 @@ describe("AccountsScreen", () => {
       active_group_id: null,
       account_ids: hermesCredentials.map((credential) => credential.id),
       model_mode: "aggregate",
+      baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
+      default_baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
       stats: statsFixture({ member_count: 2 }),
     });
     vi.mocked(getRouteProxyStatus).mockResolvedValue({
@@ -7151,6 +7219,8 @@ describe("AccountsScreen", () => {
       active_group_id: null,
       account_ids: [...(poolStateByPlatform.get(platform) ?? [])],
       model_mode: mode,
+      baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
+      default_baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
       stats: statsFixture({}),
     }));
     renderScreen();

@@ -4,11 +4,13 @@ use crate::error::AppError;
 use crate::models::platform::{PlatformId, PlatformOperation};
 use crate::models::route_pool::{
     CreateRoutePoolGroupInput, DeleteRoutePoolGroupInput, RoutePoolRouteOutcome,
-    RoutePoolRouteRequest, RoutePoolState, SetRoutePoolGroupMembersInput, SetRoutePoolMembersInput,
-    SetRoutePoolModelModeInput, UpdateRoutePoolGroupInput,
+    RoutePoolRouteRequest, RoutePoolState, SetRoutePoolBaselineModelsInput,
+    SetRoutePoolGroupMembersInput, SetRoutePoolMembersInput, SetRoutePoolModelModeInput,
+    UpdateRoutePoolGroupInput,
 };
 use crate::services::platform_capability_service::PlatformCapabilityService;
 use crate::services::route_credential_activity::RouteCredentialActivityRegistry;
+use crate::services::route_pool_baseline_models::default_models;
 use crate::services::route_pool_model_mode::PoolModelMode;
 use chrono::DateTime;
 use sqlx::SqlitePool;
@@ -184,6 +186,31 @@ impl RoutePoolService {
         .await
     }
 
+    pub async fn set_baseline_models(
+        pool: &SqlitePool,
+        input: SetRoutePoolBaselineModelsInput,
+    ) -> Result<RoutePoolState, AppError> {
+        let platform = PlatformId::parse(&input.platform)?;
+        PlatformCapabilityService::require(platform, PlatformOperation::RouteCredentials)?;
+        if platform != PlatformId::Codex {
+            return Err(AppError::Validation {
+                code: "validation.route_pool_baseline_models_platform",
+                message: "Baseline models are configurable for Codex only".to_string(),
+                details: Some(platform.as_str().to_string()),
+                recoverable: true,
+            });
+        }
+        RoutePoolRepository::save_baseline_models(pool, platform.as_str(), &input.models).await?;
+        best_effort_sync(pool, platform.as_str()).await;
+        Self::state(
+            pool,
+            platform.as_str(),
+            None,
+            DEFAULT_REQUEST_PAGE,
+            DEFAULT_REQUEST_PAGE_SIZE,
+        )
+        .await
+    }
     pub async fn set_members(
         pool: &SqlitePool,
         input: SetRoutePoolMembersInput,
@@ -482,6 +509,8 @@ impl RoutePoolService {
                 .await?
                 .as_str()
                 .to_string(),
+            baseline_models: RoutePoolRepository::baseline_models(pool, platform).await?,
+            default_baseline_models: default_models(platform),
             stats: RoutePoolRepository::stats(
                 pool,
                 platform,
@@ -648,6 +677,60 @@ mod tests {
     use sqlx::SqlitePool;
     use uuid::Uuid;
 
+    #[tokio::test]
+    async fn baseline_model_service_validates_and_returns_state() {
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+
+        let state = RoutePoolService::set_baseline_models(
+            &pool,
+            crate::models::route_pool::SetRoutePoolBaselineModelsInput {
+                platform: "codex".to_string(),
+                models: vec!["  custom-z ".to_string(), "custom-a".to_string()],
+            },
+        )
+        .await
+        .expect("save baseline models");
+        assert_eq!(state.baseline_models, vec!["custom-z", "custom-a"]);
+        assert_eq!(
+            state.default_baseline_models,
+            vec![
+                "gpt-6-astra",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+            ]
+        );
+
+        let reset = RoutePoolService::set_baseline_models(
+            &pool,
+            crate::models::route_pool::SetRoutePoolBaselineModelsInput {
+                platform: "codex".to_string(),
+                models: vec!["  ".to_string(), "".to_string()],
+            },
+        )
+        .await
+        .expect("reset baseline models");
+        assert_eq!(reset.baseline_models, reset.default_baseline_models);
+
+        let duplicate = RoutePoolService::set_baseline_models(
+            &pool,
+            crate::models::route_pool::SetRoutePoolBaselineModelsInput {
+                platform: "codex".to_string(),
+                models: vec!["custom".to_string(), "CUSTOM".to_string()],
+            },
+        )
+        .await
+        .expect_err("duplicate ids must be rejected");
+        assert!(matches!(
+            duplicate,
+            AppError::Validation {
+                code: "validation.route_pool_baseline_models_duplicate",
+                ..
+            }
+        ));
+    }
     #[tokio::test]
     async fn route_pool_does_not_default_unknown_platform_to_codex() {
         let pool = create_memory_pool().await.expect("pool");

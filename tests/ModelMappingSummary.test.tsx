@@ -21,6 +21,20 @@ describe("ModelMappingSummary", () => {
     await user.hover(label);
   });
 
+  it("uses the configured baseline list instead of the built-in defaults", () => {
+    render(
+      <ModelMappingSummary
+        baselineModels={["custom-a", "custom-b"]}
+        mappings={[]}
+        platform="codex"
+      />,
+    );
+
+    expect(screen.getByRole("tooltip", { hidden: true })).toHaveTextContent(
+      "未配置模型映射，仅匹配基线模型：custom-a、custom-b",
+    );
+  });
+
   it("shows three aliases and opens the remaining mappings", async () => {
     const user = userEvent.setup();
     render(

@@ -50,6 +50,7 @@ import type {
   RoutePoolRouteOutcome,
   RoutePoolRouteRequest,
   RoutePoolState,
+  SetRoutePoolBaselineModelsInput,
   SetRoutePoolGroupMembersInput,
   UpdateRoutePoolGroupInput,
   RouteProxyLiveLogEntry,
@@ -223,6 +224,11 @@ export function setRoutePoolMembers(input: {
  * pool's own `/v1/models`; client config files carry the new ids only after the
  * next config write.
  */
+export function setRoutePoolBaselineModels(
+  input: SetRoutePoolBaselineModelsInput,
+): Promise<RoutePoolState> {
+  return invoke("set_route_pool_baseline_models", { input });
+}
 export function setRoutePoolModelMode(input: {
   platform: string;
   mode: RoutePoolModelMode;

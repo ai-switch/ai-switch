@@ -124,6 +124,12 @@ pub struct RoutePoolState {
     /// pool into one word list, `"precise"` expands it per API account. A string
     /// rather than an enum because it crosses to the UI as one.
     pub model_mode: String,
+    /// The ordered baseline model ids this platform advertises when an account
+    /// has no explicit mapping. Empty means the platform has no baseline set.
+    pub baseline_models: Vec<String>,
+    /// The built-in defaults, so the editor can offer a one-click reset without
+    /// duplicating the list on the frontend.
+    pub default_baseline_models: Vec<String>,
     pub stats: RoutePoolStats,
 }
 
@@ -170,6 +176,13 @@ pub struct RoutePoolGroup {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetRoutePoolBaselineModelsInput {
+    pub platform: String,
+    /// Ordered model ids. Blank rows are ignored; an all-blank list restores the
+    /// platform defaults. Duplicate ids are rejected case-insensitively.
+    pub models: Vec<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SetRoutePoolModelModeInput {
     pub platform: String,

@@ -29,7 +29,7 @@ use crate::services::route_credential_transfer_import_service::{
     normalize_transfer_items, NormalizedImportItem,
 };
 use crate::services::route_model_capability::{
-    aliases_for_model_key, known_upstream_models, parse_model_capability,
+    aliases_for_model_key, known_upstream_models_with_baseline, parse_model_capability,
 };
 use crate::services::route_preview_service::RoutePreviewService;
 use chrono::Utc;
@@ -592,10 +592,7 @@ impl RouteCredentialService {
         {
             return Ok(());
         }
-        config.insert(
-            "force_reasoning_content".to_string(),
-            json!(true),
-        );
+        config.insert("force_reasoning_content".to_string(), json!(true));
         let config_json = Value::Object(config).to_string();
         RouteCredentialRepository::update_config_json(pool, id, &config_json).await?;
         best_effort_sync(pool, &platform).await;
@@ -662,10 +659,30 @@ async fn attach_model_states(
         .map(|credential| credential.id.clone())
         .collect();
     let mut rows = RouteCredentialModelRepository::list_for_credentials(pool, &ids).await?;
+    let codex_baseline_models = if credentials
+        .iter()
+        .any(|credential| credential.platform.eq_ignore_ascii_case("codex"))
+    {
+        RoutePoolRepository::baseline_models(pool, "codex")
+            .await
+            .ok()
+    } else {
+        None
+    };
 
     for credential in &mut credentials {
         let capability = parse_model_capability(&credential.config_json);
-        let known = known_upstream_models(&credential.platform, &capability, &credential.kind);
+        let baseline_models = credential
+            .platform
+            .eq_ignore_ascii_case("codex")
+            .then_some(codex_baseline_models.as_deref())
+            .flatten();
+        let known = known_upstream_models_with_baseline(
+            &credential.platform,
+            &capability,
+            &credential.kind,
+            baseline_models,
+        );
         let mut states: Vec<RouteCredentialModelState> = Vec::new();
 
         let (mine, rest): (Vec<_>, Vec<_>) = rows
@@ -3381,13 +3398,9 @@ mod plaintext_reasoning_setting_tests {
         )
         .unwrap();
         assert_eq!(stored2["force_reasoning_content"], true);
-        assert!(stored2["base_url"]
-            .as_str()
-            .unwrap()
-            .contains("anyrouter"));
+        assert!(stored2["base_url"].as_str().unwrap().contains("anyrouter"));
     }
 }
-
 
 #[cfg(test)]
 mod request_compression_setting_tests {
@@ -3475,7 +3488,6 @@ mod request_compression_setting_tests {
         );
     }
 }
-
 
 #[cfg(test)]
 mod content_rejection_setting_tests {
@@ -3573,12 +3585,11 @@ mod content_rejection_setting_tests {
         )
         .await
         .is_err());
-        let stored = RouteCredentialRepository::get(&pool, &row.id).await.unwrap();
+        let stored = RouteCredentialRepository::get(&pool, &row.id)
+            .await
+            .unwrap();
         let config: Value = serde_json::from_str(&stored.config_json).unwrap();
-        assert_eq!(
-            config["content_rejection_compat"],
-            "trim_old_tool_outputs"
-        );
+        assert_eq!(config["content_rejection_compat"], "trim_old_tool_outputs");
     }
 
     #[tokio::test]
@@ -3601,13 +3612,10 @@ mod content_rejection_setting_tests {
             "config_json": r#"{"keep":"yes"}"#,
             "preview_json": row.preview_json
         });
-        let updated = RouteCredentialService::update(
-            &pool,
-            row.id,
-            serde_json::from_value(update).unwrap(),
-        )
-        .await
-        .unwrap();
+        let updated =
+            RouteCredentialService::update(&pool, row.id, serde_json::from_value(update).unwrap())
+                .await
+                .unwrap();
         let config: Value = serde_json::from_str(&updated.config_json).unwrap();
         assert!(config.get("content_rejection_compat").is_none());
         assert_eq!(config["keep"], "yes");

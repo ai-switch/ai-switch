@@ -37,8 +37,9 @@ use crate::models::route_credential_transfer::{
 };
 use crate::models::route_pool::{
     CreateRoutePoolGroupInput, DeleteRoutePoolGroupInput, RouteModelsFetchRequest,
-    RoutePoolModelTestRequest, RoutePoolRouteRequest, SetRoutePoolGroupMembersInput,
-    SetRoutePoolMembersInput, SetRoutePoolModelModeInput, UpdateRoutePoolGroupInput,
+    RoutePoolModelTestRequest, RoutePoolRouteRequest, SetRoutePoolBaselineModelsInput,
+    SetRoutePoolGroupMembersInput, SetRoutePoolMembersInput, SetRoutePoolModelModeInput,
+    UpdateRoutePoolGroupInput,
 };
 use crate::models::settings::AppSettings;
 use crate::services::agent_launch_service::AgentLaunchService;
@@ -997,6 +998,14 @@ pub async fn dispatch_command(
                     .map_err(to_error)?,
             )
         }
+        "set_route_pool_baseline_models" => {
+            let input: SetRoutePoolBaselineModelsInput = parse_arg(&args, "input")?;
+            to_value(
+                RoutePoolService::set_baseline_models(&state.pool, input)
+                    .await
+                    .map_err(to_error)?,
+            )
+        }
         "route_pool_route_once" => {
             let request: RoutePoolRouteRequest = parse_arg(&args, "request")?;
             let activity = state.route_proxy.activity();
@@ -1533,7 +1542,8 @@ mod tests {
             .unwrap();
         assert_eq!(settings["route_proxy_request_body_limit_mib"], 128);
         let mut payload =
-            br#"{"model":"claude-sonnet-4","messages":[{"role":"user","content":"hello"}]}"#.to_vec();
+            br#"{"model":"claude-sonnet-4","messages":[{"role":"user","content":"hello"}]}"#
+                .to_vec();
         payload.resize(1024 * 1024 + 1, b' ');
         for (limit, expected) in [
             (1, StatusCode::PAYLOAD_TOO_LARGE),

@@ -26,7 +26,13 @@ const baselineModelsByPlatform: Record<string, readonly string[]> = {
   grok: ["grok-4.5"],
 };
 
-export function baselineModelsForPlatform(platform: string) {
+export function baselineModelsForPlatform(
+  platform: string,
+  configuredModels?: readonly string[],
+) {
+  if (configuredModels !== undefined) {
+    return configuredModels;
+  }
   return baselineModelsByPlatform[platform.trim().toLowerCase()] ?? [];
 }
 
@@ -149,8 +155,13 @@ function modelSummaryEntries(platform: string, mappings: ModelMapping[]): ModelS
 
 const BASELINE_LABEL = "基线模型";
 
-function baselineTooltipText(platform: string): string {
-  const baselineModels = baselineModelsForPlatform(platform).map((alias) => claudeRoleLabel(alias));
+function baselineTooltipText(
+  platform: string,
+  configuredModels?: readonly string[],
+): string {
+  const baselineModels = baselineModelsForPlatform(platform, configuredModels).map((alias) =>
+    claudeRoleLabel(alias),
+  );
   return baselineModels.length > 0
     ? "未配置模型映射，仅匹配基线模型：" + baselineModels.join("、")
     : "未配置模型映射，当前平台暂无预设基线模型";
@@ -167,10 +178,11 @@ function baselineTooltipText(platform: string): string {
 export function modelSummaryLine(
   platform: string,
   mappings: ModelMapping[],
+  baselineModels?: readonly string[],
 ): { text: string; title: string } {
   const entries = modelSummaryEntries(platform, mappings);
   if (entries.length === 0) {
-    return { text: BASELINE_LABEL, title: baselineTooltipText(platform) };
+    return { text: BASELINE_LABEL, title: baselineTooltipText(platform, baselineModels) };
   }
   return {
     text: entries.map((entry) => entry.text).join(" · "),
@@ -181,9 +193,12 @@ export function modelSummaryLine(
 export function ModelMappingSummary({
   platform,
   mappings,
+  baselineModels,
 }: {
   platform: string;
   mappings: ModelMapping[];
+  /** Configured baseline list; absent keeps the built-in platform defaults. */
+  baselineModels?: readonly string[];
 }): JSX.Element {
   const entries = modelSummaryEntries(platform, mappings);
   const [open, setOpen] = useState(false);
@@ -227,7 +242,7 @@ export function ModelMappingSummary({
           id={baselineTooltipId}
           role="tooltip"
         >
-          {baselineTooltipText(platform)}
+          {baselineTooltipText(platform, baselineModels)}
         </span>
       </span>
     );

@@ -13,7 +13,7 @@ use crate::models::platform::PlatformId;
 use crate::models::route_credential::RouteCredentialPoolScope;
 use crate::models::route_credential_transfer::RouteCredentialSelectionContext;
 use crate::services::route_model_capability::{
-    advertised_model_catalog_entries, catalog_member_inputs, catalog_members,
+    advertised_model_catalog_entries_with_baseline, catalog_member_inputs, catalog_members,
     codex_reasoning_metadata,
 };
 use crate::terminal_manager::{
@@ -147,32 +147,40 @@ impl AgentLaunchService {
         // the written client config carries — a Codex CLI whose catalog only lists
         // prefixed ids would reject a bare `--model`.
         let mode = RoutePoolRepository::model_mode(pool, platform.as_str()).await?;
+        let baseline_models = if platform == PlatformId::Codex {
+            Some(RoutePoolRepository::baseline_models(pool, platform.as_str()).await?)
+        } else {
+            None
+        };
 
         let supports_reasoning = agent_supports_reasoning(platform.as_str());
-        Ok(
-            advertised_model_catalog_entries(platform.as_str(), &members, mode)
-                .into_iter()
-                .map(|entry| {
-                    if !supports_reasoning {
-                        return AgentLaunchModel {
-                            id: entry.id,
-                            reasoning_levels: Vec::new(),
-                            default_reasoning_level: None,
-                        };
-                    }
-                    // Same per-alias list the catalog advertises, so `--reasoning`
-                    // can only offer efforts the router will accept. Keyed by the
-                    // bare alias: a prefixed id matches no profile table.
-                    let (levels, default_level) =
-                        codex_reasoning_metadata(&entry.base_id, entry.reasoning_levels.as_deref());
-                    AgentLaunchModel {
-                        id: entry.id,
-                        reasoning_levels: levels.iter().filter_map(reasoning_level).collect(),
-                        default_reasoning_level: Some(default_level),
-                    }
-                })
-                .collect(),
+        Ok(advertised_model_catalog_entries_with_baseline(
+            platform.as_str(),
+            &members,
+            mode,
+            baseline_models.as_deref(),
         )
+        .into_iter()
+        .map(|entry| {
+            if !supports_reasoning {
+                return AgentLaunchModel {
+                    id: entry.id,
+                    reasoning_levels: Vec::new(),
+                    default_reasoning_level: None,
+                };
+            }
+            // Same per-alias list the catalog advertises, so `--reasoning`
+            // can only offer efforts the router will accept. Keyed by the
+            // bare alias: a prefixed id matches no profile table.
+            let (levels, default_level) =
+                codex_reasoning_metadata(&entry.base_id, entry.reasoning_levels.as_deref());
+            AgentLaunchModel {
+                id: entry.id,
+                reasoning_levels: levels.iter().filter_map(reasoning_level).collect(),
+                default_reasoning_level: Some(default_level),
+            }
+        })
+        .collect())
     }
 }
 
