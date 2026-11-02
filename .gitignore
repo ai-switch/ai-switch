@@ -17,3 +17,6 @@ src-tauri/target-codex-test/
 docs-site/docs/.vitepress/cache/
 docs-site/docs/.vitepress/.temp/
 *.timestamp-*.mjs
+# Local AI assistant project data (memory logs, session state)
+.workbuddy/
+.workbuddy-ai/memory/
