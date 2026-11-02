@@ -133,6 +133,11 @@ pub(crate) struct CodexReasoningProfile {
 const SOL_REASONING_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
 const GPT_6_ASTRA_REASONING_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
 const TERRA_REASONING_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
+/// `gpt-6.1-sol` serves OpenAI Responses upstreams that reject `ultra`
+/// (their enum stops at `max`). The default effort is the last advertised tier,
+/// so this ladder must not carry `ultra` or a fresh account's first request
+/// 400s before the user can change anything.
+const GPT_6_1_SOL_REASONING_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const LUNA_REASONING_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const GPT_55_REASONING_LEVELS: &[&str] = &["low", "medium", "high", "xhigh"];
 const DEFAULT_REASONING_LEVELS: &[&str] = &["low", "medium", "high"];
@@ -150,6 +155,7 @@ const DEEPSEEK_V4_REASONING_LEVELS: &[&str] = &["low", "medium", "high", "max"];
 pub(crate) fn baseline_reasoning_levels(model: &str) -> Option<&'static [&'static str]> {
     match model.trim().to_ascii_lowercase().as_str() {
         "gpt-6-astra" => Some(GPT_6_ASTRA_REASONING_LEVELS),
+        "gpt-6.1-sol" => Some(GPT_6_1_SOL_REASONING_LEVELS),
         "gpt-5.6-sol" => Some(SOL_REASONING_LEVELS),
         "gpt-5.6-terra" => Some(TERRA_REASONING_LEVELS),
         "gpt-5.6-luna" => Some(LUNA_REASONING_LEVELS),
@@ -1697,6 +1703,25 @@ mod tests {
         let (_, kept) =
             codex_reasoning_metadata("gpt-5.5", Some(&["high".to_string(), "medium".to_string()]));
         assert_eq!(kept, "medium");
+    }
+
+    #[test]
+    fn gpt_6_1_sol_defaults_to_max_because_its_upstream_rejects_ultra() {
+        // OpenAI Responses upstreams accept 'none','minimal','low','medium',
+        // 'high','xhigh','max' — `ultra` 400s. The default effort is the last
+        // advertised tier, so the baseline ladder must stop at `max`.
+        let (levels, default_level) = codex_reasoning_metadata("gpt-6.1-sol", None);
+        let efforts: Vec<&str> = levels
+            .iter()
+            .filter_map(|level| level["effort"].as_str())
+            .collect();
+        assert_eq!(efforts, vec!["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(default_level, "max");
+        assert!(!efforts.contains(&"ultra"));
+        assert_eq!(
+            default_third_party_reasoning_levels("gpt-6.1-sol"),
+            vec!["low", "medium", "high", "xhigh", "max"]
+        );
     }
 
     #[test]

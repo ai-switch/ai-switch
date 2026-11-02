@@ -16,6 +16,21 @@ import {
 } from "../src/lib/codexModelCapability";
 
 describe("codexModelCapability", () => {
+  it("defaults gpt-6.1-sol to a tier its Responses upstream accepts", () => {
+    // `ultra` is not in the upstream enum ('none','minimal','low','medium',
+    // 'high','xhigh','max'); the default is the last advertised tier, so the
+    // ladder has to stop at `max` or the first request 400s.
+    expect(codexBaselineReasoningLevels("gpt-6.1-sol")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(codexDefaultReasoningLevel("gpt-6.1-sol", null)).toBe("max");
+    expect(codexDefaultReasoningLevel("gpt-6.1-sol", [])).toBe("max");
+  });
+
   it("gives each GPT baseline model its own effort ladder", () => {
     expect(codexBaselineReasoningLevels("gpt-6-astra")).toEqual([
       "low",

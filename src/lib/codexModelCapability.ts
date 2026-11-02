@@ -22,9 +22,15 @@ export const CODEX_REASONING_LEVEL_OPTIONS = [
 ] as const;
 
 /** GPT baseline models ship with a known effort ladder; the editor preselects it
- * so "auto" and "explicit" start from the same place. */
+ * so "auto" and "explicit" start from the same place.
+ *
+ * `gpt-6.1-sol` stops at `max` on purpose: its Responses upstream rejects
+ * `ultra` ("Supported values are ... and 'max'"), and the default effort is the
+ * last tier of this ladder, so advertising `ultra` would make every fresh
+ * account fail its first request. */
 const CODEX_BASELINE_REASONING_PROFILES: Record<string, readonly string[]> = {
   "gpt-6-astra": ["low", "medium", "high", "xhigh", "max", "ultra"],
+  "gpt-6.1-sol": ["low", "medium", "high", "xhigh", "max"],
   "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
   "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
   "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],

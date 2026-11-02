@@ -3058,6 +3058,32 @@ command = "npx"
     }
 
     #[tokio::test]
+    async fn gpt_6_1_sol_config_writes_max_instead_of_an_unsupported_ultra() {
+        let fixture = ServiceFixture::new().await;
+        seed_codex_pool_member(&fixture.pool, "gpt-6.1-sol").await;
+
+        RouteConfigService::write_configs_for_home(
+            &fixture.paths,
+            &fixture.pool,
+            &fixture.runtime,
+            BASE_URL,
+            "codex",
+            &fixture.home,
+            Some(&["codex".to_string()]),
+        )
+        .await
+        .expect("write");
+
+        let codex_config = tokio::fs::read_to_string(fixture.home.join(".codex/config.toml"))
+            .await
+            .expect("codex config");
+        // The Responses upstream rejects `ultra`; the default effort is the last
+        // tier of the baseline ladder, which for this model stops at `max`.
+        assert!(codex_config.contains("model_reasoning_effort = \"max\""));
+        assert!(!codex_config.contains("model_reasoning_effort = \"ultra\""));
+    }
+
+    #[tokio::test]
     async fn codex_config_carries_a_declared_reasoning_list_into_the_root_effort() {
         let fixture = ServiceFixture::new().await;
         // An account that deliberately caps a model at `medium`: the root effort
