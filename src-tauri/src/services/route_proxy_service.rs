@@ -47,9 +47,7 @@ use crate::services::route_credential_activity::{
 };
 use crate::services::route_failure_scope::is_account_scoped_failure;
 use crate::services::route_model_capability::{
-    advertised_model_catalog_entries, advertised_model_catalog_entries_with_baseline,
-    advertised_model_catalog_entries_with_baseline_and_capability,
-    advertised_model_catalog_entries_with_capability, catalog_members,
+    advertised_model_catalog_entries_with_baseline_and_capability, catalog_members,
     codex_effective_context_window, codex_reasoning_metadata,
     effective_context_window_for_upstream, known_upstream_models_with_baseline,
     mapping_declares_one_m_context, model_matches_with_baseline, model_state_key_with_mode,
