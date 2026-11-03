@@ -716,9 +716,11 @@ async fn saas_video_request_authenticates_reserves_submits_and_bills_per_video()
 /// 的账号 + 给定定价 + 一个能认证的 key。
 ///
 /// 只在 `reserve_video` 层面用（不发上游），所以不需要 mock 上游。
+/// `interface_format` 决定账号的方言（复审 3a 的计价口径按方言折算）。
 async fn video_billing_fixture(
     flat_price: i64,
     per_second_price: i64,
+    interface_format: &str,
 ) -> (SqlitePool, crate::saas::billing::ApiPrincipal, String) {
     let pool = repository::test_pool().await;
     crate::database::run_migrations(&pool).await.unwrap();
@@ -729,18 +731,18 @@ async fn video_billing_fixture(
            (id,platform,kind,display_name,status,secret_payload_json,config_json,created_at,updated_at)
          VALUES('video-account','codex','api','Kling','ok','{}',?,'2026-01-01','2026-01-01')",
     )
-    .bind(
-        json!({
-            "base_url": "http://127.0.0.1:1/v1",
-            "interface_format": "kling",
-            "model_mappings": [{
-                "from": "kling-v1",
-                "to": "kling-v1",
-                "capabilities": ["video.generate"],
-            }],
-        })
-        .to_string(),
-    )
+        .bind(
+            json!({
+                "base_url": "http://127.0.0.1:1/v1",
+                "interface_format": interface_format,
+                "model_mappings": [{
+                    "from": "kling-v1",
+                    "to": "kling-v1",
+                    "capabilities": ["video.generate"],
+                }],
+            })
+            .to_string(),
+        )
     .execute(&pool)
     .await
     .unwrap();
@@ -802,21 +804,21 @@ async fn video_billing_fixture(
 #[tokio::test]
 async fn video_pricing_adds_the_flat_and_per_second_prices() {
     // 只配起步价 → 与迁移 0007 行为一致
-    let (pool, principal, _key) = video_billing_fixture(30_000, 0).await;
+    let (pool, principal, _key) = video_billing_fixture(30_000, 0, "kling").await;
     let reservation = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 10)
         .await
         .unwrap();
     assert_eq!(reservation.reserved_micros, 30_000);
 
     // 只配按秒价 → 纯按秒
-    let (pool, principal, _key) = video_billing_fixture(0, 2_000).await;
+    let (pool, principal, _key) = video_billing_fixture(0, 2_000, "kling").await;
     let reservation = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 7)
         .await
         .unwrap();
     assert_eq!(reservation.reserved_micros, 14_000);
 
     // 两个都配 → 起步价 + 按秒价 × 时长
-    let (pool, principal, _key) = video_billing_fixture(1_000, 2_000).await;
+    let (pool, principal, _key) = video_billing_fixture(1_000, 2_000, "kling").await;
     let reservation = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 7)
         .await
         .unwrap();
@@ -837,13 +839,13 @@ async fn video_pricing_adds_the_flat_and_per_second_prices() {
 #[tokio::test]
 async fn video_pricing_rejects_unpriced_models_and_out_of_range_inputs() {
     // 两种价都是 0 → 没有任何可用价格
-    let (pool, principal, _key) = video_billing_fixture(0, 0).await;
+    let (pool, principal, _key) = video_billing_fixture(0, 0, "kling").await;
     let error = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 5)
         .await
         .expect_err("unpriced model must fail closed");
     assert_eq!(error.code(), "saas.model_not_allowed");
 
-    let (pool, principal, _key) = video_billing_fixture(30_000, 0).await;
+    let (pool, principal, _key) = video_billing_fixture(30_000, 0, "kling").await;
     // 条数上限是 1（契约的 `url` 是单值），所以 2 条也必须被拒
     for (count, duration) in [(0, 5), (2, 5), (5, 5), (1, 0), (1, 601)] {
         let error = crate::saas::billing::reserve_video(
@@ -859,6 +861,67 @@ async fn video_pricing_rejects_unpriced_models_and_out_of_range_inputs() {
     }
 }
 
+/// 复审 3a：计价的时长是**方言折算后**的，不是客户端请求的秒数。
+///
+/// - Sora 把时长 clamp 到 `1..20`：请求 60 秒只给 20 秒，按 60 收是多收钱；
+/// - 智谱的上游体没有时长字段：按秒价按 0 计，只剩起步价；
+/// - 只配按秒价 + 不收时长的方言 → 总价为 0 → fail closed（配置错误）。
+#[tokio::test]
+async fn video_pricing_bills_the_duration_the_dialect_will_actually_run() {
+    // Sora：60 秒按 20 秒收（起步 1_000 + 2_000 × 20）
+    let (pool, principal, _key) = video_billing_fixture(1_000, 2_000, "sora").await;
+    let reservation =
+        crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 60)
+            .await
+            .unwrap();
+    assert_eq!(reservation.reserved_micros, 41_000);
+
+    // 智谱：不收时长，按秒价 × 0，只剩起步价
+    let (pool, principal, _key) = video_billing_fixture(1_000, 2_000, "zhipu").await;
+    let reservation =
+        crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 60)
+            .await
+            .unwrap();
+    assert_eq!(reservation.reserved_micros, 1_000);
+
+    // 智谱 + 只配按秒价 → 总价为 0 → fail closed
+    let (pool, principal, _key) = video_billing_fixture(0, 2_000, "zhipu").await;
+    let error = crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 5)
+        .await
+        .expect_err("per-second-only pricing on a duration-less dialect must fail closed");
+    assert_eq!(error.code(), "saas.model_not_allowed");
+}
+
+/// 复审 3e 依赖的兜底分支：`settle_video(None, true)` 把预留转 pending_review
+/// —— 冻结的额度挂着等人判，不退也不收。`execute_video_request` 在「提交成功
+/// 但结算失败」时走的就是这条，让客户端仍拿到 201。
+#[tokio::test]
+async fn settle_video_without_a_count_marks_the_reservation_pending_review() {
+    let (pool, principal, _key) = video_billing_fixture(30_000, 0, "kling").await;
+    let reservation =
+        crate::saas::billing::reserve_video(&pool, &principal, "kling-v1", 1, 5)
+            .await
+            .unwrap();
+
+    let settlement =
+        crate::saas::billing::settle_video(&pool, &reservation.request_id, None, true)
+            .await
+            .unwrap();
+    assert_eq!(settlement.status, "pending_review");
+    assert_eq!(settlement.price_usd_micros, None);
+
+    // 用户冻结还在（30_000 冻着没动），余额也没被扣（预留只动 frozen）
+    let (balance, frozen): (i64, i64) = sqlx::query_as(
+        "SELECT balance_micros, frozen_micros FROM saas_users WHERE id=?",
+    )
+    .bind(&reservation.user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(frozen, 30_000);
+    assert_eq!(balance, 100_000_000);
+}
+
 /// SaaS 的视频**读取端点**必须可用，且只能读自己的任务。
 ///
 /// 覆盖三条形态：new-api 的 `GET /v1/video/generations/{task_id}`，以及
@@ -872,7 +935,7 @@ async fn saas_video_status_is_available_and_scoped_to_its_owner() {
     use crate::videogen::models::{NewVideoTask, VideoTaskProgress};
     use crate::videogen::repository::VideoGenerationRepository;
 
-    let (pool, principal, plaintext) = video_billing_fixture(10_000, 0).await;
+    let (pool, principal, plaintext) = video_billing_fixture(10_000, 0, "kling").await;
     let state = test_app_state(pool.clone());
 
     let mine = VideoGenerationRepository::create_task(
@@ -1053,7 +1116,7 @@ async fn saas_video_status_is_available_and_scoped_to_its_owner() {
 /// 所以允许它就是「按 n 条收钱、只发 1 条」——复审抓到的计费 bug。
 #[tokio::test]
 async fn saas_video_request_rejects_more_than_one_clip() {
-    let (pool, _principal, plaintext) = video_billing_fixture(10_000, 0).await;
+    let (pool, _principal, plaintext) = video_billing_fixture(10_000, 0, "kling").await;
     let state = test_app_state(pool.clone());
     let mut headers = HeaderMap::new();
     headers.insert(

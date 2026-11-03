@@ -686,9 +686,10 @@ async fn execute_video_request(
         .transpose()?
         .unwrap_or(1);
 
-    // 先解析契约体再预留，这样计价用的时长与真正发到上游的时长是**同一个来源**
-    // （`request.duration`，缺省值与 `upstream_body` 共用常量），不会各算一套。
-    // 顺带：解析失败时还没预留，也就不需要退款那一支了。
+    // 先解析契约体再预留：解析失败时还没预留，也就不需要退款那一支了。
+    // 计价的时长在 `reserve_video` 内部按方言折算（`upstream_effective_duration`），
+    // 这里传的是客户端请求的原始秒数 —— 校验口径；「上游真的会执行的秒数」
+    // 由方言决定（Sora clamp、智谱不收时长），那是 3a 修正的口径同源。
     let request = serde_json::from_value::<crate::videogen::protocol::VideoGenerationRequest>(
         payload.clone(),
     )
@@ -738,7 +739,35 @@ async fn execute_video_request(
     };
     // 提交失败（上游拒了 / 建体失败）时条数为 0，`settle_video` 会走退款。
     let settled_count = if success { Some(count) } else { Some(0) };
-    let settlement = billing::settle_video(pool, &request_id, settled_count, success).await?;
+    let settlement = match billing::settle_video(pool, &request_id, settled_count, success).await {
+        Ok(settlement) => settlement,
+        // 复审 3e：上游已受理、算力已经在烧，结算失败不该把 201 翻成错误 ——
+        // 客户端会以为提交失败而重发，白烧一份算力。转 pending_review
+        // （冻结的预留挂着等人判），日志留痕，仍然回 201。
+        Err(settle_error) if success => {
+            eprintln!(
+                "SaaS video settle failed for {request_id} after a successful submit: {settle_error}"
+            );
+            billing::settle_video(pool, &request_id, None, true).await.unwrap_or_else(|error| {
+                eprintln!(
+                    "SaaS video reservation {request_id} left frozen after settle failure: {error}"
+                );
+                billing::Settlement {
+                    request_id: request_id.clone(),
+                    user_id: reservation.user_id.clone(),
+                    key_id: reservation.key_id.clone(),
+                    group_id: reservation.group_id.clone(),
+                    model: model.clone(),
+                    status: "pending_review".into(),
+                    price_usd_micros: None,
+                    reserved_micros: reservation.reserved_micros,
+                }
+            })
+        }
+        // 提交失败的结算（退款）出错要让人看见：钱冻着、上游没受理，
+        // 这里上抛，管理端能顺着 request_id 查。
+        Err(error) => return Err(error),
+    };
 
     let record = LogRecord {
         request_id: request_id.clone(),

@@ -7,6 +7,7 @@ use crate::saas::{
     domain::groups,
     repository::{self, db_error, invalid},
 };
+use crate::videogen::protocol::{upstream_effective_duration, VideoDialect};
 pub use pricing::{BillableUsage, ModelPrice};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -14,6 +15,9 @@ use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
 /// 一次视频请求最多生成几条。与 `videogen::service::MAX_VIDEO_COUNT` 保持一致，
 /// 这里单独定义是为了让计费侧不依赖 videogen 模块（计费只管数量上下界）。
+/// **例外是时长**：按秒计价的秒数必须与上游真的会执行的秒数同源
+/// （`videogen::protocol::upstream_effective_duration`），那是本轮复审修正
+/// 3a 的教训 —— 口径分叉的地方就会多收钱。
 const MAX_VIDEO_COUNT: i64 = 1;
 /// 一次视频请求可接受的时长上界（秒）。防呆用，不是产品限制：
 /// 各家方言的最长时长由上游自己拒绝，这里只挡明显异常的输入。
@@ -212,6 +216,10 @@ pub async fn reserve_image(
 ///      `video:kling` 这类**视频渠道**。上面那条 `Limits` 查询里的
 ///      `groups.platform IN (...)` 和 `groups.platform=?` 会直接把它挡掉，
 ///      所以视频必须有自己的 key/组校验查询。
+///
+/// 计价的时长是**方言折算后**的（`upstream_effective_duration`，复审 3a）：
+/// `duration_seconds` 参数是客户端**请求**的秒数（校验用），快照里落的
+/// `durationSeconds` 是上游真的会执行的秒数。
 pub async fn reserve_video(
     pool: &SqlitePool,
     principal: &ApiPrincipal,
@@ -222,9 +230,9 @@ pub async fn reserve_video(
     if !(1..=MAX_VIDEO_COUNT).contains(&video_count)
         || model.is_empty()
         || model.len() > 256
-        // 时长上界只是防呆：真正发到上游的时长由方言体自己决定
-        // （`upstream_body` 用 `duration.unwrap_or(5.0)`，Sora 还会 clamp 到 1..20）。
-        // 计价跟着客户端**请求**的时长走，与上游体保持同一口径。
+        // 时长上界只是防呆。真正计价的时长在下面按方言折算
+        // （`upstream_effective_duration`）：Sora 会 clamp 到 1..20，智谱根本
+        // 不收时长（按秒价按 0 计）—— 收的秒数必须等于上游会执行的秒数。
         || !(1..=MAX_VIDEO_DURATION_SECONDS).contains(&duration_seconds)
     {
         return Err(invalid(
@@ -259,15 +267,6 @@ pub async fn reserve_video(
                 "Video model is not priced and allowed by this group",
             )
         })?;
-    let unit_price = video_price_micros
-        .checked_add(video_price_per_second_micros.saturating_mul(duration_seconds))
-        .filter(|price| *price > 0)
-        .ok_or_else(|| {
-            invalid(
-                "saas.model_not_allowed",
-                "Video model has no usable price",
-            )
-        })?;
     let credential_ids = groups::permitted_accounts_for_capability_connection(
         &mut transaction,
         &principal.group_id,
@@ -281,6 +280,54 @@ pub async fn reserve_video(
             "No permitted account currently supports video generation",
         ));
     }
+    // 计价时长按**方言**折算（复审 3a）：供应商住在账号的 `interface_format` 上，
+    // 候选账号的方言一致时按「上游真的会执行的时长」计价 —— Sora 只给 clamp 后
+    // 的秒数，智谱不收时长（按秒价按 0 计，此时只剩起步价；只配按秒价的行会
+    // fail closed，那是配置错误不是计费问题）。混合方言无法预知提交会落到哪家，
+    // 退回客户端请求的时长（旧口径）；按秒价本来就不该配在混合方言的池上。
+    let dialects: Vec<String> = {
+        let mut query =
+            sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT DISTINCT COALESCE(json_extract(config_json, '$.interface_format'), '') FROM route_credentials WHERE id IN (");
+        let mut separated = query.separated(", ");
+        for id in &credential_ids {
+            separated.push_bind(id);
+        }
+        query.push(")");
+        query
+            .build_query_scalar::<String>()
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(db_error)?
+    };
+    // config_json 没有 interface_format（不该发生：候选都声明了 video.generate）
+    // 不算一种方言，从集合里剔掉。
+    let dialects: Vec<String> = dialects
+        .into_iter()
+        .filter(|format| !format.is_empty())
+        .collect();
+    let billed_duration_seconds = match dialects.as_slice() {
+        [only] => match VideoDialect::parse(only) {
+            Some(dialect) => {
+                upstream_effective_duration(dialect, duration_seconds).unwrap_or(0)
+            }
+            // 未知格式提交时会被 `submit` 拒掉并退款；这里维持旧口径即可。
+            None => duration_seconds,
+        },
+        _ => duration_seconds,
+    };
+    // 单价 = 起步价 + 按秒价 × **折算后的**时长。只配起步价的行 `per_second`
+    // 是 0，行为与 0007 完全一致。
+    let unit_price = video_price_micros
+        .checked_add(
+            video_price_per_second_micros.saturating_mul(billed_duration_seconds),
+        )
+        .filter(|price| *price > 0)
+        .ok_or_else(|| {
+            invalid(
+                "saas.model_not_allowed",
+                "Video model has no usable price",
+            )
+        })?;
     let reserved_micros = repository::money(
         unit_price as i128 * video_count as i128 * limits.multiplier_micros as i128
             / 1_000_000_i128,
@@ -293,7 +340,7 @@ pub async fn reserve_video(
         credential_ids,
         reserved_micros,
         limits,
-        serde_json::json!({"kind":"video","unitPriceMicros":unit_price,"count":video_count,"durationSeconds":duration_seconds}).to_string(),
+        serde_json::json!({"kind":"video","unitPriceMicros":unit_price,"count":video_count,"durationSeconds":billed_duration_seconds}).to_string(),
     )
     .await?;
     transaction.commit().await.map_err(db_error)?;
@@ -610,7 +657,7 @@ pub async fn settle_image(
 ///
 /// **诚实声明：** 与图像不同，视频的成本高峰在「提交之后、出片之前」——
 /// 上游已经开始烧算了。所以上游 2xx 就代表「这单要收」，哪怕客户端随后
-/// 一直没来查状态（任务超时失败由轮询器的 `MAX_POLL_ATTEMPTS` 兜底，
+/// 一直没来查状态（任务超时失败由轮询器的 `MIN_POLL_ATTEMPTS` 预算兜底，
 /// 那时才走 `settle_video(count=0)` 退款）。
 pub async fn settle_video(
     pool: &SqlitePool,

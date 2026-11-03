@@ -631,6 +631,22 @@ pub fn effective_duration_seconds(request: &VideoGenerationRequest) -> i64 {
     }
 }
 
+/// 这个方言**上游真的会执行的**时长；上游体根本不收时长的方言返回 `None`。
+///
+/// 「按秒计价」要成立，收的秒数必须等于上游会执行的秒数 —— 而「客户端请求的
+/// 时长」不等于它：Sora 会把时长 clamp 到 `1..20`（请求 60 秒只给 20 秒，按 60
+/// 秒收费是多收），智谱的上游体没有时长字段（发给它的秒数根本不存在，按它收费
+/// 是凭空计价）。计费（SaaS 的 `reserve_video`）与上游体（`upstream_body`）
+/// 必须共用这一个函数，这是口径唯一的来源。
+pub fn upstream_effective_duration(dialect: VideoDialect, raw_seconds: i64) -> Option<i64> {
+    match dialect {
+        VideoDialect::Kling | VideoDialect::Ark | VideoDialect::MiniMax => Some(raw_seconds),
+        VideoDialect::Sora => Some(raw_seconds.clamp(1, 20)),
+        // 智谱（CogVideoX）不接受时长参数：出片时长由模型自己定。
+        VideoDialect::Zhipu => None,
+    }
+}
+
 /// 这次请求的「画幅」字符串（OpenAI 契约的 `size`，形如 `1280x720`）。
 ///
 /// 优先用客户端显式给的 `metadata.size` —— Sora 方言的上游体读的就是它，
@@ -654,7 +670,14 @@ pub fn upstream_body(
 ) -> Result<Vec<u8>, String> {
     let prompt = request.prompt.trim();
     let negative_prompt = request.metadata_str("negative_prompt");
-    let duration = request.duration.unwrap_or(DEFAULT_VIDEO_DURATION_SECONDS);
+    // 时长只有一个来源：`upstream_effective_duration`（Sora 的 clamp 在那里）。
+    // 会发时长字段的方言从这里取值；`None` 的方言（智谱）根本不发这个字段，
+    // 这样「发给上游的秒数」与「计费收的秒数」在结构上不可能分叉。
+    let raw_duration = effective_duration_seconds(request);
+    let duration = || {
+        upstream_effective_duration(dialect, raw_duration)
+            .expect("dialect with a duration field must have one")
+    };
     let ratio = request.aspect_ratio();
 
     let body = match dialect {
@@ -664,7 +687,7 @@ pub fn upstream_body(
                 "prompt": prompt,
                 "cfg_scale": request.metadata_f64("cfg_scale").unwrap_or(0.5),
                 "mode": request.metadata_str("mode").unwrap_or("std"),
-                "duration": duration.round() as i64,
+                "duration": duration(),
                 "aspect_ratio": ratio,
             });
             if let Some(negative) = negative_prompt {
@@ -683,7 +706,7 @@ pub fn upstream_body(
             json!({
                 "model": model,
                 "content": content,
-                "duration": duration.round() as i64,
+                "duration": duration(),
                 "ratio": ratio,
             })
         }
@@ -691,7 +714,7 @@ pub fn upstream_body(
             let mut body = json!({
                 "model": model,
                 "prompt": prompt,
-                "duration": duration.round() as i64,
+                "duration": duration(),
                 "resolution": request.metadata_str("resolution").unwrap_or("1080P"),
             });
             if let Some(image) = request.image.as_deref() {
@@ -717,7 +740,7 @@ pub fn upstream_body(
             let mut body = json!({
                 "model": model,
                 "prompt": prompt,
-                "seconds": duration.round().clamp(1.0, 20.0) as i64,
+                "seconds": duration(),
                 "size": request.metadata_str("size").unwrap_or("1280x720"),
             });
             if let Some(image) = request.image.as_deref() {
@@ -850,6 +873,35 @@ mod tests {
         let ark: Value = serde_json::from_slice(&ark).expect("json");
         assert_eq!(ark["content"][0]["type"], "text");
         assert_eq!(ark["content"][1]["image_url"]["url"], "https://img/1.png");
+    }
+
+    /// 复审 3a：`upstream_effective_duration` 是「上游真的会执行的时长」的
+    /// 唯一来源 —— Sora clamp 到 1..20、智谱没有时长、其余直通。计费
+    /// （`reserve_video`）与上游体（`upstream_body`）都必须经由它。
+    #[test]
+    fn upstream_effective_duration_matches_what_each_dialect_will_run() {
+        assert_eq!(upstream_effective_duration(VideoDialect::Kling, 60), Some(60));
+        assert_eq!(upstream_effective_duration(VideoDialect::Ark, 60), Some(60));
+        assert_eq!(upstream_effective_duration(VideoDialect::MiniMax, 60), Some(60));
+        // Sora 上游只接受 1..20：请求 60 秒只给 20 秒，计费必须看到 clamp 后的值
+        // （按 60 收只给 20 是多收钱）。
+        assert_eq!(upstream_effective_duration(VideoDialect::Sora, 60), Some(20));
+        assert_eq!(upstream_effective_duration(VideoDialect::Sora, 3), Some(3));
+        assert_eq!(upstream_effective_duration(VideoDialect::Sora, 0), Some(1));
+        // 智谱（CogVideoX）不收时长：按秒计价对它必须按 0 计。
+        assert_eq!(upstream_effective_duration(VideoDialect::Zhipu, 60), None);
+    }
+
+    /// 复审 3a：Sora 的上游体 clamp 也走共享函数，与计费严格同源。
+    #[test]
+    fn sora_upstream_body_sends_the_clamped_seconds() {
+        let request = VideoGenerationRequest::parse(
+            br#"{"model":"m","prompt":"a fox","duration":60}"#,
+        )
+        .expect("request");
+        let body = upstream_body(VideoDialect::Sora, "sora-1", &request).expect("body");
+        let body: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(body["seconds"], 20);
     }
 
     /// MiniMax / 智谱 / Sora 的上游体、提交响应取值路径、提交与状态路径。

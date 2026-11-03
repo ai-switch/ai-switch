@@ -51,8 +51,10 @@ const UPSTREAM_RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 pub const POLL_BATCH_LIMIT: i64 = 32;
 /// 轮询间隔（秒）。视频任务以分钟计，轮询过密只是白花上游配额。
 const POLL_INTERVAL_SECONDS: u64 = 10;
-/// 超过这个次数仍未终态的任务放弃轮询，标记为失败（超时兜底）
-const MAX_POLL_ATTEMPTS: i64 = 240;
+/// 轮询尝试预算的**下限**（240 次 × 10s ≈ 40 分钟）。复审 3g：固定预算会把
+/// 超过 40 分钟的长视频误判失败，所以真实预算由 `poll_budget` 按任务时长
+/// 上浮，这里只兜「没有时长信息」（智谱这类不收时长的方言）与短任务的底。
+const MIN_POLL_ATTEMPTS: i64 = 240;
 
 /// 入站提交输入（HTTP 层的 `POST /v1/video/generations` 直传）
 #[derive(Debug, Clone, Deserialize)]
@@ -281,16 +283,20 @@ impl VideoGenerationService {
     /// 查询任务状态（new-api 契约响应体）。
     ///
     /// 默认只读本地状态；`refresh=true` 时先向上游拉一次再返回，让客户端不必
-    /// 等轮询 tick。
+    /// 等轮询 tick —— 但**同样受轮询间隔约束**（复审 3b）：间隔内的 `refresh=1`
+    /// 直接回本地状态。否则客户端高频刷 `?refresh=1` 等于把轮询间隔打穿，
+    /// 上游配额被客户端刷着烧。契约里没有「这次有没有真的去上游」的表达，
+    /// 静默回缓存是更友好的降级。
     pub async fn status(
         state: &AppState,
         task_id: &str,
         refresh: bool,
     ) -> Result<Vec<u8>, AppError> {
-        let task = if refresh {
+        let task = VideoGenerationRepository::get_task(&state.pool, task_id).await?;
+        let task = if refresh && Self::poll_due(&task) {
             Self::poll_once(state, task_id).await?
         } else {
-            VideoGenerationRepository::get_task(&state.pool, task_id).await?
+            task
         };
         let status = VideoTaskStatus::parse(&task.status).unwrap_or(VideoTaskStatus::Processing);
         Ok(status_response(
@@ -299,6 +305,18 @@ impl VideoGenerationService {
             task.url.as_deref(),
             task.error_message.as_deref(),
         ))
+    }
+
+    /// 距上次轮询是否已满一个轮询间隔（没有记录视为到期）。
+    fn poll_due(task: &VideoTask) -> bool {
+        task.last_polled_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|last| {
+                chrono::Utc::now().signed_duration_since(last).num_seconds()
+                    >= POLL_INTERVAL_SECONDS as i64
+            })
+            .unwrap_or(true)
     }
 
     /// 向 `forward_request` 打一次上游提交，返回 `(上游 task_id, 实际用的账号 id)`。
@@ -455,19 +473,45 @@ impl VideoGenerationService {
             .map_err(|error| validation("videogen.upstream_response", &error))
     }
 
+    /// 轮询尝试预算（复审 3g）：按任务声明的时长算 —— 每个 tick 一次尝试，
+    /// 加 10 分钟余量；下限 `MIN_POLL_ATTEMPTS`。没有时长信息（智谱这类不收
+    /// 时长的方言，出片时长由模型定）用下限兜底。
+    fn poll_budget(duration_seconds: Option<i64>) -> i64 {
+        let dynamic =
+            duration_seconds.unwrap_or(0) / POLL_INTERVAL_SECONDS as i64 + 60;
+        dynamic.max(MIN_POLL_ATTEMPTS)
+    }
+
     /// 轮询单个任务并推进落库。返回推进后的任务。
     pub async fn poll_once(state: &AppState, task_id: &str) -> Result<VideoTask, AppError> {
         let task = VideoGenerationRepository::get_task(&state.pool, task_id).await?;
         if VideoTaskStatus::parse(&task.status).is_some_and(|status| status.is_terminal()) {
             return Ok(task);
         }
+        // 预算检查放在最前（复审 3g）：不但兜「连续查询失败」，也兜「上游一直
+        // 回 processing」的僵尸任务 —— 以前 attempt_count 只在失败分支被比较，
+        // 一个永远 processing 的任务会无限轮询下去。
+        if task.attempt_count >= Self::poll_budget(task.duration_seconds) {
+            let message = format!(
+                "Gave up polling after {} attempts (budget for this task)",
+                task.attempt_count
+            );
+            return Self::settle(
+                state,
+                &task,
+                VideoTaskStatus::Failed,
+                None,
+                Some(&message),
+            )
+            .await;
+        }
         let upstream = match Self::forward_poll(state, &task).await {
             Ok(upstream) => upstream,
             Err(error) => {
                 // 上游一次查询失败不代表任务失败：记一次尝试，留在 processing
-                // 让下一轮重试。超出预算才算超时失败。
+                // 让下一轮重试。超出预算才算超时失败（预算见 poll_budget）。
                 let attempts = task.attempt_count + 1;
-                if attempts >= MAX_POLL_ATTEMPTS {
+                if attempts >= Self::poll_budget(task.duration_seconds) {
                     let message = format!("Gave up polling after {attempts} attempts: {error}");
                     return Self::settle(
                         state,
@@ -562,17 +606,25 @@ impl VideoGenerationService {
             .await;
         }
         if task.callback_url.is_some() && !task.callback_delivered {
-            if Self::deliver_callback(&task).await.is_ok() {
-                return VideoGenerationRepository::mark_callback_delivered(
-                    &state.pool,
-                    &task.task_id,
-                )
-                .await;
+            // 先认领再投递（复审 3d）：认领是原子的，并发进来的另一方拿不到
+            // 资格，同一笔回调只会 POST 一次。认领即计数，投递失败不用再
+            // bump —— 剩余预算自然少一次，死地址照样会耗尽预算停下。
+            if VideoGenerationRepository::claim_callback_attempt(
+                &state.pool,
+                &task.task_id,
+                MAX_CALLBACK_ATTEMPTS,
+            )
+            .await
+            .unwrap_or(false)
+            {
+                if Self::deliver_callback(&task).await.is_ok() {
+                    return VideoGenerationRepository::mark_callback_delivered(
+                        &state.pool,
+                        &task.task_id,
+                    )
+                    .await;
+                }
             }
-            // 投失败要记一次尝试：重投由 `retry_pending_callbacks` 负责，
-            // 没有计数的话一个死地址会被无限重投。
-            let _ = VideoGenerationRepository::bump_callback_attempt(&state.pool, &task.task_id)
-                .await;
         }
         Ok(task)
     }
@@ -637,17 +689,26 @@ impl VideoGenerationService {
             Err(_) => return,
         };
         for task in pending {
+            // 认领制（复审 3d）：与 `settle` 的投递、以及别的执行体重投循环
+            // 并发时，只有拿到资格的那个会 POST。
+            let claimed = VideoGenerationRepository::claim_callback_attempt(
+                &state.pool,
+                &task.task_id,
+                MAX_CALLBACK_ATTEMPTS,
+            )
+            .await
+            .unwrap_or(false);
+            if !claimed {
+                continue;
+            }
             if Self::deliver_callback(&task).await.is_ok() {
                 let _ = VideoGenerationRepository::mark_callback_delivered(
                     &state.pool,
                     &task.task_id,
                 )
                 .await;
-            } else {
-                let _ =
-                    VideoGenerationRepository::bump_callback_attempt(&state.pool, &task.task_id)
-                        .await;
             }
+            // 投失败不补 bump：认领时已经 +1。
         }
     }
 
@@ -657,6 +718,12 @@ impl VideoGenerationService {
         let tasks = VideoGenerationRepository::list_active_tasks(&state.pool, limit).await?;
         let mut advanced = Vec::with_capacity(tasks.len());
         for task in tasks {
+            // 刚被 `?refresh=1` 推进过的任务这一 tick 跳过（复审 3b）：
+            // 间隔内不重复碰上游，下一轮 tick 自然轮到它。
+            if !Self::poll_due(&task) {
+                advanced.push(task);
+                continue;
+            }
             match Self::poll_once(state, &task.task_id).await {
                 Ok(progressed) => advanced.push(progressed),
                 Err(_) => {
@@ -673,8 +740,14 @@ impl VideoGenerationService {
     /// 与 `RouteRecoveryService::run_loop` 同构（每个调用方在自己的 runtime 上
     /// spawn 它）。间隔取 `POLL_INTERVAL_SECONDS`：视频任务动辄几十秒到几分钟，
     /// 更密的轮询只是白打上游配额。
+    ///
+    /// 背压（复审 3c）：`interval` 默认的 `MissedTickBehavior::Burst` 会把错过的
+    /// tick 立刻补齐 —— 一轮最坏是 `POLL_BATCH_LIMIT` 个任务串行各打一次上游
+    /// （每个 10s 超时），远超 tick 间隔，补齐就变成无间隔连续跑。`Delay` 让
+    /// 下一轮从本次跑完之后重新计时。
     pub async fn run_loop(state: AppState) {
         let mut ticker = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECONDS));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // `interval` 的第一次 tick 立即返回；消费掉它作为基线，避免进程刚起来
         // 时把上一轮已经在跑的任务重复推进一遍。
         ticker.tick().await;
@@ -972,6 +1045,19 @@ mod tests {
         assert_eq!(refreshed["task_id"], task_id);
 
         // ── 3) 轮询推进到终态 ──
+        // 上面 refresh=1 刚轮过一次；3b 的间隔约束对轮询循环同样生效，不把
+        // last_polled_at 拨回去，这一 tick 会被跳过。拨回两个间隔，让循环
+        // 正常推进 —— 顺便验证「间隔外的任务循环必轮」。
+        sqlx::query("UPDATE videogen_tasks SET last_polled_at=? WHERE task_id=?")
+            .bind(
+                (chrono::Utc::now()
+                    - chrono::Duration::seconds(POLL_INTERVAL_SECONDS as i64 * 2))
+                .to_rfc3339(),
+            )
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
         finished.store(true, Ordering::SeqCst);
         let advanced = VideoGenerationService::advance_all(&state, POLL_BATCH_LIMIT)
             .await
@@ -1036,6 +1122,150 @@ mod tests {
             .unwrap();
         assert!(again.is_empty(), "settled task was picked up again: {again:?}");
         assert_eq!(callbacks.lock().unwrap().len(), 1);
+
+        upstream_task.abort();
+    }
+
+    #[test]
+    fn poll_budget_scales_with_the_declared_duration() {
+        // 没有时长信息（智谱这类不收时长的方言）：下限兜底
+        assert_eq!(VideoGenerationService::poll_budget(None), MIN_POLL_ATTEMPTS);
+        // 短视频：下限兜底（240 × 10s ≈ 40 分钟，远超几分钟的出片时间）
+        assert_eq!(
+            VideoGenerationService::poll_budget(Some(5)),
+            MIN_POLL_ATTEMPTS
+        );
+        // 长视频按时长上浮：60 分钟 = 360 个间隔 + 60 次（10 分钟余量），
+        // 不再被 40 分钟的固定预算误判失败
+        assert_eq!(VideoGenerationService::poll_budget(Some(3600)), 420);
+    }
+
+    /// 复审 3b：`?refresh=1` 也受轮询间隔约束 —— 间隔内的第二次 refresh 不打
+    /// 上游（回本地状态），间隔过了才放行。否则客户端高频刷 refresh 等于把
+    /// 轮询间隔打穿，上游配额被客户端刷着烧。
+    #[tokio::test]
+    async fn refresh_within_the_poll_interval_returns_the_cached_status() {
+        use crate::database::{create_memory_pool, run_migrations};
+        use crate::services::route_proxy_service::RouteProxyRuntimeState;
+        use axum::response::IntoResponse;
+        use axum::routing::get;
+        use axum::{Json, Router};
+        use serde_json::{json, Value};
+        use std::sync::{Arc, Mutex};
+
+        let status_hits = Arc::new(Mutex::new(Vec::<String>::new()));
+        let hits_sink = status_hits.clone();
+        let upstream = Router::new().route(
+            "/v1/videos/text2video/:task_id",
+            get(move |axum::extract::Path(task_id): axum::extract::Path<String>| {
+                let hits = hits_sink.clone();
+                async move {
+                    hits.lock().unwrap().push(task_id.clone());
+                    Json(json!({"data": {"task_id": task_id, "task_status": "processing"}}))
+                        .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO route_credentials
+               (id,platform,kind,display_name,status,secret_payload_json,config_json,created_at,updated_at)
+             VALUES('kling-account','codex','api','Kling','ok',?,?,'2026-01-01','2026-01-01')",
+        )
+        .bind(r#"{"api_key":"upstream-video-key"}"#)
+        .bind(
+            json!({
+                "base_url": format!("http://{address}/v1"),
+                "interface_format": "kling",
+                "model_mappings": [{
+                    "from": "kling-v1",
+                    "to": "kling-v1",
+                    "capabilities": ["video.generate"],
+                }],
+            })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO route_pool_members
+               (id,platform,route_credential_id,enabled,group_id,created_at,updated_at)
+             VALUES('video-member','codex','kling-account',1,'codex-default','2026-01-01','2026-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 直接落一条 processing 任务（不走提交，这里只关心轮询行为）
+        VideoGenerationRepository::create_task(
+            &pool,
+            NewVideoTask {
+                task_id: "t-refresh".into(),
+                session_id: None,
+                message_id: None,
+                model: "kling-v1".into(),
+                upstream_model: None,
+                dialect: "kling".into(),
+                credential_id: Some("kling-account".into()),
+                upstream_task_id: Some("upstream-kling-1".into()),
+                duration_seconds: Some(5),
+                size: None,
+                callback_url: None,
+                owner_user_id: None,
+            },
+        )
+        .await
+        .expect("task");
+
+        let state = test_app_state(pool.clone(), RouteProxyRuntimeState::default());
+
+        // 第一次 refresh：没有 last_polled_at，视为到期，打上游
+        let first: Value = serde_json::from_slice(
+            &VideoGenerationService::status(&state, "t-refresh", true)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first["status"], "processing");
+        assert_eq!(status_hits.lock().unwrap().len(), 1);
+
+        // 间隔内的第二次 refresh：回本地缓存，不再打上游
+        let second: Value = serde_json::from_slice(
+            &VideoGenerationService::status(&state, "t-refresh", true)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(second["status"], "processing");
+        assert_eq!(
+            status_hits.lock().unwrap().len(),
+            1,
+            "a refresh within the poll interval must not hit the upstream again"
+        );
+
+        // 间隔过了（拨回两个间隔）：refresh 放行
+        sqlx::query("UPDATE videogen_tasks SET last_polled_at=? WHERE task_id=?")
+            .bind(
+                (chrono::Utc::now()
+                    - chrono::Duration::seconds(POLL_INTERVAL_SECONDS as i64 * 2))
+                .to_rfc3339(),
+            )
+            .bind("t-refresh")
+            .execute(&pool)
+            .await
+            .unwrap();
+        VideoGenerationService::status(&state, "t-refresh", true)
+            .await
+            .unwrap();
+        assert_eq!(status_hits.lock().unwrap().len(), 2);
 
         upstream_task.abort();
     }

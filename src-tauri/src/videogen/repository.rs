@@ -262,11 +262,15 @@ impl VideoGenerationRepository {
         Self::get_task(pool, task_id).await
     }
 
+    /// 落「回调已投递」标记（CAS：只从 0 翻到 1）。
+    ///
+    /// 复审 3d：并发投递时两边都可能 POST 成功，这个 CAS 让终态收敛一致 ——
+    /// 真正的去重在 `claim_callback_attempt` 的认领那里。
     pub async fn mark_callback_delivered(
         pool: &SqlitePool,
         task_id: &str,
     ) -> Result<VideoTask, AppError> {
-        sqlx::query("UPDATE videogen_tasks SET callback_delivered=1, updated_at=? WHERE task_id=?")
+        sqlx::query("UPDATE videogen_tasks SET callback_delivered=1, updated_at=? WHERE task_id=? AND callback_delivered=0")
             .bind(Utc::now().to_rfc3339())
             .bind(task_id)
             .execute(pool)
@@ -300,20 +304,29 @@ impl VideoGenerationRepository {
             .map_err(database)
     }
 
-    /// 记一次回调投递尝试。成功前每投一次都要 +1。
-    pub async fn bump_callback_attempt(
+    /// 认领一次回调投递资格（复审 3d，原子 CAS）。
+    ///
+    /// `settle` 与重投循环可能并发进入，两边都看到 `callback_delivered=0` 就会
+    /// 各 POST 一次。把「次数 +1」做成**带条件的认领**：只有把 `callback_attempts`
+    /// 从 `< max` 抬上去的那一个赢家才获得投递资格，输家直接跳过 —— 同一笔回调
+    /// 只会被 POST 一次。认领即计数：投递失败不需要再单独 bump，剩余预算自然
+    /// 少一次。
+    pub async fn claim_callback_attempt(
         pool: &SqlitePool,
         task_id: &str,
-    ) -> Result<(), AppError> {
-        sqlx::query(
-            "UPDATE videogen_tasks SET callback_attempts=callback_attempts+1, updated_at=? WHERE task_id=?",
+        max_attempts: i64,
+    ) -> Result<bool, AppError> {
+        let result = sqlx::query(
+            "UPDATE videogen_tasks SET callback_attempts=callback_attempts+1, updated_at=? \
+             WHERE task_id=? AND callback_delivered=0 AND callback_attempts < ?",
         )
         .bind(Utc::now().to_rfc3339())
         .bind(task_id)
+        .bind(max_attempts)
         .execute(pool)
         .await
         .map_err(database)?;
-        Ok(())
+        Ok(result.rows_affected() == 1)
     }
 }
 
@@ -473,5 +486,69 @@ mod tests {
             .await
             .expect("delivered");
         assert!(delivered.callback_delivered);
+    }
+
+    /// 复审 3d：回调投递是**认领制**的 —— 认领是原子 CAS，并发进入的两个执行体
+    /// 只有一个拿到资格；认领即计数（预算耗尽后没人能再认领）；已投递的任务
+    /// 不可认领。没有这一层，`settle` 与重投循环并发时同一笔回调会被 POST 两次。
+    #[tokio::test]
+    async fn callback_delivery_is_claimed_not_raced() {
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+
+        VideoGenerationRepository::create_task(
+            &pool,
+            NewVideoTask {
+                task_id: "t-cb".into(),
+                session_id: None,
+                message_id: None,
+                model: "kling-v2-6".into(),
+                upstream_model: None,
+                dialect: "kling".into(),
+                credential_id: None,
+                upstream_task_id: Some("k-1".into()),
+                duration_seconds: Some(5),
+                size: None,
+                callback_url: Some("https://cb/1".into()),
+                owner_user_id: None,
+            },
+        )
+        .await
+        .expect("task");
+        VideoGenerationRepository::progress_task(
+            &pool,
+            "t-cb",
+            VideoTaskProgress {
+                status: "succeeded".into(),
+                url: Some("https://cdn/v.mp4".into()),
+                error_message: None,
+            },
+        )
+        .await
+        .expect("terminal");
+
+        // 预算内认领逐次成功，且每次都消耗一格预算
+        assert!(VideoGenerationRepository::claim_callback_attempt(&pool, "t-cb", 2)
+            .await
+            .expect("first claim wins"));
+        assert!(VideoGenerationRepository::claim_callback_attempt(&pool, "t-cb", 2)
+            .await
+            .expect("second claim within budget"));
+        assert!(
+            !VideoGenerationRepository::claim_callback_attempt(&pool, "t-cb", 2)
+                .await
+                .expect("budget exhausted"),
+            "attempts beyond the budget must not be claimable"
+        );
+
+        // 已投递的任务不可认领（重投循环与 settle 并发时的另一半保护）
+        VideoGenerationRepository::mark_callback_delivered(&pool, "t-cb")
+            .await
+            .expect("delivered");
+        assert!(
+            !VideoGenerationRepository::claim_callback_attempt(&pool, "t-cb", 8)
+                .await
+                .expect("delivered tasks are not claimable"),
+        );
     }
 }

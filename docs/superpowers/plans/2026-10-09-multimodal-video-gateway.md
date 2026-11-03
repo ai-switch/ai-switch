@@ -628,48 +628,73 @@ CARGO_TARGET_DIR=target-codex cargo test --lib
    单价在**预留时**就折算成最终值写进预留快照的 `unitPriceMicros`，
    所以 `settle_video` 一行没改——它本来就只按快照单价乘条数。
 
-3. **复审发现、**未修**的问题**（都已定位，需要决策或更大改动）：
+3. ~~**复审发现、未修的问题**~~ —— **全部已解决**（2026-11-04，见各条的「修法」）：
 
-   a. **按秒计价的时长口径对两个方言不成立**。`effective_duration_seconds` 取客户端
-      请求的时长（只有 `.max(1)`），但：
-      - **Sora** 的上游体把时长 clamp 到 `1..20`，所以 `duration=60` 会**按 60 秒收费、
-        只给 20 秒**（多收）；
-      - **智谱** 的上游体**完全没有时长字段**，按秒收的秒数根本没发出去。
-      修法方向：把「每方言实际生效的时长」抽成一个函数，`upstream_body` 与计费共用；
-      智谱这类不传时长的方言，按秒价应当按 0 计或直接禁用该列。
+   a. ~~**按秒计价的时长口径对两个方言不成立**~~ —— **已解决**。新增
+      `protocol::upstream_effective_duration(dialect, raw_seconds) -> Option<i64>`
+      作为「上游真的会执行的时长」的唯一来源：Kling / Ark / MiniMax 直通，
+      **Sora 在这里 clamp 到 1..20**（`upstream_body` 的 clamp 也删掉、改走它），
+      **智谱返回 `None`**。计费侧 `reserve_video` 在算出候选账号后查
+      `DISTINCT json_extract(config_json,'$.interface_format')`：
+      - 方言一致 → 按该方言折算（Sora 按 clamp 后的秒数收、智谱按秒价 × 0，
+        只剩起步价；只配按秒价会总价为 0 → fail closed，那是配置错误）；
+      - 混合方言 → 退回客户端请求的时长（旧口径，混合池本来就无法预知落哪家）。
+      快照里的 `durationSeconds` 落的是折算后的值。测试：
+      `upstream_effective_duration_matches_what_each_dialect_will_run` /
+      `sora_upstream_body_sends_the_clamped_seconds` /
+      `video_pricing_bills_the_duration_the_dialect_will_actually_run`。
 
-   b. **`?refresh=1` 绕过轮询间隔**。它直接调 `poll_once`，不检查
-      `last_polled_at`，所以客户端可以刷上游配额。修法方向：refresh 也受
-      `POLL_INTERVAL_SECONDS` 约束（或加每 key 的速率限制）。
+   b. ~~**`?refresh=1` 绕过轮询间隔**~~ —— **已解决**。新增 `poll_due(task)`：
+      `status(refresh=true)` 与 `advance_all` 的循环都先过它，距 `last_polled_at`
+      不满一个 `POLL_INTERVAL_SECONDS` 就回本地状态 / 跳过本 tick。契约里没有
+      「这次有没有真的去上游」的表达，静默回缓存是更友好的降级。测试：
+      `refresh_within_the_poll_interval_returns_the_cached_status`。
 
-   c. **轮询循环没有真实背压**。`advance_all` 串行处理最多 32 个任务，每个任务一次
-      上游调用（超时 10s）；一轮可能远超 tick 间隔，而 tokio `interval` 默认
-      `MissedTickBehavior::Burst` 会把错过的 tick 立刻补齐，于是变成连续跑。
-      修法方向：`MissedTickBehavior::Delay`，或并发度受限的 `join_all`。
+   c. ~~**轮询循环没有真实背压**~~ —— **已解决**。`run_loop` 的 ticker 设
+      `MissedTickBehavior::Delay`：一轮最坏 32 × 10s 超时远超 tick 间隔，
+      `Burst` 会把错过的 tick 立刻补齐变成连续跑；`Delay` 让下一轮从本次跑完
+      之后重新计时。（并发度受限的 `join_all` 没做——单任务本来就是串行查询，
+      Delay 已把「无间隔连续跑」斩断。）
 
-   d. **并发投递回调可能重复**。`poll_once` 的「终态检查」与 `settle` 的写入之间有
-      await 窗口，守护循环与客户端的 `refresh=1` 可能同时进入，两边都看到
-      `callback_delivered=0`。UUID 级的幂等没做。修法方向：`mark_callback_delivered`
-      用 `WHERE callback_delivered=0` 做 CAS，让只有一个赢。
+   d. ~~**并发投递回调可能重复**~~ —— **已解决**，且比原计划的 CAS 更进一步：
+      把「记一次尝试」改成**认领制**的 `claim_callback_attempt(task_id, max)`
+      （`UPDATE ... SET attempts=attempts+1 WHERE callback_delivered=0 AND
+      callback_attempts < max`，`rows_affected==1` 才算拿到资格）。`settle` 与
+      重投循环都先认领再 POST —— 认领是原子的，同一笔回调只会被 POST 一次；
+      认领即计数，投递失败不再需要单独 bump。`mark_callback_delivered` 也加了
+      `WHERE callback_delivered=0` 兜底收敛。测试：
+      `callback_delivery_is_claimed_not_raced`。
 
-   e. **`settle_video` 失败会让整个请求 500**，但上游已经受理、算力已经在烧，
-      客户端却看到失败，且预留被冻住。修法方向：结算失败不应把「提交成功」翻成
-      失败响应（记日志 + 留 `pending_review` 更合适）。
+   e. ~~**`settle_video` 失败会让整个请求 500**~~ —— **已解决**。
+      `execute_video_request` 在「提交成功但结算失败」时不再上抛：转调
+      `settle_video(None, true)`（既有的 pending_review 分支，此前没有调用方）
+      把冻结的预留挂着等人判，`eprintln!` 留痕，客户端仍然拿到 201 —— 否则
+      客户端会重发、白烧一份算力。双重失败（连 pending_review 都写不进去）时
+      构造一个 pending_review 的 Settlement 让响应继续，预留保持冻着可见。
+      提交失败的结算（退款）失败仍上抛，钱的问题要让人看见。测试：
+      `settle_video_without_a_count_marks_the_reservation_pending_review`。
 
-   f. **`forward_submit` / `forward_poll` 里设的 `x-ai-switch-platform` 头是死代码**：
-      `proxy_state` 已经用 `access_scope` 把平台钉死，而 `resolve_platform` 的第一句
-      就是 `if let Some(scope) = &state.access_scope { return Ok(scope.platform) }`。
-      留着不危险，但会让人误以为头才是生效的那一环。
+   f. ~~**`forward_submit` / `forward_poll` 里设的 `x-ai-switch-platform` 头是死代码**~~
+      —— **已随「平台由入站 key 解析」的重构消失**（`51ae0bb` 之后两个函数都
+      不再设这个头），无需再改。
 
-   g. **`max_poll_attempts` 240 × 10s = 40 分钟**，更长的视频会被误判失败。
-      修法方向：按 `effective_duration_seconds` 动态算预算。
+   g. ~~**`max_poll_attempts` 240 × 10s = 40 分钟**~~ —— **已解决**。常量改名
+      `MIN_POLL_ATTEMPTS`（下限语义），新增 `poll_budget(duration_seconds)`：
+      `时长/间隔 + 60 次余量`，与下限取大。没有时长信息的方言（智谱）用下限。
+      同时把预算检查提到 `poll_once` 最前 —— 以前 `attempt_count` 只在**失败
+      分支**被比较，「上游一直回 processing」的僵尸任务以前根本不会停。测试：
+      `poll_budget_scales_with_the_declared_duration`。
 
-   **两个实现细节值得记**：
-   - 计价用的时长与发到上游的时长**共用同一个来源**：`protocol::effective_duration_seconds()`
-     与 `upstream_body` 共用 `DEFAULT_VIDEO_DURATION_SECONDS`。否则「按秒收费」的秒数会和
-     实际发给上游的秒数对不上。
-   - `execute_video_request` 改成**先解析契约体、再预留**：这样时长只有一个来源，
-     并且解析失败时还没预留，原来那支「解析失败要退款」的分支直接消失了。
+   **实现细节（沿用 + 一条新教训）**：
+   - 计价用的时长与发到上游的时长**共用同一个来源**：以前是共用
+     `DEFAULT_VIDEO_DURATION_SECONDS` 常量，3a 之后收紧为共用
+     `upstream_effective_duration` 函数本身 —— 常量级同源挡不住方言各自的
+     clamp/缺省，函数级同源才能。
+   - `execute_video_request` 先解析契约体、再预留：解析失败时还没预留，
+     不需要退款分支。
+   - billing 引入了对 `videogen::protocol` 的依赖（`upstream_effective_duration` /
+     `VideoDialect`）：「计费不依赖 videogen」的原则对**数量上下界**仍然成立，
+     但时长口径必须与协议同源 —— 口径分叉的地方就会多收钱。
 3. **没有 `/v1/video/models` 目录端点**：原先 `service.rs` 里有个 `list_models`（从账号池的
    `model_mappings` + `video.generate` 推导模型目录），但它没有任何调用方、也不在约定契约里
    （计划只约定 `/v1/video/generations` + `GET /{task_id}`），已删除。图像侧同样没有目录端点，
