@@ -28,6 +28,7 @@ pub mod proxy_service;
 pub mod remote_probe;
 pub(crate) mod request_compression;
 pub(crate) mod request_content_rejection;
+pub(crate) mod request_image_limit;
 pub mod response_failure_service;
 pub mod responses_encrypted_content;
 pub mod route_config_service;

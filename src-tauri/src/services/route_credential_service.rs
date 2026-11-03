@@ -338,6 +338,9 @@ impl RouteCredentialService {
             crate::services::request_content_rejection::validate(
                 config.get(crate::services::request_content_rejection::CONFIG_KEY),
             )?;
+            crate::services::request_image_limit::validate(
+                config.get(crate::services::request_image_limit::CONFIG_KEY),
+            )?;
             crate::services::account_proxy::validate_config(&config).map_err(|message| {
                 AppError::Validation {
                     code: "validation.route_credential_proxy_url",
@@ -593,6 +596,42 @@ impl RouteCredentialService {
             return Ok(());
         }
         config.insert("force_reasoning_content".to_string(), json!(true));
+        let config_json = Value::Object(config).to_string();
+        RouteCredentialRepository::update_config_json(pool, id, &config_json).await?;
+        best_effort_sync(pool, &platform).await;
+        Ok(())
+    }
+
+    /// Persist the account-level image-count compatibility switch.
+    ///
+    /// The upstream answered `Exceeded maximum number of images (N) allowed in
+    /// the request.` — a verdict on the conversation the client sent, not on the
+    /// account. The proxy already recovers this turn by dropping the older images
+    /// and re-asking; enabling the switch here means every later request from this
+    /// account sends only its newest images up front, so the turn never has to be
+    /// paid for twice.
+    ///
+    /// Idempotent: an account that already opts in is left untouched, and a config
+    /// that cannot be parsed is skipped rather than clobbered.
+    pub async fn enable_image_limit_compat(pool: &SqlitePool, id: &str) -> Result<(), AppError> {
+        let credential = RouteCredentialRepository::get(pool, id).await?;
+        let platform = credential.platform.clone();
+        let mut config = match serde_json::from_str::<Value>(&credential.config_json) {
+            Ok(Value::Object(map)) => map,
+            Ok(_) => serde_json::Map::new(),
+            Err(_) => return Ok(()),
+        };
+        if config
+            .get(crate::services::request_image_limit::CONFIG_KEY)
+            .and_then(Value::as_str)
+            == Some(crate::services::request_image_limit::TRIM_OLD_IMAGES)
+        {
+            return Ok(());
+        }
+        config.insert(
+            crate::services::request_image_limit::CONFIG_KEY.to_string(),
+            json!(crate::services::request_image_limit::TRIM_OLD_IMAGES),
+        );
         let config_json = Value::Object(config).to_string();
         RouteCredentialRepository::update_config_json(pool, id, &config_json).await?;
         best_effort_sync(pool, &platform).await;
@@ -3399,6 +3438,142 @@ mod plaintext_reasoning_setting_tests {
         .unwrap();
         assert_eq!(stored2["force_reasoning_content"], true);
         assert!(stored2["base_url"].as_str().unwrap().contains("anyrouter"));
+    }
+
+    /// 图片超限的自愈开关与推理自愈同一套：一次写入，之后每次请求都生效。
+    #[tokio::test]
+    async fn enable_image_limit_compat_persists_the_switch_and_is_idempotent() {
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let input = json!({
+            "platform": "codex",
+            "display_name": "fixture",
+            "api_key": "sk-test",
+            "base_url": "https://anyrouter.top/v1",
+            "interface_format": "openai-responses",
+            "model_mappings_json": "[]"
+        });
+        let row = RouteCredentialService::create_api(&pool, serde_json::from_value(input).unwrap())
+            .await
+            .unwrap();
+        let config0: Value = serde_json::from_str(&row.config_json).unwrap();
+        assert!(config0
+            .get(crate::services::request_image_limit::CONFIG_KEY)
+            .is_none());
+
+        RouteCredentialService::enable_image_limit_compat(&pool, &row.id)
+            .await
+            .unwrap();
+        let stored: Value = serde_json::from_str(
+            &RouteCredentialRepository::get(&pool, &row.id)
+                .await
+                .unwrap()
+                .config_json,
+        )
+        .unwrap();
+        assert_eq!(
+            stored[crate::services::request_image_limit::CONFIG_KEY],
+            crate::services::request_image_limit::TRIM_OLD_IMAGES
+        );
+
+        // 幂等：重复调用不报错，也不覆盖同一份 config 里的其它字段。
+        RouteCredentialService::enable_image_limit_compat(&pool, &row.id)
+            .await
+            .unwrap();
+        let stored2: Value = serde_json::from_str(
+            &RouteCredentialRepository::get(&pool, &row.id)
+                .await
+                .unwrap()
+                .config_json,
+        )
+        .unwrap();
+        assert_eq!(
+            stored2[crate::services::request_image_limit::CONFIG_KEY],
+            crate::services::request_image_limit::TRIM_OLD_IMAGES
+        );
+        assert!(stored2["base_url"].as_str().unwrap().contains("anyrouter"));
+    }
+
+    /// 非法取值必须在持久化前被拒；合法值原样保存。
+    #[tokio::test]
+    async fn image_limit_compat_mode_is_validated_on_update() {
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let row = RouteCredentialService::create_api(
+            &pool,
+            serde_json::from_value(json!({
+                "platform": "codex",
+                "display_name": "fixture",
+                "api_key": "sk-test",
+                "base_url": "https://anyrouter.top/v1",
+                "interface_format": "openai-responses",
+                "model_mappings_json": "[]"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let update = |config_json: &str| {
+            json!({
+                "display_name": row.display_name,
+                "email": row.email,
+                "status": row.status,
+                "route_priority": row.route_priority,
+                "max_concurrency": row.max_concurrency,
+                "secret_payload_json": row.secret_payload_json,
+                "config_json": config_json,
+                "preview_json": row.preview_json,
+            })
+        };
+
+        let error = RouteCredentialService::update(
+            &pool,
+            row.id.clone(),
+            serde_json::from_value(update(r#"{"image_limit_compat":"trim_all"}"#)).unwrap(),
+        )
+        .await
+        .expect_err("illegal mode must be refused");
+        assert!(matches!(
+            error,
+            AppError::Validation {
+                code: "validation.image_limit_compat",
+                ..
+            }
+        ));
+        let stored: Value = serde_json::from_str(
+            &RouteCredentialRepository::get(&pool, &row.id)
+                .await
+                .unwrap()
+                .config_json,
+        )
+        .unwrap();
+        assert!(stored
+            .get(crate::services::request_image_limit::CONFIG_KEY)
+            .is_none());
+
+        RouteCredentialService::update(
+            &pool,
+            row.id.clone(),
+            serde_json::from_value(update(
+                r#"{"image_limit_compat":"trim_old_images","keep":"yes"}"#,
+            ))
+            .unwrap(),
+        )
+        .await
+        .expect("legal mode must save");
+        let stored: Value = serde_json::from_str(
+            &RouteCredentialRepository::get(&pool, &row.id)
+                .await
+                .unwrap()
+                .config_json,
+        )
+        .unwrap();
+        assert_eq!(
+            stored[crate::services::request_image_limit::CONFIG_KEY],
+            "trim_old_images"
+        );
+        assert_eq!(stored["keep"], "yes");
     }
 }
 

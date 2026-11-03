@@ -1420,6 +1420,18 @@ function writeContentRejectionCompat(config: Record<string, unknown>, enabled: b
   }
 }
 
+function imageLimitCompatFromConfig(config: Record<string, unknown>): boolean {
+  return config.image_limit_compat === "trim_old_images";
+}
+
+function writeImageLimitCompat(config: Record<string, unknown>, enabled: boolean) {
+  if (enabled) {
+    config.image_limit_compat = "trim_old_images";
+  } else {
+    delete config.image_limit_compat;
+  }
+}
+
 function ContentRejectionCompatOption({
   checked,
   onChange,
@@ -1440,6 +1452,32 @@ function ContentRejectionCompatOption({
         <span>内容过滤兼容</span>
         <span className="text-[11px] font-medium text-stone-500">
           上游因敏感词拒绝请求时，省略较旧的工具输出并重试一次。只影响发往该上游的请求，不改本地会话记录。默认关闭；请求压缩不能绕过内容过滤。
+        </span>
+      </span>
+    </label>
+  );
+}
+
+function ImageLimitCompatOption({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <label className="flex items-start gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12px] font-medium text-stone-700">
+      <input
+        aria-label="图片超限兼容"
+        checked={checked}
+        className="mt-0.5"
+        onChange={(event) => onChange(event.target.checked)}
+        type="checkbox"
+      />
+      <span className="grid gap-1">
+        <span>图片超限兼容</span>
+        <span className="text-[11px] font-medium text-stone-500">
+          上游限制单次请求的图片张数时，只发送最新的图片、把更早的图片换成一行说明，避免整段会话被拒。只影响发往该上游的请求，不改本地会话记录。遇到该错误会自动开启。
         </span>
       </span>
     </label>
@@ -1829,6 +1867,7 @@ function apiConfigJsonWithFields(
   plaintextReasoningMode: ResponsesPlaintextReasoningMode = plaintextReasoningModeFromConfig(parseJsonObject(configJson)),
   requestCompressionMode: RequestCompressionMode = requestCompressionModeFromConfig(parseJsonObject(configJson)),
   contentRejectionCompat = false,
+  imageLimitCompat = false,
 ) {
   const config = parseJsonObject(configJson);
   config.base_url = baseUrl.trim();
@@ -1838,6 +1877,7 @@ function apiConfigJsonWithFields(
   writePlaintextReasoningMode(config, plaintextReasoningMode);
   writeRequestCompressionMode(config, requestCompressionMode);
   writeContentRejectionCompat(config, contentRejectionCompat);
+  writeImageLimitCompat(config, imageLimitCompat);
   config.responses_encrypted_content_cleanup = responsesEncryptedContentCleanup;
   // Subordinate to the main switch: never persist an aggressive opt-in on its
   // own, so turning cleanup off cannot leave a live stripping flag behind.
@@ -2845,6 +2885,19 @@ function CredentialFailureTooltip({
   });
   const contentRejected =
     credential.last_failure_kind === "content_rejected" || contentRejectedByCode;
+  const imageLimitFailure = [response, credential.last_failure_message].some((value) => {
+    const text = value?.toLowerCase();
+    return (
+      text?.includes("maximum number of images") ||
+      text?.includes("max number of images") ||
+      text?.includes("too many images")
+    );
+  });
+  const imageLimitCompatHint = imageLimitCompatFromConfig(
+    parseJsonObject(credential.config_json),
+  )
+    ? "该账号已开启图片超限兼容：发往上游前只保留最新图片，较早的图片会被省略。"
+    : "可在账号编辑中开启「图片超限兼容」；遇到该错误会自动开启，之后只发送最新的图片。";
   const budgetPoolExhausted = [response, credential.last_failure_message].some((value) =>
     value?.toLowerCase().includes(BUDGET_POOL_EXHAUSTED_MESSAGE),
   );
@@ -2889,6 +2942,14 @@ function CredentialFailureTooltip({
               data-testid={`credential-content-rejection-compat-${credential.id}`}
             >
               {contentRejectionCompatHint}
+            </span>
+          ) : null}
+          {imageLimitFailure ? (
+            <span
+              className="mt-1 block"
+              data-testid={`credential-image-limit-compat-${credential.id}`}
+            >
+              {imageLimitCompatHint}
             </span>
           ) : null}
           {budgetPoolExhausted ? (
@@ -3488,6 +3549,7 @@ export function AccountsScreen({
   const [editPlaintextReasoningMode, setEditPlaintextReasoningMode] = useState<ResponsesPlaintextReasoningMode>("auto");
   const [editRequestCompressionMode, setEditRequestCompressionMode] = useState<RequestCompressionMode>("auto");
   const [editContentRejectionCompat, setEditContentRejectionCompat] = useState(false);
+  const [editImageLimitCompat, setEditImageLimitCompat] = useState(false);
   const [editResponsesEncryptedContentAggressiveStrip, setEditResponsesEncryptedContentAggressiveStrip] = useState(false);
   const [editInlineRemoteImages, setEditInlineRemoteImages] = useState(false);
   const [editTurnReminder, setEditTurnReminder] = useState(false);
@@ -4203,6 +4265,7 @@ export function AccountsScreen({
       setEditPlaintextReasoningMode(plaintextReasoningModeFromConfig(config));
       setEditRequestCompressionMode(requestCompressionModeFromConfig(config));
       setEditContentRejectionCompat(contentRejectionCompatFromConfig(config));
+      setEditImageLimitCompat(imageLimitCompatFromConfig(config));
       setEditResponsesEncryptedContentCleanup(config.responses_encrypted_content_cleanup === true);
       setEditResponsesEncryptedContentAggressiveStrip(
         config.responses_encrypted_content_aggressive_strip === true,
@@ -4225,6 +4288,7 @@ export function AccountsScreen({
       setEditPlaintextReasoningMode("auto");
       setEditRequestCompressionMode("auto");
       setEditContentRejectionCompat(false);
+      setEditImageLimitCompat(false);
       setEditResponsesEncryptedContentCleanup(false);
       setEditResponsesEncryptedContentAggressiveStrip(false);
       setEditInlineRemoteImages(false);
@@ -5466,6 +5530,7 @@ export function AccountsScreen({
                 editPlaintextReasoningMode,
                 editRequestCompressionMode,
                 editContentRejectionCompat,
+                editImageLimitCompat,
               ),
             )
           : writeUserAgentToConfig(
@@ -10475,6 +10540,10 @@ export function AccountsScreen({
                   <ContentRejectionCompatOption
                     checked={editContentRejectionCompat}
                     onChange={setEditContentRejectionCompat}
+                  />
+                  <ImageLimitCompatOption
+                    checked={editImageLimitCompat}
+                    onChange={setEditImageLimitCompat}
                   />
                   {shouldShowResponsesCustomToolCompatForFormat(activePlatform, editApiInterfaceFormat) ? (
                     <label className="flex items-start gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12px] font-medium text-stone-700">

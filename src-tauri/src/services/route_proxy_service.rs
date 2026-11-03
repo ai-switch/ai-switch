@@ -27,15 +27,16 @@ use crate::services::official_agent_identity_service::{
     resolve_agent_identity_headers, CODEX_CHATGPT_BACKEND_BASE_URL,
 };
 use crate::services::platform_capability_service::PlatformCapabilityService;
-use crate::services::request_content_rejection;
 use crate::services::request_compression;
+use crate::services::request_content_rejection;
+use crate::services::request_image_limit;
 use crate::services::response_failure_service::{
     detect_response_failed, is_content_rejection, is_context_length_failure,
     is_cross_resource_item_failure, is_definitive_quota_exhaustion_failure,
     is_encrypted_content_failure, is_insufficient_permissions_failure,
     is_missing_reasoning_failure, is_quota_exhaustion_failure, is_text_only_chat_content_failure,
-    is_thinking_signature_failure, stream_disconnected_before_completion,
-    STREAM_DISCONNECTED_FAILURE_MESSAGE,
+    is_thinking_signature_failure, is_too_many_images_failure,
+    stream_disconnected_before_completion, STREAM_DISCONNECTED_FAILURE_MESSAGE,
 };
 use crate::services::responses_encrypted_content::{
     sanitize_reasoning_from_bytes, sanitize_replayed_reasoning_from_bytes, ReasoningCleanupMode,
@@ -1254,6 +1255,12 @@ pub(crate) async fn forward_request(
     // still-failing upstream falls through to normal failover instead of looping.
     let mut reasoning_forced = false;
     let mut trimmed_content_rejection_retry = false;
+    // One image rewrite per client request, whichever path triggers it: the
+    // account already opted in (proactive), or this request just hit the
+    // upstream's image limit (self-heal). Both set it, so a body that is still
+    // refused after the rewrite falls through to the upstream's own answer
+    // instead of being rewritten twice.
+    let mut images_trimmed = false;
 
     loop {
         let Some((credential_index, credential_retry_count)) = retry_queue.pop_front() else {
@@ -1402,13 +1409,29 @@ pub(crate) async fn forward_request(
                     continue;
                 }
             };
+        // An account that has already hit its upstream's per-request image limit
+        // sends only its newest images from now on. Decided per attempt because
+        // the switch is per account, and computed from `body_bytes` rather than
+        // replacing it, so the client's own request still appears untrimmed in the
+        // logs and in every other candidate's attempt.
+        let proactive_image_trim = if image_limit_trim_enabled(&credential.config_json) {
+            request_image_limit::trim_old_images(&body_bytes)
+        } else {
+            None
+        };
+        if proactive_image_trim.is_some() {
+            images_trimmed = true;
+        }
+        let upstream_body_bytes: &[u8] = proactive_image_trim
+            .as_deref()
+            .unwrap_or_else(|| body_bytes.as_ref());
         let upstream_request = build_upstream_request_internal(
             &credential,
             &platform,
             &path,
             upstream_query.as_deref(),
             outbound_headers.clone(),
-            &body_bytes,
+            upstream_body_bytes,
             Some(&state.codex_history),
             TurnReminderMode::Apply,
             state.model_match_mode,
@@ -1751,6 +1774,24 @@ pub(crate) async fn forward_request(
                 }
             };
             if let Some((error_message, retry_delay)) = prime_failure {
+                // The image limit reported in a 200 opening frame gets the same
+                // self-heal as the buffered path: switch the account's
+                // compatibility on, drop the older images, ask the same account
+                // again. Doing it here rather than inside the handler keeps the
+                // rewrite next to the body it changes.
+                if !images_trimmed
+                    && detect_response_failed(&primed)
+                        .as_ref()
+                        .is_some_and(is_too_many_images_failure)
+                {
+                    images_trimmed = true;
+                    enable_image_limit_compat_in_background(pool, &credential.id);
+                    if let Some(trimmed) = request_image_limit::trim_old_images(&body_bytes) {
+                        body_bytes = axum::body::Bytes::from(trimmed);
+                        retry_queue.push_front((credential_index, credential_retry_count));
+                        continue;
+                    }
+                }
                 let terminal = handle_stream_prime_failure(
                     &state,
                     pool,
@@ -2191,6 +2232,34 @@ pub(crate) async fn forward_request(
             );
         }
 
+        // The conversation carries more images than one request may hold. Every
+        // account in the pool counts the same images and refuses the same history
+        // identically, so failover cannot recover the turn. Recover it in place
+        // instead: switch this account's image compatibility on for good, drop the
+        // older images from this request, and ask the same account once more. The
+        // client's own history is never modified — only the copy that goes
+        // upstream.
+        if semantic_failure
+            .as_ref()
+            .is_some_and(is_too_many_images_failure)
+        {
+            enable_image_limit_compat_in_background(pool, &credential.id);
+            if !images_trimmed {
+                images_trimmed = true;
+                if let Some(trimmed) = request_image_limit::trim_old_images(&body_bytes) {
+                    body_bytes = axum::body::Bytes::from(trimmed);
+                    // Same account, and the failure policy's retry budget is left
+                    // alone: this attempt asks a different question.
+                    retry_queue.push_front((credential_index, credential_retry_count));
+                    continue;
+                }
+            }
+            // Nothing left to drop (or the trimmed body was refused as well).
+            // The upstream's sentence names the fix, so hand it back rather than
+            // parking the pool for a request only the caller can shrink.
+            return proxy_upstream_response(status, upstream_headers, response_bytes.to_vec());
+        }
+
         // A refused `thinking` signature is not this account's doing. The block
         // was minted by whichever account served the previous turn, and the pool
         // deliberately advances past that account (the cursor above), so the first
@@ -2481,6 +2550,30 @@ pub(crate) async fn forward_request(
         "All route credentials failed for {platform}: {}",
         retry_errors.join(" | ")
     ))
+}
+
+/// Whether this account opted into sending only its newest images.
+///
+/// A config that cannot be parsed reads as "off": the rewrite is a convenience,
+/// and guessing at a broken config would change a request the user never asked
+/// to have changed.
+fn image_limit_trim_enabled(config_json: &str) -> bool {
+    parse_json_object(config_json, "config")
+        .ok()
+        .is_some_and(|config| request_image_limit::trim_enabled(&config))
+}
+
+/// Turn on the account's image-count compatibility for every later request.
+///
+/// Fire-and-forget: the trimmed retry already answers this turn, so a slow or
+/// failed write must never block or fail it — the same rule the missing-reasoning
+/// self-heal follows.
+fn enable_image_limit_compat_in_background(pool: &SqlitePool, credential_id: &str) {
+    let pool = pool.clone();
+    let id = credential_id.to_string();
+    tokio::spawn(async move {
+        let _ = RouteCredentialService::enable_image_limit_compat(&pool, &id).await;
+    });
 }
 
 fn content_rejection_retry_indexes(
@@ -3393,9 +3486,10 @@ struct StreamPrimeContext<'a> {
 ///
 /// Returns `true` when the failure is terminal for the whole request — the
 /// caller must hand the buffered bytes straight back to the client instead of
-/// walking the pool. The only such case today is an oversized prompt: every
-/// account rejects the same bytes, so a walk can only burn the pool and end in
-/// the aggregated error that hides the upstream's own sentence.
+/// walking the pool. The cases today are the request-body verdicts (an oversized
+/// prompt, a conversation over the image count limit): every account rejects the
+/// same bytes, so a walk can only burn the pool and end in the aggregated error
+/// that hides the upstream's own sentence.
 #[allow(clippy::too_many_arguments)]
 async fn handle_stream_prime_failure(
     state: &ProxyAppState,
@@ -3460,7 +3554,7 @@ async fn handle_stream_prime_failure(
         context.response_body,
         None,
     );
-    // An oversized prompt is terminal for the whole request: every account
+    // A request-body verdict is terminal for the whole request: every account
     // rejects the same bytes, so walking the pool would burn it down to an
     // aggregated error that hides the upstream's own sentence. Hand the buffered
     // bytes straight back, leaving every credential untouched.
@@ -3468,7 +3562,9 @@ async fn handle_stream_prime_failure(
         .response_body
         .and_then(detect_response_failed)
         .as_ref()
-        .is_some_and(is_context_length_failure)
+        .is_some_and(|failure| {
+            is_context_length_failure(failure) || is_too_many_images_failure(failure)
+        })
     {
         return true;
     }
@@ -3718,13 +3814,26 @@ impl StreamCompletion {
             // 字节，记成账号故障只会把一个健康账号冷却掉，而真正的修复是缩请求。
             // 日志已经保留了上游原文（见 `error_message`），不再给账号记失败。
             //
+            // 「会话里的图片数量超过单次请求上限」同理：张数写在客户端发来的 body
+            // 里，换号数出的是同一个数字。
+            //
             // 真正的断流（上游没说明原因）照旧记账：账号的退避与健康状态正是用来
             // 阻止号池优先挑一个老是断流的上游。
-            let context_overflow = outcome
+            let request_verdict = outcome.failure.as_ref().is_some_and(|failure| {
+                is_context_length_failure(failure) || is_too_many_images_failure(failure)
+            });
+            // The stream is already on its way to the client, so this turn cannot
+            // be recovered here — but the account can: switch its image
+            // compatibility on so the next request sends only its newest images
+            // instead of hitting the same limit again.
+            if outcome
                 .failure
                 .as_ref()
-                .is_some_and(is_context_length_failure);
-            if !context_overflow {
+                .is_some_and(is_too_many_images_failure)
+            {
+                enable_image_limit_compat_in_background(&state.pool, &credential.id);
+            }
+            if !request_verdict {
                 record_route_credential_failure(
                     &state.activity,
                     &platform,
@@ -8774,6 +8883,10 @@ mod tests {
 
     mod reasoning_missing_selfheal {
         include!("route_proxy_service/reasoning_missing_selfheal_tests.rs");
+    }
+
+    mod request_limits {
+        include!("route_proxy_service/request_limit_tests.rs");
     }
 
     // The pre-mode signatures: these assertions are about the aggregated list.

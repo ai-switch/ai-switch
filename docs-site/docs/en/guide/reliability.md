@@ -186,6 +186,21 @@ The upstream sentence is stored along with the response body, so both the accoun
 
 Ordinary 401 messages stay out of the test panel (`HTTP 401` already says the same thing); a missing scope is the one exception, because that sentence is the only place the user can read which permission is missing.
 
+### A verdict on the request body is not charged to the account
+
+Some "failures" are the upstream's verdict on **this request's content**: every account in the pool would answer the same way. ai-switch never records them as account failures, and never fails over:
+
+| Upstream sentence (excerpt) | What ai-switch does |
+| --- | --- |
+| `prompt is too long` / `maximum context length` | Hands the upstream's sentence straight back, without retrying; shorten the session, or let the client compact (Codex only compacts after a `context_length_exceeded` code, which the proxy stamps on) |
+| `Exceeded maximum number of images (50) allowed in the request.` | Switches the account's "image limit compatibility" on, replaces the older images in the copy sent upstream with a one-line note (keeping the newest 10), and retries the same account once; only if that is still refused does it hand the upstream's sentence back |
+
+The image limit is recoverable because the image count belongs to the body the client sent, not to the account: every account in the pool counts the same images. The proxy rewrites **only the copy that goes upstream**, never the client's own history. The switch it turns on is persisted to the account config, so later requests send only the newest images up front instead of hitting the same limit again; it can also be toggled by hand under "Advanced" in the account editor.
+
+The second case needs its own rule because it only appears in prose: relays wrap it in their own generic envelope (`type: invalid_request_error`, `code: null`), so no structured field identifies it. Treated as an ordinary semantic failure, a single over-limit session charges every account in the pool one `semantic_response_transient` — healthy accounts get cooled one by one while the user sees "all route credentials failed", with the one sentence naming the fix buried underneath.
+
+Compressing the request does not help here either: Brotli / Gzip / Zstd change the byte count, not the number of images, so the upstream refuses all the same.
+
 ### The fingerprint streak mechanism
 
 The semantic-failure streak counter does not simply increment; it increments **only on a fingerprint match**:

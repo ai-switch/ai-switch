@@ -361,6 +361,34 @@ pub fn is_context_length_failure(failure: &SemanticResponseFailure) -> bool {
         || message.contains("prompt is too long")
 }
 
+/// Returns whether an upstream refused the request because the conversation
+/// carries more images than one request may hold
+/// (`Exceeded maximum number of images (50) allowed in the request.`).
+///
+/// Same verdict-on-the-request class as an oversized prompt: the count is a
+/// property of the bytes the client sent, so every credential in the pool counts
+/// the same images and refuses the same history identically. A failover walk
+/// cannot recover the turn, and charging it to the credential parks healthy
+/// accounts for a request only the caller can shrink — while the aggregated
+/// "all route credentials failed" error buries the one sentence that names the
+/// fix.
+///
+/// Matched on prose alone: the relays that enforce this limit report it under
+/// their own generic `invalid_request_error` envelope with `code: null`, so
+/// there is no structured field to key on.
+pub fn is_too_many_images_failure(failure: &SemanticResponseFailure) -> bool {
+    let message = failure
+        .message
+        .to_ascii_lowercase()
+        .replace(['`', '_'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    message.contains("maximum number of images")
+        || message.contains("max number of images")
+        || message.contains("too many images")
+}
+
 /// Returns whether a Chat upstream rejected a conversation because a content
 /// part's `type` is outside its text-only allowed list.
 ///
@@ -868,6 +896,40 @@ data: {"type":"response.failed","error":{"message":"down"}}
         )
         .expect("semantic failure");
         assert!(!is_text_only_chat_content_failure(&unrelated));
+    }
+
+    #[test]
+    fn detects_a_too_many_images_rejection() {
+        // The relay's own wrapper text is part of the sentence; the count is
+        // whatever the upstream enforces.
+        for message in [
+            "OpenAI Responses bad request: Exceeded maximum number of images (50) allowed in the request. [trace_id=223c8d6543609aba62b8ae7897679cbf]",
+            "exceeded MAXIMUM  number of images (20) allowed in the request",
+            "too many images in this request",
+        ] {
+            let failure = SemanticResponseFailure {
+                code: None,
+                error_type: Some("invalid_request_error".to_string()),
+                message: message.to_string(),
+            };
+            assert!(is_too_many_images_failure(&failure), "{message}");
+        }
+
+        // Neighbouring verdicts on the request must not be claimed: an image
+        // *generation* failure is not an image *count* failure, and an oversized
+        // prompt is handled by its own rule.
+        for message in [
+            "image generation failed: content policy violation",
+            "maximum number of tokens exceeded",
+            "prompt is too long: 250000 tokens > 200000 maximum",
+        ] {
+            let failure = SemanticResponseFailure {
+                code: None,
+                error_type: None,
+                message: message.to_string(),
+            };
+            assert!(!is_too_many_images_failure(&failure), "{message}");
+        }
     }
 
     #[test]

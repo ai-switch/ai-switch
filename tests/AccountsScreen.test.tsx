@@ -2988,6 +2988,100 @@ describe("AccountsScreen", () => {
     expect(config.content_rejection_compat).toBeUndefined();
   });
 
+  it("writes image limit compatibility when edited on", async () => {
+    const api = {
+      ...credentialsFixture[1],
+      platform: "codex" as const,
+      display_name: "Image Limit Off",
+      config_json: JSON.stringify({
+        base_url: "https://api.upstream.test/v1",
+        interface_format: "openai",
+        model_mappings: [],
+      }),
+    };
+    vi.mocked(listRouteCredentials).mockResolvedValue([api]);
+    vi.mocked(updateRouteCredential).mockResolvedValue(api);
+
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 Image Limit Off" }));
+    await openFormTab("高级");
+    await userEvent.click(screen.getByLabelText("图片超限兼容"));
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
+    const config = JSON.parse(vi.mocked(updateRouteCredential).mock.calls[0][1].config_json);
+    expect(config.image_limit_compat).toBe("trim_old_images");
+  });
+
+  it("removes image limit compatibility from config when edited off", async () => {
+    const api = {
+      ...credentialsFixture[1],
+      platform: "codex" as const,
+      display_name: "Image Limit Edit",
+      config_json: JSON.stringify({
+        base_url: "https://api.upstream.test/v1",
+        interface_format: "openai",
+        model_mappings: [],
+        image_limit_compat: "trim_old_images",
+      }),
+    };
+    vi.mocked(listRouteCredentials).mockResolvedValue([api]);
+    vi.mocked(updateRouteCredential).mockResolvedValue(api);
+
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 Image Limit Edit" }));
+    await openFormTab("高级");
+    const toggle = screen.getByLabelText("图片超限兼容");
+    expect(toggle).toBeChecked();
+    await userEvent.click(toggle);
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
+    const config = JSON.parse(vi.mocked(updateRouteCredential).mock.calls[0][1].config_json);
+    expect(config.image_limit_compat).toBeUndefined();
+  });
+
+  it("points at the image limit compatibility switch when the upstream caps images", async () => {
+    const cappedResponse = JSON.stringify({
+      error: {
+        message:
+          "OpenAI Responses bad request: Exceeded maximum number of images (50) allowed in the request.",
+        type: "invalid_request_error",
+        code: null,
+      },
+    });
+    vi.mocked(listRouteCredentials).mockResolvedValue([
+      {
+        ...credentialsFixture[1],
+        id: "cred-image-on",
+        display_name: "Image On",
+        status: "error",
+        last_failure_kind: "semantic_response_failed",
+        last_failure_message:
+          "OpenAI Responses bad request: Exceeded maximum number of images (50) allowed in the request.",
+        last_failure_response_json: cappedResponse,
+        config_json: JSON.stringify({ image_limit_compat: "trim_old_images" }),
+      },
+      {
+        ...credentialsFixture[0],
+        id: "cred-image-off",
+        display_name: "Image Off",
+        status: "error",
+        last_failure_kind: "semantic_response_failed",
+        last_failure_message:
+          "OpenAI Responses bad request: Exceeded maximum number of images (50) allowed in the request.",
+        last_failure_response_json: cappedResponse,
+      },
+    ]);
+
+    renderScreen();
+
+    const firstRow = await screen.findByLabelText("放置在 Image On 前");
+    const secondRow = screen.getByLabelText("放置在 Image Off 前");
+    expect(within(firstRow).getByText(/已开启图片超限兼容/)).toBeInTheDocument();
+    expect(within(secondRow).getByText(/可在账号编辑中开启「图片超限兼容」/)).toBeInTheDocument();
+  });
+
   it("labels content rejection and explains content-blocked with the B1 state", async () => {
     vi.mocked(listRouteCredentials).mockResolvedValue([
       {
