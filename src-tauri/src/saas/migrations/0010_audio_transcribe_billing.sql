@@ -1,0 +1,12 @@
+-- STT / 翻译计费（音频遗留 1）
+--
+-- STT 按**次**计费：上传一段音频换一份转写，没有可数的产出单位 —— 文本长度是
+-- 结果不是成本（上游按音频时长收费，而网关不解码音频、拿不到可靠的时长），按
+-- 「每条转写」收是唯一既诚实又可执行的口径。OpenAI 官方按分钟，但那要求网关
+-- 解 mp3/wav 头，v1 不做；列名留 `transcribe` 语义，将来要按时长再加列。
+--
+-- 与 TTS 的 `audio_price_micros_per_1k_chars`（按千字符）是**两个独立列**：
+-- 会说话的账号不一定会听，一个模型行声明哪个价，哪个端点才轮得到它。
+--
+-- 纯追加：既有行 DEFAULT 0（未定价 → `reserve_transcribe` fail closed），行为零变化。
+ALTER TABLE saas_group_models ADD COLUMN audio_transcribe_price_micros INTEGER NOT NULL DEFAULT 0 CHECK(audio_transcribe_price_micros>=0);

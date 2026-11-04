@@ -156,9 +156,26 @@ TTS 按**字符**计费（OpenAI tts-1 是 $15 / 1M 字符）。两个细节：
 
 ## 遗留
 
-1. **STT / 翻译**（`/v1/audio/transcriptions` / `/v1/audio/translations`）。是 multipart 上传，
-   与 TTS 不是一回事：要转发 multipart、从**表单字段**取 `model`（不能用 JSON 取）、
-   SaaS 那条路要单开分支（现在无条件 `serde_json::from_slice` 读 body）。能力名用 `audio.transcribe`。
+1. ~~**STT / 翻译**（`/v1/audio/transcriptions` / `/v1/audio/translations`）~~ —— **已解决**
+   （2026-11-04）。在 `audiogen::protocol` 加了一层最小的 multipart 解析/重建
+   （`parse_multipart` / `rewrite_field`，不引依赖，只支持 RFC 7578 的常见形状）；
+   `model` 从**表单字段**取（`validate_transcribe_request`），文件段逐字节原样保留。
+   接线：
+   - 直路：`build_audio_transcribe_upstream_request`（改写 `model` 表单段后**重设
+     Content-Type** 为新 boundary），`forward_request` 的 `requested_model` 也兜一层
+     multipart 取 model；
+   - SaaS：入口在「解析 JSON 之前」分叉（multipart 不是 JSON，`serde_json::from_slice`
+     必败），入站上限放宽到 26 MiB，走 `execute_audio_transcribe_request` →
+     `reserve_transcribe` / `settle_transcribe`；
+   - 计费：STT **按次**（迁移 `0010_audio_transcribe_billing.sql`，列
+     `audio_transcribe_price_micros`）——上游按音频时长收费，但网关不解码音频、
+     拿不到可靠时长，按「一条转写」收是唯一既诚实又可执行的口径；
+   - 能力名 `audio.transcribe`（`AUDIO_TRANSCRIBE_CAPABILITY`），与 TTS 的
+     `audio.generate` 分开；
+   - 管理端 `Groups.tsx` 加「转写 · USD/次」列与编辑字段。
+   注意：`is_audio_speech_path` 必须**只认字面量** `/v1/audio/speech`（STT 落地后
+   `requested_audio_capability` 对两条 STT 路径也返回 `audio.transcribe`，复用会让
+   multipart 撞进 TTS 的 JSON 分支被当场打回）。
 2. **第二个音频方言**（MiniMax / 火山 / Azure / ElevenLabs）。到那时才需要
    `extract_audio`（JSON 里的 hex/base64 → 字节）与按方言的鉴权头——现在 `build_audio_upstream_request`
    硬写 `Authorization: Bearer`。

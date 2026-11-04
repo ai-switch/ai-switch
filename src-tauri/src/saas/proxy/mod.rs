@@ -109,11 +109,16 @@ async fn execute(
     // 音频（TTS）。与视频不同，它是**同步**接口：只有 POST 一个方向，没有查询与
     // 内容下载，所以不需要 `video_get` 那种「GET 也算」的例外。
     let audio = crate::services::route_proxy_service::is_audio_speech_path(&path);
+    // STT / 翻译（音频遗留 1）。同样是同步 POST，但请求是 **multipart**：
+    // `model` 住在表单字段里，下面的 `serde_json::from_slice` 必然失败，
+    // 所以必须在读 body 之前把分叉准备好。
+    let audio_transcribe =
+        crate::services::route_proxy_service::is_audio_transcribe_path(&path);
     // 这里**不再有**「视频 key 只能打视频端点」这类守卫 —— 视频 / 音频不是平台，
     // 它们住在账号的模态分类里，所以没有专属的 key 需要约束。一把 codex key
     // 本来就该能打这个池里的所有模态，这正是「一个 key 通吃」的落点。
     if (!video_get && method != Method::POST)
-        || !(anthropic || responses || chat || images || videos || audio)
+        || !(anthropic || responses || chat || images || videos || audio || audio_transcribe)
         || (principal.platform == "claude" && !(anthropic || responses))
         || (principal.platform == "gemini" && !images)
         || (principal.platform == "codex" && anthropic)
@@ -138,6 +143,27 @@ async fn execute(
     // 否则空体会先撞上 `saas.validation`。
     if video_get {
         return execute_video_get(app_state, principal, &path, uri.query()).await;
+    }
+    // STT / 翻译同样要在「解析 JSON」之前分叉（遗留 1 的原话）：multipart 不是
+    // JSON，`model` 在表单字段里。入站上限按 OpenAI 的口径放宽到 25 MiB ——
+    // 音频文件动辄几 MB，2 MiB 的 JSON 上限装不下一段像样的录音。
+    if audio_transcribe {
+        let body = axum::body::to_bytes(body, 26 * 1024 * 1024)
+            .await
+            .map_err(|_| {
+                repository::invalid("saas.request_limits", "Request body exceeds the limit")
+            })?;
+        return execute_audio_transcribe_request(
+            pool,
+            runtime,
+            proxy,
+            principal,
+            headers,
+            uri,
+            body,
+            &path,
+        )
+        .await;
     }
     let body = axum::body::to_bytes(body, 2 * 1024 * 1024)
         .await
@@ -520,6 +546,141 @@ async fn execute_audio_request(
     };
     if runtime.logs.enqueue(record).await.is_err() {
         eprintln!("SaaS request log queue rejected a completed audio request");
+    }
+    parts.headers.remove(header::SET_COOKIE);
+    parts
+        .headers
+        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    parts
+        .headers
+        .insert("x-saas-request-id", request_id.parse().unwrap());
+    Ok(Response::from_parts(parts, Body::from(bytes)))
+}
+
+/// STT / 翻译的 SaaS 执行（音频遗留 1）。
+///
+/// 与 `execute_audio_request` 同构（同步、全有或全无），三条 multipart 特有的差异：
+///   1. `model` 从**表单字段**取（`audiogen::protocol::validate_transcribe_request`），
+///      计费按**次**（`reserve_transcribe`，无用量维度 —— 上游按音频时长收费，
+///      网关不解码音频，见迁移 0010）；
+///   2. 改写 `model` 是重建 multipart 体（改一个表单段），而不是往 JSON 里塞键；
+///      重建后**必须**把 Content-Type 换成重建体用的 boundary；
+///   3. Content-Type 一路保留 multipart（`execute_audio_request` 里那句
+///      `insert(CONTENT_TYPE, "application/json")` 在这里是错的）。
+async fn execute_audio_transcribe_request(
+    pool: &SqlitePool,
+    runtime: &SaasRuntime,
+    proxy: ProxyAppState,
+    principal: billing::ApiPrincipal,
+    mut headers: HeaderMap,
+    uri: Uri,
+    body: axum::body::Bytes,
+    path: &str,
+) -> Result<Response, AppError> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let model = crate::audiogen::protocol::validate_transcribe_request(&content_type, &body)
+        .map_err(|error| repository::invalid("saas.validation", &error))?;
+
+    let reservation = billing::reserve_transcribe(pool, &principal, &model).await?;
+    let request_id = reservation.request_id.clone();
+    // 组定价行的上游模型名：改写 multipart 的 `model` 段（与 TTS 往 JSON 塞
+    // `reservation.upstream_model` 是同一件事的 multipart 形状）。同名时不动体，
+    // 省一次重编码。
+    let rebuilt = if reservation.upstream_model != model {
+        let boundary = crate::audiogen::protocol::multipart_boundary(&content_type)
+            .ok_or_else(|| {
+                repository::invalid("saas.validation", "Missing multipart boundary")
+            })?;
+        let form = crate::audiogen::protocol::parse_multipart(&body, boundary)
+            .map_err(|error| repository::invalid("saas.validation", &error))?;
+        let rebuilt = form
+            .rewrite_field("model", &reservation.upstream_model)
+            .ok_or_else(|| {
+                repository::invalid("saas.validation", "Model form field vanished")
+            })?;
+        Some(rebuilt)
+    } else {
+        None
+    };
+    if let Some(rebuilt) = &rebuilt {
+        headers.insert(
+            header::CONTENT_TYPE,
+            format!(
+                "multipart/form-data; boundary={}",
+                crate::audiogen::protocol::MultipartForm::REBUILD_BOUNDARY
+            )
+            .parse()
+            .unwrap(),
+        );
+    }
+    let outbound = rebuilt.unwrap_or_else(|| body.to_vec());
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(reservation.timeout_seconds as u64);
+    let proxy = proxy
+        .with_access_scope(
+            PlatformId::parse(&reservation.platform)?,
+            reservation.credential_ids.into_iter().collect(),
+        )
+        .with_model_match_mode(ModelMatchMode::SaasUpstream);
+    headers.remove(header::COOKIE);
+    headers.remove("x-saas-csrf");
+    headers.remove("x-ai-switch-test-trace-id");
+    headers.remove(header::CONTENT_LENGTH);
+    let started = Instant::now();
+    let created_at = chrono::Utc::now();
+    let upstream = tokio::time::timeout_at(
+        deadline,
+        proxy_handler(
+            State(proxy),
+            Method::POST,
+            headers,
+            uri,
+            Body::from(outbound),
+        ),
+    )
+    .await;
+    let response = match upstream {
+        Ok(response) => response,
+        Err(_) => {
+            // 超时：上游可能已经转写了一半，但客户端什么都没拿到 —— 整笔退。
+            let _ = billing::settle_transcribe(pool, &request_id, false).await;
+            return Ok((StatusCode::GATEWAY_TIMEOUT, Json(json!({"error":{"code":"saas.upstream_timeout","message":"Upstream request timed out"}}))).into_response());
+        }
+    };
+    let status = response.status();
+    let (mut parts, body) = response.into_parts();
+    // 转写响应是小 JSON（`{"text": "…"}`），但上限与 TTS 保持同一量级。
+    let bytes = axum::body::to_bytes(body, 128 * 1024 * 1024)
+        .await
+        .map_err(|_| repository::invalid("saas.upstream_body", "Could not read transcription response"))?;
+    let settlement = billing::settle_transcribe(pool, &request_id, status.is_success()).await?;
+    let record = LogRecord {
+        request_id: request_id.clone(),
+        user_id: reservation.user_id,
+        key_id: reservation.key_id,
+        group_id: reservation.group_id,
+        platform: reservation.platform,
+        model,
+        endpoint: path.to_string(),
+        created_at,
+        utc_offset_minutes: chrono::Local::now().offset().local_minus_utc() / 60,
+        duration_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+        status: status.as_u16(),
+        amount_usd_micros: settlement.price_usd_micros.unwrap_or(0),
+        settlement_status: settlement.status,
+        error_code: if status.is_success() {
+            None
+        } else {
+            Some("upstream_rejected".into())
+        },
+        ..Default::default()
+    };
+    if runtime.logs.enqueue(record).await.is_err() {
+        eprintln!("SaaS request log queue rejected a completed transcription request");
     }
     parts.headers.remove(header::SET_COOKIE);
     parts

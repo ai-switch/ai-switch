@@ -152,8 +152,11 @@ const VIDEO_GENERATE_CAPABILITY: &str = "video.generate";
 ///
 /// 与 `VIDEO_GENERATE_CAPABILITY` 同构：音频也是一个**独立平台**（池身份是
 /// `audio`），所以 `/v1/models` 与候选过滤都按这一个能力收窄。
-/// STT 是另一个能力（`audio.transcribe`），等它落地时再提常量。
 const AUDIO_GENERATE_CAPABILITY: &str = "audio.generate";
+/// STT / 翻译端点（`/v1/audio/transcriptions`、`/v1/audio/translations`）要求的
+/// 能力。与 TTS 的 `audio.generate` **分开**：会说话的账号不一定会听，
+/// 一个账号声明哪个，哪个端点才轮得到它。
+const AUDIO_TRANSCRIBE_CAPABILITY: &str = "audio.transcribe";
 pub const ROUTE_PROXY_TRACE_HEADER: &str = "x-ai-switch-test-trace-id";
 const ROUTE_PROXY_CORS_ALLOW_METHODS: &str = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 const ROUTE_PROXY_CORS_DEFAULT_ALLOW_HEADERS: &str =
@@ -1141,7 +1144,15 @@ pub(crate) async fn forward_request(
         return Ok(json_count_tokens_response(&body_bytes));
     }
 
-    let requested_model = requested_model_from_body(&body_bytes);
+    // STT / 翻译是 multipart：`model` 住在表单字段里（遗留 1），JSON 读不出。
+    // multipart 不可能的形状（JSON 体）走原路；content-type 不是 multipart 时
+    // 第二个取值直接是 None。
+    let requested_model = requested_model_from_body(&body_bytes).or_else(|| {
+        let content_type = headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok());
+        crate::audiogen::protocol::multipart_requested_model(content_type, &body_bytes)
+    });
     let candidates = load_request_candidates(state, &platform)
         .await
         .map_err(|err| err.to_string())?;
@@ -5845,7 +5856,7 @@ fn requested_image_capability(path: &str) -> Option<&'static str> {
     }
 }
 
-/// 音频（TTS）能力。
+/// 音频（TTS / STT）能力。
 ///
 /// **看的是「上游」路径**：`forward_request` 用它推导这次请求需要账号声明什么
 /// 能力。TTS 的上游路径与入站路径相同（OpenAI 兼容），所以这一个函数同时服务
@@ -5857,17 +5868,34 @@ fn requested_image_capability(path: &str) -> Option<&'static str> {
 /// 而加一个 `/audio/speech` 别名会让它在 `is_shared_model_api_path` 里也需要
 /// 一条对应规则（图像就是这么做的），换不到任何真实客户端。
 fn requested_audio_capability(path: &str) -> Option<&'static str> {
-    matches!(path.trim().trim_end_matches('/'), "/v1/audio/speech")
-        .then_some(AUDIO_GENERATE_CAPABILITY)
+    let normalized = path.trim().trim_end_matches('/');
+    if normalized == "/v1/audio/speech" {
+        return Some(AUDIO_GENERATE_CAPABILITY);
+    }
+    // STT / 翻译（multipart）。上游路径同样与入站相同，撞名问题与 TTS 一致。
+    if crate::audiogen::protocol::is_transcribe_path(normalized) {
+        return Some(AUDIO_TRANSCRIBE_CAPABILITY);
+    }
+    None
 }
 
-/// 入站音频端点识别（SaaS 的端点白名单要用）。
+/// 入站 TTS 端点识别（SaaS 的端点白名单要用）。
 ///
-/// 与 `requested_audio_capability` 是同一个判断，但对外可见：`saas::proxy::execute`
-/// 用它决定「这把音频 key 能不能打这个端点」。**音频不需要 `web::router` 的分派**
-/// （不像视频要自己建请求体），它走 `forward_request` 的直路即可。
+/// **只认 `/v1/audio/speech` 字面量**，不再是 `requested_audio_capability` 的
+/// 同义反复：STT / 翻译落地后，那个函数对两条 STT 路径也会返回
+/// `audio.transcribe` —— 而这里的职责是「这条路径走 TTS 的 JSON 分支 /
+/// SaaS 的 TTS 计费分支」，multipart 的 STT 必须落到它自己的分支
+/// （`is_audio_transcribe_path`），否则会被 JSON 校验当场打回。
 pub(crate) fn is_audio_speech_path(path: &str) -> bool {
-    requested_audio_capability(path).is_some()
+    path.trim().trim_end_matches('/') == "/v1/audio/speech"
+}
+
+/// 入站 STT / 翻译端点识别。
+///
+/// SaaS 的入口要用它**在解析 JSON 之前分叉**：STT 是 multipart，`model` 住在
+/// 表单字段里，`serde_json::from_slice` 必然失败 —— 这是遗留 1 的原话。
+pub(crate) fn is_audio_transcribe_path(path: &str) -> bool {
+    crate::audiogen::protocol::is_transcribe_path(path.trim().trim_end_matches('/'))
 }
 
 /// 视频生成能力（G-P2c）。提交与状态查询都归 `video.generate`。
@@ -6380,6 +6408,20 @@ fn build_api_upstream_request(
             model_match_mode,
         );
     }
+    // STT / 翻译（multipart）。与 TTS 同理：方言是 `openai`，只能靠端点路径
+    // 区分；上游路径与入站相同，`model` 从表单字段改写。
+    if is_audio_transcribe_path(path) {
+        return build_audio_transcribe_upstream_request(
+            credential,
+            path,
+            query,
+            headers,
+            body,
+            secret,
+            config,
+            model_match_mode,
+        );
+    }
     // 视频的方言是 kling / ark / minimax / zhipu / sora —— 与文本方言**不相交**，
     // 所以按账号的 `interface_format` 判定是可靠的。文本那一整套「协议桥接 /
     // reasoning 清理 / 路径版本规范化」对视频全不适用，请求体已经由
@@ -6698,6 +6740,102 @@ fn build_audio_upstream_request(
 
     insert_header(headers, "authorization", &format!("Bearer {api_key}"))?;
     let target_url = build_target_url(base_url, dialect.speech_path(), query);
+    Ok(BuiltUpstreamRequest {
+        target_url,
+        headers: headers.clone(),
+        body: rewritten_body,
+        bridge_kind: None,
+        tool_namespaces: BTreeMap::new(),
+        streaming_request: false,
+        reasoning_sanitized: false,
+    })
+}
+
+/// STT / 翻译（multipart）的上游请求构造（遗留 1）。
+///
+/// 与 [`build_audio_upstream_request`]**同构但有两条根本差异**：
+///   1. 请求体是 multipart/form-data，`model` 住在**表单字段**里 —— 校验与改写
+///      都走 `audiogen::protocol` 的 multipart 层（解析 → 改 `model` 段 → 重建），
+///      文件段逐字节原样保留；
+///   2. 改写了 `model` 之后**必须重设 Content-Type**：重建体用的是新的 boundary
+///      （`MultipartForm::REBUILD_BOUNDARY`），沿用客户端的旧 boundary 上游解不开。
+///      没改写（无映射命中）时 body 与头都原样透传。
+///
+/// 上游路径与入站相同（OpenAI 兼容方言，能走到这里的 path 已经是两条 STT 路径
+/// 之一）；`query` 原样透传。鉴权头与 TTS 一样硬写 `Bearer`，加非 OpenAI 兼容
+/// 方言时与 TTS 一起改。
+fn build_audio_transcribe_upstream_request(
+    credential: &SelectedCredential,
+    path: &str,
+    query: Option<&str>,
+    headers: &mut HeaderMap,
+    body: &[u8],
+    secret: &Value,
+    config: &Value,
+    model_match_mode: ModelMatchMode,
+) -> Result<BuiltUpstreamRequest, String> {
+    let api_key = string_value(secret, "api_key").ok_or_else(|| {
+        format!(
+            "Route credential {} is missing api_key",
+            credential.display_name
+        )
+    })?;
+    let base_url = string_value(config, "base_url").ok_or_else(|| {
+        format!(
+            "Route credential {} is missing base_url",
+            credential.display_name
+        )
+    })?;
+    // 方言校验与 TTS 同一条规则：账号的 `interface_format` 必须是音频方言。
+    if crate::audiogen::protocol::dialect_from_interface_format(
+        string_value(config, "interface_format").unwrap_or_default(),
+    )
+    .is_none()
+    {
+        return Err(format!(
+            "Route credential {} has an unsupported audio interface_format '{}'; expected openai",
+            credential.display_name,
+            string_value(config, "interface_format").unwrap_or("")
+        ));
+    }
+
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    // 校验（model + file 表单字段）。改写只动 `model` 段，文件字节原样保留。
+    let model = crate::audiogen::protocol::validate_transcribe_request(content_type, body)
+        .map_err(|error| format!("validation.audio_transcribe_request: {error}"))?;
+    let mappings = parse_model_capability_value(config).mappings;
+    let upstream_model = resolve_mapping_target(&mappings, &model, model_match_mode);
+    let (rewritten_body, content_type) = match upstream_model {
+        Some(target) if target != model => {
+            let form = crate::audiogen::protocol::multipart_boundary(content_type)
+                .ok_or_else(|| {
+                    "validation.audio_transcribe_request: missing multipart boundary".to_string()
+                })
+                .and_then(|boundary| crate::audiogen::protocol::parse_multipart(body, boundary))
+                .map_err(|error| format!("validation.audio_transcribe_request: {error}"))?;
+            let rebuilt = form.rewrite_field("model", &target).ok_or_else(|| {
+                "validation.audio_transcribe_request: model form field vanished".to_string()
+            })?;
+            (
+                rebuilt,
+                format!(
+                    "multipart/form-data; boundary={}",
+                    crate::audiogen::protocol::MultipartForm::REBUILD_BOUNDARY
+                ),
+            )
+        }
+        // 无映射命中（或目标就是原名）：body 与 Content-Type 原样透传。
+        _ => (body.to_vec(), content_type.to_string()),
+    };
+
+    insert_header(headers, "authorization", &format!("Bearer {api_key}"))?;
+    if !content_type.is_empty() {
+        insert_header(headers, "content-type", &content_type)?;
+    }
+    let target_url = build_target_url(base_url, path, query);
     Ok(BuiltUpstreamRequest {
         target_url,
         headers: headers.clone(),

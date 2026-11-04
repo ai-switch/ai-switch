@@ -1475,3 +1475,270 @@ async fn audio_reservation_rejects_a_group_without_any_audio_account() {
         .unwrap();
     assert_eq!(reservations, 0);
 }
+
+/// 建一个最小的 STT SaaS 环境：一个声明 `audio.transcribe` 的账号 +
+/// 按次定价 + 一个能认证的 key。
+async fn transcribe_billing_fixture(
+    base_url: &str,
+    price_per_request: i64,
+) -> (SqlitePool, String, tempfile::TempDir) {
+    let pool = repository::test_pool().await;
+    crate::database::run_migrations(&pool).await.unwrap();
+    repository::test_enable(&pool).await;
+    let directory = canonical_test_directory();
+    sqlx::query("UPDATE saas_settings SET value_json=json_set(value_json,'$.logs',json(?)) WHERE key='config'")
+        .bind(json!({"directory":directory.path()}).to_string()).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO route_credentials
+           (id,platform,kind,display_name,status,secret_payload_json,config_json,created_at,updated_at)
+         VALUES('transcribe-account','codex','api','STT','ok',?,?,'2026-01-01','2026-01-01')",
+    )
+    .bind(r#"{"api_key":"upstream-stt-key"}"#)
+    .bind(
+        json!({
+            "base_url": base_url,
+            "interface_format": "openai",
+            "model_mappings": [{
+                "from": "whisper-1",
+                "to": "whisper-upstream",
+                "capabilities": ["audio.transcribe"],
+            }],
+        })
+        .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO route_pool_members
+           (id,platform,route_credential_id,enabled,group_id,created_at,updated_at)
+         VALUES('transcribe-member','codex','transcribe-account',1,'codex-default','2026-01-01','2026-01-01')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    domain::admin(
+        &pool,
+        "groups.save",
+        json!({
+            "id": "codex-default",
+            "multiplierMicros": 1_000_000,
+            "maxOutputTokens": 4096,
+            "timeoutSeconds": 120,
+            "maxConcurrency": 10,
+            "models": [{
+                "model": "whisper-1",
+                "upstreamModel": "whisper-upstream",
+                "inputPriceMicros": 0,
+                "cachePriceMicros": 0,
+                "outputPriceMicros": 0,
+                "audioTranscribePriceMicros": price_per_request,
+                "enabled": true,
+            }],
+        }),
+    )
+    .await
+    .expect("transcribe group is saveable");
+
+    let user_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO saas_users(id,github_id,login,github_created_at,created_at,updated_at) VALUES(?,?,'stt-tester','2020-01-01T00:00:00Z',?,?)")
+        .bind(&user_id).bind(&user_id).bind("2026-01-01").bind("2026-01-01")
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE saas_users SET balance_micros=1000000 WHERE id=?")
+        .bind(&user_id).execute(&pool).await.unwrap();
+    let key = domain::user(
+        &pool,
+        &user_id,
+        "keys.create",
+        json!({"name":"stt","groupId":"codex-default"}),
+    )
+    .await
+    .unwrap();
+    (pool, key["plaintextKey"].as_str().unwrap().to_string(), directory)
+}
+
+/// 组一个最小的 STT multipart 请求体（model + file 两个表单字段）。
+fn transcribe_multipart(model: &str) -> (String, Vec<u8>) {
+    let boundary = "TestBoundary123";
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"model\"\r\n\r\n");
+    body.extend_from_slice(model.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"a.mp3\"\r\nContent-Type: audio/mpeg\r\n\r\n",
+    );
+    body.extend_from_slice(b"ID3-fake-mp3");
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    (
+        format!("multipart/form-data; boundary={boundary}"),
+        body,
+    )
+}
+
+/// STT / 翻译的 SaaS 端到端（音频遗留 1）：认证 → 预留（按次）→ 改写 multipart
+/// 的 `model` 段 → 上游收到的仍是合法 multipart → 按次结算 → 落日志。
+///
+/// 钉住三件容易回退的事：
+///   1. **`model` 从表单字段取**：multipart 不是 JSON，入口必须在解析 JSON 前
+///      分叉（遗留 1 的原话），否则一律 `saas.validation`；
+///   2. **改写后 Content-Type 换成重建体的 boundary**：沿用客户端旧 boundary
+///      上游解不开；
+///   3. **按次计费**：文件多大都是同一个价（上游按时长收费、网关不解码）。
+#[tokio::test]
+async fn saas_transcribe_request_authenticates_reserves_submits_and_bills_per_request() {
+    let upstream_hits = Arc::new(AtomicUsize::new(0));
+    let hits = upstream_hits.clone();
+    let app = Router::new().route(
+        "/v1/audio/transcriptions",
+        post(move |headers: HeaderMap, body: axum::body::Bytes| {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                // 用协议层自己的解析验证上游收到的体：model 段必须是定价行的
+                // upstream_model，文件字节原样保留
+                let content_type = headers
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                let boundary =
+                    crate::audiogen::protocol::multipart_boundary(&content_type)
+                        .expect("upstream receives a multipart content-type");
+                let form = crate::audiogen::protocol::parse_multipart(&body, boundary)
+                    .expect("upstream receives a parseable multipart body");
+                assert_eq!(form.field("model").as_deref(), Some("whisper-upstream"));
+                assert!(form.has_file("file"));
+                Json(json!({"text": "hello world"})).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let (pool, plaintext, _log_dir) =
+        transcribe_billing_fixture(&format!("http://{address}/v1"), 6_000).await;
+    let principal = crate::saas::billing::authenticate_key(&pool, &plaintext)
+        .await
+        .expect("stt key authenticates");
+    assert_eq!(principal.platform, "codex");
+
+    let (content_type, body) = transcribe_multipart("whisper-1");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {plaintext}").parse().unwrap(),
+    );
+    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+
+    let state = test_app_state(pool.clone());
+    let runtime = SaasRuntime::default();
+    let proxy = build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default());
+    let response = execute(
+        &state,
+        &runtime,
+        proxy,
+        Method::POST,
+        headers,
+        "/v1/audio/transcriptions".parse().unwrap(),
+        Body::from(body),
+    )
+    .await
+    .unwrap();
+
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
+    let payload: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(payload["text"], "hello world");
+
+    // 计费：按次，一条 6_000 micros，与文件大小无关
+    let reservation: (String, i64) = sqlx::query_as(
+        "SELECT status,reserved_micros FROM saas_billing_reservations",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reservation, ("settled".to_string(), 6_000));
+
+    upstream.abort();
+}
+
+/// 上游失败时整笔退款（与 TTS 同一口径），且客户端拿到上游的错误状态。
+#[tokio::test]
+async fn saas_transcribe_request_refunds_the_whole_reservation_when_the_upstream_fails() {
+    let app = Router::new().route(
+        "/v1/audio/translations",
+        post(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let (pool, plaintext, _log_dir) =
+        transcribe_billing_fixture(&format!("http://{address}/v1"), 6_000).await;
+    let (content_type, body) = transcribe_multipart("whisper-1");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {plaintext}").parse().unwrap(),
+    );
+    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+
+    let state = test_app_state(pool.clone());
+    let runtime = SaasRuntime::default();
+    let proxy = build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default());
+    let response = execute(
+        &state,
+        &runtime,
+        proxy,
+        Method::POST,
+        headers,
+        "/v1/audio/translations".parse().unwrap(),
+        Body::from(body),
+    )
+    .await
+    .unwrap();
+    // 上游 5xx 是可重试的（should_retry = !success），所以网关会把候选账号挨个
+    // 打完再回 502 —— 与 TTS 的退款测试同一个口径。
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+    let reservation: (String, i64) = sqlx::query_as(
+        "SELECT status,reserved_micros FROM saas_billing_reservations",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reservation, ("refunded".to_string(), 6_000));
+
+    upstream.abort();
+}
+
+/// 未定价（平价为 0）的转写模型必须 fail closed，且拒绝发生在预留之前。
+#[tokio::test]
+async fn transcribe_reservation_rejects_an_unpriced_model() {
+    let (pool, plaintext, _log_dir) =
+        transcribe_billing_fixture("http://127.0.0.1:1/v1", 0).await;
+    let principal = crate::saas::billing::authenticate_key(&pool, &plaintext)
+        .await
+        .unwrap();
+    let error = crate::saas::billing::reserve_transcribe(&pool, &principal, "whisper-1")
+        .await
+        .expect_err("unpriced transcribe model must fail closed");
+    assert_eq!(error.code(), "saas.model_not_allowed");
+    let reservations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM saas_billing_reservations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(reservations, 0);
+}

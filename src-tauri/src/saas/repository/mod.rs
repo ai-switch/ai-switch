@@ -162,6 +162,10 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), AppError> {
             include_str!("../migrations/0008_video_price_per_second.sql"),
         ),
         (9_i64, include_str!("../migrations/0009_audio_billing.sql")),
+        (
+            10_i64,
+            include_str!("../migrations/0010_audio_transcribe_billing.sql"),
+        ),
     ];
     let applied: Vec<(i64, String)> =
         sqlx::query_as("SELECT version,checksum FROM saas_schema_migrations ORDER BY version")

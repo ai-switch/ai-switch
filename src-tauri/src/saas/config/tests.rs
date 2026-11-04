@@ -101,8 +101,9 @@ async fn daily_subscription_migration_upgrades_an_existing_growth_schema() {
             .unwrap();
     // The latest migration is whatever the repository currently ships; pin it
     // so a future migration must consciously update this expectation.
-    // 9 = 0009_audio_billing.sql (saas_group_models.audio_price_micros_per_1k_chars).
-    assert_eq!(version, 9);
+    // 10 = 0010_audio_transcribe_billing.sql
+    // (saas_group_models.audio_transcribe_price_micros, STT per-request billing).
+    assert_eq!(version, 10);
     assert!(columns.iter().any(|column| column == "invite_code"));
     assert!(!columns.iter().any(|column| column == "invite_code_hash"));
     assert_eq!(table_exists, 1);

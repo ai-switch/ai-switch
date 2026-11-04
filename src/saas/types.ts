@@ -112,7 +112,7 @@ export interface AdminOverview {
 }
 
 export type SaasModelSyncState = "active" | "pending_pricing" | "stale";
-export interface ModelPrice { model: string; upstreamModel: string; inputPriceMicros: number; cachePriceMicros: number; outputPriceMicros: number; imagePriceMicros?: number; /** 视频按「条」计价 */ videoPriceMicros?: number; /** 视频按「秒」计价；与 videoPriceMicros **相加** */ videoPricePerSecondMicros?: number; /** 音频（TTS）按**千字符**计价；单位是千字符而不是单字符，见迁移 0009 */ audioPriceMicrosPer1kChars?: number; enabled?: boolean; syncState?: SaasModelSyncState; managedByPool?: boolean; lastSeenAt?: number | null; updatedAt?: number }
+export interface ModelPrice { model: string; upstreamModel: string; inputPriceMicros: number; cachePriceMicros: number; outputPriceMicros: number; imagePriceMicros?: number; /** 视频按「条」计价 */ videoPriceMicros?: number; /** 视频按「秒」计价；与 videoPriceMicros **相加** */ videoPricePerSecondMicros?: number; /** 音频（TTS）按**千字符**计价；单位是千字符而不是单字符，见迁移 0009 */ audioPriceMicrosPer1kChars?: number; /** STT / 翻译按**次**计价（一条转写一个价），见迁移 0010 */ audioTranscribePriceMicros?: number; enabled?: boolean; syncState?: SaasModelSyncState; managedByPool?: boolean; lastSeenAt?: number | null; updatedAt?: number }
 export interface SaasGroup {
   id: string;
   name: string;

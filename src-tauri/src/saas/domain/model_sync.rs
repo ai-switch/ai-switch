@@ -44,6 +44,7 @@ struct ExistingModel {
     video_price_micros: i64,
     video_price_per_second_micros: i64,
     audio_price_micros_per_1k_chars: i64,
+    audio_transcribe_price_micros: i64,
     version: i64,
     enabled: bool,
     sync_state: String,
@@ -131,7 +132,7 @@ pub(crate) async fn reconcile_group_connection(
     let existing: Vec<ExistingModel> = sqlx::query_as(
         "SELECT model,upstream_model,input_price_micros,cache_price_micros,
                 output_price_micros,image_price_micros,video_price_micros,video_price_per_second_micros,
-                audio_price_micros_per_1k_chars,version,enabled,sync_state,
+                audio_price_micros_per_1k_chars,audio_transcribe_price_micros,version,enabled,sync_state,
                 managed_by_pool,last_seen_at,updated_at
          FROM saas_group_models WHERE group_id=? ORDER BY model",
     )
@@ -199,9 +200,9 @@ pub(crate) async fn reconcile_group_connection(
                 "INSERT INTO saas_group_models
                    (group_id,model,upstream_model,input_price_micros,cache_price_micros,
                     output_price_micros,image_price_micros,video_price_micros,video_price_per_second_micros,
-                    audio_price_micros_per_1k_chars,version,enabled,sync_state,
+                    audio_price_micros_per_1k_chars,audio_transcribe_price_micros,version,enabled,sync_state,
                     managed_by_pool,last_seen_at,updated_at)
-                 VALUES(?,?,?,0,0,0,0,0,0,0,1,0,'pending_pricing',1,?,?)",
+                 VALUES(?,?,?,0,0,0,0,0,0,0,0,1,0,'pending_pricing',1,?,?)",
             )
             .bind(group_id)
             .bind(&desired_model.model)
@@ -393,9 +394,9 @@ async fn upsert_migrated_model(
         "INSERT INTO saas_group_models
            (group_id,model,upstream_model,input_price_micros,cache_price_micros,
             output_price_micros,image_price_micros,video_price_micros,video_price_per_second_micros,
-            audio_price_micros_per_1k_chars,version,enabled,sync_state,
+            audio_price_micros_per_1k_chars,audio_transcribe_price_micros,version,enabled,sync_state,
             managed_by_pool,last_seen_at,updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'active',1,?,?)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'active',1,?,?)
          ON CONFLICT(group_id,model) DO UPDATE SET
            upstream_model=excluded.upstream_model,
            input_price_micros=excluded.input_price_micros,
@@ -405,6 +406,7 @@ async fn upsert_migrated_model(
            video_price_micros=excluded.video_price_micros,
            video_price_per_second_micros=excluded.video_price_per_second_micros,
            audio_price_micros_per_1k_chars=excluded.audio_price_micros_per_1k_chars,
+           audio_transcribe_price_micros=excluded.audio_transcribe_price_micros,
            version=excluded.version,
            enabled=excluded.enabled,
            sync_state=excluded.sync_state,
@@ -422,6 +424,7 @@ async fn upsert_migrated_model(
     .bind(source.video_price_micros)
     .bind(source.video_price_per_second_micros)
     .bind(source.audio_price_micros_per_1k_chars)
+    .bind(source.audio_transcribe_price_micros)
     .bind(source.version)
     .bind(source.enabled)
     .bind(now)
@@ -463,7 +466,7 @@ async fn result_from_connection(
     let rows: Vec<GroupModel> = sqlx::query_as(
         "SELECT model,upstream_model,input_price_micros,cache_price_micros,
                 output_price_micros,image_price_micros,video_price_micros,video_price_per_second_micros,
-                audio_price_micros_per_1k_chars,enabled,sync_state,
+                audio_price_micros_per_1k_chars,audio_transcribe_price_micros,enabled,sync_state,
                 managed_by_pool,last_seen_at,updated_at
          FROM saas_group_models WHERE group_id=? ORDER BY model",
     )
@@ -600,10 +603,10 @@ mod tests {
             "INSERT INTO saas_group_models
                (group_id,model,upstream_model,input_price_micros,cache_price_micros,
                 output_price_micros,image_price_micros,video_price_micros,video_price_per_second_micros,
-                audio_price_micros_per_1k_chars,version,enabled,sync_state,
+                audio_price_micros_per_1k_chars,audio_transcribe_price_micros,version,enabled,sync_state,
                 managed_by_pool,last_seen_at,updated_at)
              VALUES('claude-saas','claude-sonnet-alias','provider-sonnet',101,202,303,404,505,606,707,
-                    7,1,'active',0,NULL,99)",
+                    0,7,1,'active',0,NULL,99)",
         )
         .execute(&pool)
         .await

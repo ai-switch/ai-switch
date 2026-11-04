@@ -853,6 +853,126 @@ pub async fn settle_audio(
     Ok(result)
 }
 
+/// STT / 翻译的预留（音频遗留 1）。计量单位是「每条转写」。
+///
+/// 与 `reserve_audio` 的差别就两点：
+///   1. 能力是 `audio.transcribe`，不是 `audio.generate`（会说话的账号不一定
+///      会听，候选池必须分开）；
+///   2. 计价是**按次**的平价（`audio_transcribe_price_micros`），没有用量维度
+///      —— 上游按音频时长收费，但网关不解码音频、拿不到可靠时长，按「一条
+///      转写」收是唯一既诚实又可执行的口径（见迁移 0010）。
+pub async fn reserve_transcribe(
+    pool: &SqlitePool,
+    principal: &ApiPrincipal,
+    model: &str,
+) -> Result<Reservation, AppError> {
+    if model.is_empty() || model.len() > 256 {
+        return Err(invalid("saas.request_limits", "Invalid audio model"));
+    }
+    let mut transaction = repository::begin(pool).await?;
+    config::require_enabled(&mut transaction).await?;
+    let limits: Option<Limits> = sqlx::query_as("SELECT users.balance_micros,users.frozen_micros AS user_frozen,keys.spent_micros,keys.frozen_micros AS key_frozen,keys.limit_micros,settings.multiplier_micros,settings.max_output_tokens,settings.timeout_seconds,settings.max_concurrency,settings.allow_subscription,settings.allow_balance FROM saas_api_keys keys JOIN saas_users users ON users.id=keys.user_id JOIN route_pool_groups groups ON groups.id=keys.group_id JOIN saas_group_settings settings ON settings.group_id=groups.id WHERE keys.id=? AND keys.user_id=? AND keys.group_id=? AND groups.platform=? AND keys.status='active' AND (keys.expires_at IS NULL OR keys.expires_at>?) AND users.status='active' AND groups.is_internal=0 AND groups.deleted_at IS NULL")
+        .bind(&principal.key_id).bind(&principal.user_id).bind(&principal.group_id).bind(&principal.platform).bind(repository::now()).fetch_optional(&mut *transaction).await.map_err(db_error)?;
+    let limits =
+        limits.ok_or_else(|| invalid("saas.invalid_key", "API key is no longer available"))?;
+    crate::saas::domain::model_sync::reconcile_group_connection(
+        &mut *transaction,
+        &principal.group_id,
+    )
+    .await?;
+    let priced: Option<(i64, String)> = sqlx::query_as(
+        "SELECT audio_transcribe_price_micros,upstream_model FROM saas_group_models WHERE group_id=? AND model=? AND sync_state='active' AND enabled=1",
+    )
+    .bind(&principal.group_id)
+    .bind(model)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(db_error)?;
+    // 单价必须 > 0：0 价在 `settle` 里会被当成「没定价」，与「免费」分不开。
+    let (price_per_transcribe, upstream_model) = priced
+        .filter(|(price, _)| *price > 0)
+        .ok_or_else(|| {
+            invalid(
+                "saas.model_not_allowed",
+                "Transcription model is not priced and allowed by this group",
+            )
+        })?;
+    let credential_ids = groups::permitted_accounts_for_capability_connection(
+        &mut transaction,
+        &principal.group_id,
+        model,
+        "audio.transcribe",
+    )
+    .await?;
+    if credential_ids.is_empty() {
+        return Err(invalid(
+            "saas.empty_pool",
+            "No permitted account currently supports audio transcription",
+        ));
+    }
+    let reserved_micros = repository::money(
+        price_per_transcribe as i128 * limits.multiplier_micros as i128 / 1_000_000_i128,
+    )?;
+    let reservation = reserve_fixed(
+        &mut transaction,
+        principal,
+        model,
+        upstream_model,
+        credential_ids,
+        reserved_micros,
+        limits,
+        serde_json::json!({
+            "kind": "transcribe",
+            "unitPriceMicros": price_per_transcribe,
+            "count": 1,
+        })
+        .to_string(),
+    )
+    .await?;
+    transaction.commit().await.map_err(db_error)?;
+    Ok(reservation)
+}
+
+/// STT / 翻译的结算。与 `settle_audio` 同构：**全有或全无**（上游 2xx 收款、
+/// 失败整笔退款），没有中间态。
+pub async fn settle_transcribe(
+    pool: &SqlitePool,
+    request_id: &str,
+    success: bool,
+) -> Result<Settlement, AppError> {
+    let mut transaction = repository::begin(pool).await?;
+    let mut reservation = load_reservation(&mut transaction, request_id).await?;
+    if ["settled", "refunded"].contains(&reservation.status.as_str()) {
+        return Ok(reservation.result());
+    }
+    let snapshot: serde_json::Value = serde_json::from_str(&reservation.price_json)
+        .map_err(|_| invalid("saas.pricing_snapshot", "Invalid transcribe price snapshot"))?;
+    if snapshot.get("kind").and_then(serde_json::Value::as_str) != Some("transcribe") {
+        return Err(invalid(
+            "saas.pricing_snapshot",
+            "Reservation is not transcribe billing",
+        ));
+    }
+    let cost = if success {
+        reservation.reserved_micros
+    } else {
+        0
+    };
+    let status = if success { "settled" } else { "refunded" };
+    let result = finish(
+        &mut transaction,
+        &reservation,
+        cost,
+        None,
+        status,
+        "proxy",
+        Some("transcribe=1"),
+    )
+    .await?;
+    transaction.commit().await.map_err(db_error)?;
+    Ok(result)
+}
+
 async fn load_reservation(
     connection: &mut SqliteConnection,
     request_id: &str,

@@ -70,6 +70,9 @@ pub struct GroupModel {
     /// 落到整数列存不下的区间。
     #[serde(default)]
     pub audio_price_micros_per_1k_chars: i64,
+    /// STT / 翻译的**按次**平价（音频遗留 1）。与 TTS 的按千字符是两个独立列。
+    #[serde(default)]
+    pub audio_transcribe_price_micros: i64,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
     #[serde(default = "active_sync_state")]
@@ -206,7 +209,7 @@ async fn models(
     sqlx::query_as(
         "SELECT model,upstream_model,input_price_micros,cache_price_micros,output_price_micros,
                 image_price_micros,video_price_micros,video_price_per_second_micros,audio_price_micros_per_1k_chars,
-                enabled,sync_state,managed_by_pool,last_seen_at,updated_at
+                audio_transcribe_price_micros,enabled,sync_state,managed_by_pool,last_seen_at,updated_at
          FROM saas_group_models WHERE group_id=? ORDER BY model",
     )
     .bind(group_id)
@@ -689,6 +692,7 @@ pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> 
                 model.video_price_micros,
                 model.video_price_per_second_micros,
                 model.audio_price_micros_per_1k_chars,
+                model.audio_transcribe_price_micros,
             ]
             .iter()
             .any(|price| !(0..=repository::MAX_MONEY).contains(price))
@@ -791,9 +795,9 @@ pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> 
             "INSERT INTO saas_group_models
                (group_id,model,upstream_model,input_price_micros,cache_price_micros,
                 output_price_micros,image_price_micros,video_price_micros,video_price_per_second_micros,
-                audio_price_micros_per_1k_chars,version,enabled,sync_state,
+                audio_price_micros_per_1k_chars,audio_transcribe_price_micros,version,enabled,sync_state,
                 managed_by_pool,last_seen_at,updated_at)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&identifier)
         .bind(model.model)
@@ -805,6 +809,7 @@ pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> 
         .bind(model.video_price_micros)
         .bind(model.video_price_per_second_micros)
         .bind(model.audio_price_micros_per_1k_chars)
+        .bind(model.audio_transcribe_price_micros)
         .bind(version)
         .bind(enabled)
         .bind(sync_state)
