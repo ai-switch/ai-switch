@@ -45,7 +45,14 @@ describe("CodexChannelsScreen", () => {
     renderScreen();
 
     const tabs = screen.getAllByRole("tab");
-    expect(tabs.map((tab) => tab.textContent)).toEqual(["通用", "生图", "视频", "TTS"]);
+    // P4b：向量是导航预留位（功能未做），先占住分段位。
+    expect(tabs.map((tab) => tab.textContent)).toEqual([
+      "通用",
+      "生图",
+      "视频",
+      "TTS",
+      "向量",
+    ]);
     expect(screen.getByRole("tab", { name: "通用" })).toHaveAttribute("aria-selected", "true");
     // 「通用」段就是 codex 池的完整管理
     expect(screen.getByText("accounts:codex")).toBeInTheDocument();
@@ -80,6 +87,34 @@ describe("CodexChannelsScreen", () => {
     renderScreen();
     expect(screen.getByText("accounts:codex:video.generate")).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "视频" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  /// P4b：左侧模态导航直达对应段 —— initialSegment 只影响本次挂载，
+  /// 之后仍按「记住上次选择」的规则走。
+  it("opens the segment the sidebar navigation pointed at", async () => {
+    render(
+      <I18nProvider initialLanguage="zh-CN">
+        <CodexChannelsScreen imageGenerationEnabled initialSegment="video" />
+      </I18nProvider>,
+    );
+    expect(screen.getByRole("tab", { name: "视频" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("accounts:codex:video.generate")).toBeInTheDocument();
+
+    // 手动切换后存的是新段，不受 initialSegment 覆盖。
+    await userEvent.click(screen.getByRole("tab", { name: "TTS" }));
+    expect(window.localStorage.getItem(CODEX_SEGMENT_STORAGE_KEY)).toBe("audio");
+  });
+
+  /// 向量段是导航预留位：入口存在但功能未做，占位文案不能假装修可用。
+  it("shows the vector placeholder and does not render any account list", () => {
+    render(
+      <I18nProvider initialLanguage="zh-CN">
+        <CodexChannelsScreen imageGenerationEnabled initialSegment="vector" />
+      </I18nProvider>,
+    );
+    expect(screen.getByRole("tab", { name: "向量" })).toBeInTheDocument();
+    expect(screen.getByText(/尚未开放/)).toBeInTheDocument();
+    expect(screen.queryByText(/accounts:codex/)).not.toBeInTheDocument();
   });
 
   /// 存的值是脏的（手改过、或来自旧版本）时退回「通用」，不能白屏。

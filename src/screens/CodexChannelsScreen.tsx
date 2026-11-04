@@ -22,14 +22,15 @@ import { AccountsScreen } from "./AccountsScreen";
 /// 分段选择的持久化键。导出是为了让测试能直接播种/断言，而不必去猜字面量。
 export const CODEX_SEGMENT_STORAGE_KEY = "ai-switch.codex-channel-segment";
 
-const SEGMENTS = ["general", "image", "video", "audio"] as const;
-type CodexSegment = (typeof SEGMENTS)[number];
+const SEGMENTS = ["general", "image", "video", "audio", "vector"] as const;
+export type CodexSegment = (typeof SEGMENTS)[number];
 
 const SEGMENT_LABEL_KEYS: Record<CodexSegment, TranslationKey> = {
   general: "codex.segment.general",
   image: "codex.segment.image",
   video: "codex.segment.video",
   audio: "codex.segment.audio",
+  vector: "codex.segment.vector",
 };
 
 /// 段图标。「通用」用的是 codex 的图标——那一段**就是** codex 池。
@@ -38,6 +39,7 @@ const SEGMENT_ICONS: Record<CodexSegment, AgentIconPlatform> = {
   image: "image",
   video: "video",
   audio: "audio",
+  vector: "codex",
 };
 
 /// 记住上次选的段：常切的人不用每次重新点，也不至于每次进 codex 都被弹到别的段。
@@ -68,6 +70,7 @@ export function CodexChannelsScreen({
   poolScopeFocus,
   imageGenerationEnabled,
   onOpenImageStudio,
+  initialSegment,
 }: {
   onOpenSessions?: (platform: PlatformId) => void;
   sidebarCollapsed?: boolean;
@@ -79,9 +82,14 @@ export function CodexChannelsScreen({
   } | null;
   imageGenerationEnabled: boolean;
   onOpenImageStudio?: () => void;
+  /// 外部指定的初始分段（P4b：左侧模态导航直达对应段）。只影响**本次挂载**，
+  /// 选中后仍按既有规则记住上次选择。
+  initialSegment?: CodexSegment;
 }) {
   const { t } = useI18n();
-  const [segment, setSegment] = useState<CodexSegment>(readStoredSegment);
+  const [segment, setSegment] = useState<CodexSegment>(() =>
+    initialSegment ?? readStoredSegment(),
+  );
 
   const select = (next: CodexSegment) => {
     setSegment(next);
@@ -150,6 +158,15 @@ export function CodexChannelsScreen({
           {/* 同视频：音频账号的 `interface_format` 是 `openai`（与文本同名），所以
               识别它的唯一依据就是 `audio.generate` 这个能力声明。 */}
           <AccountsScreen capabilityFilter={AUDIO_CAPABILITY} platform="codex" />
+        </div>
+      ) : null}
+
+      {segment === "vector" ? (
+        <div className="space-y-3">
+          {/* 向量（embedding）模态预留位：功能未做，入口先占住导航位。 */}
+          <p className="rounded-xl border border-stone-200 bg-white px-4 py-6 text-center text-[13px] font-medium text-stone-500">
+            向量（embedding）渠道尚未开放，敬请期待。
+          </p>
         </div>
       ) : null}
     </div>
