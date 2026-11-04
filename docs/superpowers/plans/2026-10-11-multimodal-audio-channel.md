@@ -176,11 +176,13 @@ TTS 按**字符**计费（OpenAI tts-1 是 $15 / 1M 字符）。两个细节：
    注意：`is_audio_speech_path` 必须**只认字面量** `/v1/audio/speech`（STT 落地后
    `requested_audio_capability` 对两条 STT 路径也返回 `audio.transcribe`，复用会让
    multipart 撞进 TTS 的 JSON 分支被当场打回）。
-2. **第二个音频方言**（MiniMax / 火山 / Azure / ElevenLabs）。到那时才需要
-   `extract_audio`（JSON 里的 hex/base64 → 字节）与按方言的鉴权头——现在 `build_audio_upstream_request`
-   硬写 `Authorization: Bearer`。
-3. **流式 TTS**（`stream_format: "sse"`）。要留意 `stream_disconnected_before_completion`
-   的 SSE 嗅探：音频 SSE 若被误判成「断流」会触发一次多余的重试。
+2. ~~**第二个音频方言**~~ —— **已解决**（2026-11-04，MiniMax）。先改写模型再转原生
+   `/v1/t2a_v2` 请求；JSON + hex 回程在重试循环里还原，HTTP 200 内的业务错误触发
+   切号与退款。当前官方契约不需要 `GroupId`；STT 明确拒绝 MiniMax。
+3. ~~**流式 TTS**（`stream_format: "sse"`）~~ —— **已实现并通过完整回归**。OpenAI 音频事件
+   逐帧转发，MiniMax hex 增量转 OpenAI Base64 SSE；音频数据泵不进入文本续写。
+   只有非空音频、`speech.audio.done` 和正常 EOF 全部确认才结算，断流/超时/客户端退出退款。
+   详细设计与用例见 [`2026-11-04-audio-streaming.md`](./2026-11-04-audio-streaming.md)。
 4. **音频资产落盘**（如果要复用 `imagegen/storage.rs` 的模式）。现在音频是直通，
    不落任何本地文件。
 5. **`/v1/models` 的音频过滤**已接（`models_list_capability` → `audio.generate`），

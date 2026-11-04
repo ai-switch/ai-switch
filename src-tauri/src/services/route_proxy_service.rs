@@ -591,6 +591,7 @@ pub(crate) struct BuiltUpstreamRequest {
     pub(crate) body: Vec<u8>,
     pub(crate) bridge_kind: Option<ProtocolBridgeKind>,
     pub(crate) audio_response_adapter: Option<AudioResponseAdapter>,
+    pub(crate) audio_stream_dialect: Option<crate::audiogen::protocol::AudioDialect>,
     pub(crate) tool_namespaces: BTreeMap<String, String>,
     pub(crate) streaming_request: bool,
     pub(crate) reasoning_sanitized: bool,
@@ -1485,6 +1486,7 @@ pub(crate) async fn forward_request(
             body: outbound_body,
             bridge_kind,
             audio_response_adapter,
+            audio_stream_dialect,
             tool_namespaces,
             streaming_request,
             reasoning_sanitized: outbound_reasoning_sanitized,
@@ -1676,6 +1678,94 @@ pub(crate) async fn forward_request(
         let status =
             StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let mut upstream_headers = upstream.headers().clone();
+
+        if let Some(dialect) = audio_stream_dialect.filter(|_| status.is_success()) {
+            let mut adapter = crate::audiogen::stream::SpeechStreamAdapter::new(dialect);
+            let mut stream: AudioUpstreamStream = Box::pin(upstream.bytes_stream());
+            let (raw, output) = match prime_audio_stream(&mut stream, &mut adapter).await {
+                Ok(primed) => primed,
+                Err((message, raw)) => {
+                    let error_message = format!("{}: {message}", credential.display_name);
+                    let terminal = handle_stream_prime_failure(
+                        state,
+                        pool,
+                        &platform,
+                        &credential,
+                        &error_message,
+                        StreamPrimeContext {
+                            attempt,
+                            path: &path,
+                            target_url: &target_url,
+                            status,
+                            trace_id: trace_id.as_deref(),
+                            request_start,
+                            requested_model: requested_model.as_deref(),
+                            upstream_model: upstream_model.as_deref(),
+                            model_key: selected_model_key.as_deref(),
+                            bridge_name: bridge_name.as_deref(),
+                            client_request: &body_bytes,
+                            upstream_request: &upstream_request_bytes,
+                            upstream_headers: &request_headers,
+                            response_body: Some(&raw),
+                        },
+                        credential_retry_count < failure_policy.retry_count as usize,
+                        failure_policy,
+                        None,
+                        &mut retry_queue,
+                        credential_index,
+                        credential_retry_count,
+                        &mut retry_errors,
+                        &mut rejected_indexes,
+                    )
+                    .await;
+                    if terminal {
+                        return Err(error_message);
+                    }
+                    continue;
+                }
+            };
+            let next_index = (credential_index + 1) % credentials.len();
+            let _ =
+                RoutePoolRepository::save_cursor_index(pool, &platform, next_index as i64).await;
+            let mut observer = StreamObserver::new_audio(LIVE_LOG_RAW_PREVIEW_LIMIT);
+            observer.observe(&output);
+            let completion = StreamCompletion {
+                state: state.clone(),
+                credential: credential.clone(),
+                platform: platform.clone(),
+                attempt,
+                path: path.clone(),
+                target_url: target_url.clone(),
+                status,
+                trace_id: trace_id.clone(),
+                request_start,
+                requested_model: requested_model.clone(),
+                upstream_model: upstream_model.clone(),
+                model_key: selected_model_key.clone(),
+                bridge_name: bridge_name.clone(),
+                client_request: body_bytes.clone(),
+                upstream_request: upstream_request_bytes.clone(),
+                upstream_headers: request_headers.clone(),
+                observer,
+                audio_raw_preview: Some(raw.into_iter().take(LIVE_LOG_RAW_PREVIEW_LIMIT).collect()),
+                quota_failure_recorded: false,
+                client_headers: outbound_headers.clone(),
+                upstream_query: upstream_query.clone(),
+                _activity_lease: activity_lease,
+            };
+            let body = Body::from_stream(observed_audio_stream(
+                output.into(),
+                stream,
+                adapter,
+                completion,
+            ));
+            upstream_headers.remove(axum::http::header::CONTENT_LENGTH);
+            upstream_headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            return proxy_upstream_stream_response(status, upstream_headers, body);
+        }
 
         // Stream the response through instead of buffering it, when nothing
         // downstream needs the complete body.
@@ -1922,6 +2012,7 @@ pub(crate) async fn forward_request(
                 // the bytes behind it were never retained. See
                 // `LIVE_LOG_RAW_PREVIEW_LIMIT`.
                 observer: StreamObserver::new(LIVE_LOG_RAW_PREVIEW_LIMIT, streaming_request),
+                audio_raw_preview: None,
                 quota_failure_recorded: false,
                 client_headers: outbound_headers.clone(),
                 upstream_query: upstream_query.clone(),
@@ -3718,6 +3809,8 @@ struct StreamCompletion {
     upstream_request: Vec<u8>,
     upstream_headers: HeaderMap,
     observer: StreamObserver,
+    /// 音频方言原始帧与客户端 OpenAI 事件分开保留，避免日志把转换前后混在一起。
+    audio_raw_preview: Option<Vec<u8>>,
     /// 强额度错误已单独记录，结账时不能再用普通断流覆盖其原因或清回正常。
     quota_failure_recorded: bool,
     /// 客户端原始请求头。聚合模式换账号续写时，用它重新构造上游请求。
@@ -3779,6 +3872,7 @@ impl StreamCompletion {
             upstream_request,
             upstream_headers,
             observer,
+            audio_raw_preview,
             quota_failure_recorded,
             client_headers: _client_headers,
             upstream_query: _upstream_query,
@@ -3850,7 +3944,7 @@ impl StreamCompletion {
             bridge_name.as_deref(),
             Some(&client_request),
             Some(&upstream_request),
-            Some(&preview),
+            Some(audio_raw_preview.as_deref().unwrap_or(&preview)),
             Some(&preview),
             // The one stage whose reasoning count is actually known: this path
             // watched every frame of the upstream stream, so a zero here is a
@@ -4636,6 +4730,130 @@ impl StreamPump {
     }
 }
 
+type AudioUpstreamStream =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = reqwest::Result<axum::body::Bytes>> + Send>>;
+
+async fn prime_audio_stream(
+    stream: &mut AudioUpstreamStream,
+    adapter: &mut crate::audiogen::stream::SpeechStreamAdapter,
+) -> Result<(Vec<u8>, Vec<u8>), (String, Vec<u8>)> {
+    let mut raw = Vec::new();
+    let mut output = Vec::new();
+    while let Some(chunk) = futures_util::StreamExt::next(stream).await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => return Err((format!("Could not read speech stream: {error}"), raw)),
+        };
+        if raw.len().saturating_add(chunk.len())
+            > crate::audiogen::stream::SPEECH_STREAM_FRAME_LIMIT
+        {
+            return Err((
+                "Speech stream exceeded the first-audio holdback limit".to_string(),
+                raw,
+            ));
+        }
+        raw.extend_from_slice(&chunk);
+        match adapter.push(&chunk) {
+            Ok(converted) => output.extend(converted),
+            Err(error) => return Err((error, raw)),
+        }
+        if adapter.started() {
+            return Ok((raw, output));
+        }
+    }
+    match adapter.finish() {
+        Ok(tail) => {
+            output.extend(tail);
+            Ok((raw, output))
+        }
+        Err(error) => Err((error, raw)),
+    }
+}
+
+struct AudioStreamPump {
+    stream: AudioUpstreamStream,
+    adapter: crate::audiogen::stream::SpeechStreamAdapter,
+    first_chunk: Option<axum::body::Bytes>,
+    guard: StreamCompletionGuard,
+    done: bool,
+}
+
+/// 音频不能续写或合成文本收尾：只转帧，完整 done + EOF 才记成功。
+fn observed_audio_stream(
+    first_chunk: axum::body::Bytes,
+    stream: AudioUpstreamStream,
+    adapter: crate::audiogen::stream::SpeechStreamAdapter,
+    completion: StreamCompletion,
+) -> impl futures_util::Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send + 'static {
+    let pump = AudioStreamPump {
+        stream,
+        adapter,
+        first_chunk: Some(first_chunk),
+        guard: StreamCompletionGuard {
+            completion: Some(completion),
+        },
+        done: false,
+    };
+    futures_util::stream::unfold(pump, |mut pump| async move {
+        loop {
+            if let Some(chunk) = pump.first_chunk.take() {
+                return Some((Ok(chunk), pump));
+            }
+            if pump.done {
+                return None;
+            }
+            let next = futures_util::StreamExt::next(&mut pump.stream).await;
+            let converted = match next {
+                Some(Ok(chunk)) => {
+                    if let Some(completion) = pump.guard.completion.as_mut() {
+                        if let Some(raw) = completion.audio_raw_preview.as_mut() {
+                            let take = LIVE_LOG_RAW_PREVIEW_LIMIT
+                                .saturating_sub(raw.len())
+                                .min(chunk.len());
+                            raw.extend_from_slice(&chunk[..take]);
+                        }
+                    }
+                    pump.adapter.push(&chunk)
+                }
+                Some(Err(error)) => {
+                    pump.done = true;
+                    Err(format!("Speech stream interrupted: {error}"))
+                }
+                None => {
+                    pump.done = true;
+                    pump.adapter.finish()
+                }
+            };
+            match converted {
+                Ok(output) => {
+                    if let Some(completion) = pump.guard.completion.as_mut() {
+                        completion.observer.observe(&output);
+                    }
+                    if pump.done {
+                        if let Some(completion) = pump.guard.completion.take() {
+                            completion.finish().await;
+                        }
+                    }
+                    if !output.is_empty() {
+                        return Some((Ok(axum::body::Bytes::from(output)), pump));
+                    }
+                    if pump.done {
+                        return None;
+                    }
+                }
+                Err(error) => {
+                    pump.done = true;
+                    if let Some(mut completion) = pump.guard.completion.take() {
+                        completion.observer.mark_stream_failed();
+                        completion.finish().await;
+                    }
+                    return Some((Err(std::io::Error::other(error)), pump));
+                }
+            }
+        }
+    })
+}
+
 fn observed_upstream_stream(
     first_chunk: axum::body::Bytes,
     rest: impl futures_util::Stream<Item = reqwest::Result<axum::body::Bytes>> + Send + 'static,
@@ -4909,9 +5127,12 @@ struct StreamCompletionGuard {
 
 impl Drop for StreamCompletionGuard {
     fn drop(&mut self) {
-        let Some(completion) = self.completion.take() else {
+        let Some(mut completion) = self.completion.take() else {
             return;
         };
+        if completion.audio_raw_preview.is_some() {
+            completion.observer.mark_stream_failed();
+        }
         // Only reachable when the stream never finished, i.e. the client went
         // away. Spawning needs a runtime; during shutdown there is none, and
         // dropping the handle is the right outcome then.
@@ -5432,6 +5653,7 @@ pub(crate) async fn video_route_plan(
     platform: &str,
     model: &str,
     credential_ids: Option<&HashSet<String>>,
+    model_match_mode: ModelMatchMode,
 ) -> Result<VideoRoutePlan, AppError> {
     // 候选池是**池身份**（通常是 `codex`），里面同时挂着文本账号和视频账号 ——
     // 视频不是平台，只是账号的一个模态分类。所以下面那一步能力筛选是**必需的**，
@@ -5446,7 +5668,7 @@ pub(crate) async fn video_route_plan(
                 &candidate_capability(candidate),
                 Some(model),
                 VIDEO_GENERATE_CAPABILITY,
-                ModelMatchMode::ClientFacing,
+                model_match_mode,
             )
         })
         .collect::<Vec<_>>();
@@ -6652,6 +6874,7 @@ fn build_api_upstream_request(
         body: rewritten_body,
         bridge_kind,
         audio_response_adapter: None,
+        audio_stream_dialect: None,
         tool_namespaces,
         streaming_request,
         reasoning_sanitized,
@@ -6692,6 +6915,7 @@ fn build_video_upstream_request(
         body: body.to_vec(),
         bridge_kind: None,
         audio_response_adapter: None,
+        audio_stream_dialect: None,
         tool_namespaces: BTreeMap::new(),
         streaming_request: false,
         reasoning_sanitized: false,
@@ -6752,6 +6976,7 @@ fn build_audio_upstream_request(
 
     // `model` 改写：客户端看到的名字 → 上游认的名字。OpenAI 方言其余字段一律原样
     // 透传（`voice` 是各家私有的，统一词表是自找的抽象泄漏）。
+    let streaming_request = crate::audiogen::protocol::speech_request_streams(body);
     let mappings = parse_model_capability_value(config).mappings;
     let rewritten_body = apply_model_mappings_with_mode(body, &mappings, model_match_mode);
     let (rewritten_body, audio_response_adapter) = match dialect {
@@ -6774,15 +6999,19 @@ fn build_audio_upstream_request(
     if audio_response_adapter.is_some() {
         insert_header(headers, "content-type", "application/json")?;
     }
+    if streaming_request {
+        insert_header(headers, "accept", "text/event-stream")?;
+    }
     let target_url = build_target_url(base_url, dialect.speech_path(), query);
     Ok(BuiltUpstreamRequest {
         target_url,
         headers: headers.clone(),
         body: rewritten_body,
         bridge_kind: None,
-        audio_response_adapter,
+        audio_response_adapter: audio_response_adapter.filter(|_| !streaming_request),
+        audio_stream_dialect: streaming_request.then_some(dialect),
         tool_namespaces: BTreeMap::new(),
-        streaming_request: false,
+        streaming_request,
         reasoning_sanitized: false,
     })
 }
@@ -6878,11 +7107,8 @@ fn build_audio_transcribe_upstream_request(
                 "validation.audio_transcribe_request: model form field vanished".to_string()
             })?;
             (
-                rebuilt,
-                format!(
-                    "multipart/form-data; boundary={}",
-                    crate::audiogen::protocol::MultipartForm::REBUILD_BOUNDARY
-                ),
+                rebuilt.body,
+                format!("multipart/form-data; boundary={}", rebuilt.boundary),
             )
         }
         // 无映射命中（或目标就是原名）：body 与 Content-Type 原样透传。
@@ -6900,6 +7126,7 @@ fn build_audio_transcribe_upstream_request(
         body: rewritten_body,
         bridge_kind: None,
         audio_response_adapter: None,
+        audio_stream_dialect: None,
         tool_namespaces: BTreeMap::new(),
         streaming_request: false,
         reasoning_sanitized: false,
@@ -7040,6 +7267,7 @@ fn build_official_upstream_request(
         body: rewritten_body,
         bridge_kind,
         audio_response_adapter: None,
+        audio_stream_dialect: None,
         tool_namespaces: BTreeMap::new(),
         streaming_request,
         reasoning_sanitized: false,
@@ -9538,6 +9766,10 @@ mod tests {
 
     mod request_limits {
         include!("route_proxy_service/request_limit_tests.rs");
+    }
+
+    mod audio_stream {
+        include!("route_proxy_service/audio_stream_tests.rs");
     }
 
     // The pre-mode signatures: these assertions are about the aggregated list.

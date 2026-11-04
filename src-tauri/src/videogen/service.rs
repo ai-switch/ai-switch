@@ -140,6 +140,14 @@ impl VideoGenerationService {
         state: &AppState,
         input: SubmitVideoInput,
     ) -> Result<SubmitVideoOutcome, AppError> {
+        Self::submit_with_callback_policy(state, input, CallbackTargetPolicy::current()).await
+    }
+
+    async fn submit_with_callback_policy(
+        state: &AppState,
+        input: SubmitVideoInput,
+        callback_policy: CallbackTargetPolicy,
+    ) -> Result<SubmitVideoOutcome, AppError> {
         let platform = input.platform.trim();
         // **视频不是平台**：它是账号的一个模态分类，由端点路径确定。所以这里不再
         // 要求平台等于某个特定值，只要求它是一个已知的池身份 —— 视频账号住在哪个
@@ -153,13 +161,13 @@ impl VideoGenerationService {
                 "A model is required",
             ));
         }
-        let upstream_model = input
-            .upstream_model
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .unwrap_or(&model)
-            .to_string();
+        let model_match_mode = if input.upstream_model.is_some() {
+            crate::services::route_model_capability::ModelMatchMode::SaasUpstream
+        } else {
+            crate::services::route_model_capability::ModelMatchMode::ClientFacing
+        };
+        let selected_model = input.upstream_model.as_deref().map(str::trim)
+            .filter(|name| !name.is_empty()).unwrap_or(&model);
         if request.prompt.trim().is_empty() && request.image.is_none() {
             return Err(validation(
                 "validation.video_request",
@@ -175,20 +183,17 @@ impl VideoGenerationService {
             ));
         }
         if let Some(callback) = request.callback_url() {
-            validate_callback_url(callback, CallbackTargetPolicy::current())
+            validate_callback_url(callback, callback_policy)
                 .map_err(|error| validation("validation.video_callback", &error))?;
         }
 
         // 选号（含方言）：必须早于建体，因为上游请求体的形状由方言决定。
-        let group =
-            Self::select_route_group(state, platform, &model, input.credential_ids.as_deref()).await?;
+        let group = Self::select_route_group(state, platform, selected_model, input.credential_ids.as_deref(), model_match_mode).await?;
 
         let has_image = request.image.is_some();
-        let body = upstream_body(group.dialect, &upstream_model, &request)
-            .map_err(|error| validation("videogen.upstream_body", &error))?;
         let path = upstream_submit_path(group.dialect, has_image);
-        let (upstream_task_id, credential_id) =
-            Self::forward_submit(state, platform, group.dialect, &path, body, &group.credential_ids)
+        let (upstream_task_id, credential_id, upstream_model) =
+            Self::forward_submit(state, platform, group.dialect, &path, &request, selected_model, model_match_mode, &group.credential_ids)
                 .await?;
 
         // 轮转：`forward_request` 只看到一个账号，它的推进是 `(0+1)%1=0`，
@@ -234,11 +239,12 @@ impl VideoGenerationService {
         platform: &str,
         model: &str,
         credential_ids: Option<&[String]>,
+        model_match_mode: crate::services::route_model_capability::ModelMatchMode,
     ) -> Result<SelectedRouteGroup, AppError> {
         // SaaS 的组白名单：`Some(空集)` 的语义是「一个都不允许」（fail closed），
         // 所以这里不能把空集归一成 `None`。
         let scope = credential_ids.map(|ids| ids.iter().cloned().collect::<std::collections::HashSet<_>>());
-        let plan = video_route_plan(&state.pool, platform, model, scope.as_ref()).await?;
+        let plan = video_route_plan(&state.pool, platform, model, scope.as_ref(), model_match_mode).await?;
         let Some(group) = plan.groups.into_iter().next() else {
             return Err(validation(
                 "route_pool.model_unmatched",
@@ -331,13 +337,22 @@ impl VideoGenerationService {
         platform: &str,
         dialect: VideoDialect,
         path: &str,
-        body: Vec<u8>,
+        request: &VideoGenerationRequest,
+        selected_model: &str,
+        model_match_mode: crate::services::route_model_capability::ModelMatchMode,
         account_ids: &[String],
-    ) -> Result<(String, String), AppError> {
+    ) -> Result<(String, String, String), AppError> {
         let mut last_error: Option<AppError> = None;
         for account_id in account_ids {
+            let account = crate::database::repositories::route_credential_repository::RouteCredentialRepository::get(&state.pool, account_id).await?;
+            let capability = crate::services::route_model_capability::parse_model_capability(&account.config_json);
+            let upstream_model = crate::services::route_model_capability::resolve_mapping_target(&capability.mappings, selected_model, model_match_mode)
+                .unwrap_or_else(|| selected_model.to_string());
+            let body = upstream_body(dialect, &upstream_model, request)
+                .map_err(|error| validation("videogen.upstream_body", &error))?;
             let single = [account_id.clone()];
-            let proxy = Self::proxy_state(state, platform, Some(&single))?;
+            let proxy = Self::proxy_state(state, platform, Some(&single))?
+                .with_model_match_mode(crate::services::route_model_capability::ModelMatchMode::SaasUpstream);
             let mut headers = HeaderMap::new();
             headers.insert("content-type", HeaderValue::from_static("application/json"));
             let uri = Uri::from_str_checked(path)?;
@@ -358,7 +373,7 @@ impl VideoGenerationService {
             if status.is_success() {
                 let upstream_task_id = parse_upstream_submit(dialect, &bytes)
                     .map_err(|error| validation("videogen.upstream_response", &error))?;
-                return Ok((upstream_task_id, account_id.clone()));
+                return Ok((upstream_task_id, account_id.clone(), upstream_model));
             }
             let kind = classify_proxy_failure(Some(status), None);
             last_error = Some(validation(
@@ -575,6 +590,17 @@ impl VideoGenerationService {
         url: Option<&str>,
         error: Option<&str>,
     ) -> Result<VideoTask, AppError> {
+        Self::settle_with_callback_policy(state, task, status, url, error, CallbackTargetPolicy::current()).await
+    }
+
+    async fn settle_with_callback_policy(
+        state: &AppState,
+        task: &VideoTask,
+        status: VideoTaskStatus,
+        url: Option<&str>,
+        error: Option<&str>,
+        callback_policy: CallbackTargetPolicy,
+    ) -> Result<VideoTask, AppError> {
         let task = VideoGenerationRepository::progress_task(
             &state.pool,
             &task.task_id,
@@ -609,21 +635,13 @@ impl VideoGenerationService {
             // 先认领再投递（复审 3d）：认领是原子的，并发进来的另一方拿不到
             // 资格，同一笔回调只会 POST 一次。认领即计数，投递失败不用再
             // bump —— 剩余预算自然少一次，死地址照样会耗尽预算停下。
-            if VideoGenerationRepository::claim_callback_attempt(
-                &state.pool,
-                &task.task_id,
-                MAX_CALLBACK_ATTEMPTS,
-            )
-            .await
-            .unwrap_or(false)
-            {
-                if Self::deliver_callback(&task).await.is_ok() {
-                    return VideoGenerationRepository::mark_callback_delivered(
-                        &state.pool,
-                        &task.task_id,
-                    )
-                    .await;
-                }
+            if let Some(token) = VideoGenerationRepository::claim_callback_attempt(
+                &state.pool, &task.task_id, MAX_CALLBACK_ATTEMPTS,
+            ).await.unwrap_or(None) {
+                let delivered = Self::deliver_callback(&task, callback_policy).await.is_ok();
+                return VideoGenerationRepository::finish_callback_attempt(
+                    &state.pool, &task.task_id, &token, delivered,
+                ).await;
             }
         }
         Ok(task)
@@ -636,13 +654,13 @@ impl VideoGenerationService {
     ///
     /// 这里不经过路由池：回调是网关自己发出的出站请求，与上游渠道的选账号、
     /// 计费、日志都无关（计费在提交那一刀已经切完了）。
-    async fn deliver_callback(task: &VideoTask) -> Result<(), AppError> {
+    async fn deliver_callback(task: &VideoTask, policy: CallbackTargetPolicy) -> Result<(), AppError> {
         let url = task.callback_url.as_deref().ok_or_else(|| {
             validation("videogen.callback", "Task has no callback URL registered")
         })?;
         // 提交时已经校验过；这里再校验一次，兜住「校验上线之前落库的行」
         // 和直接改库的情况。SSRF 的代价不对称，重复校验很便宜。
-        validate_callback_url(url, CallbackTargetPolicy::current())
+        validate_callback_url(url, policy)
             .map_err(|error| validation("videogen.callback", &error))?;
         let status = VideoTaskStatus::parse(&task.status).unwrap_or(VideoTaskStatus::Processing);
         let payload = String::from_utf8_lossy(&status_response(
@@ -653,6 +671,7 @@ impl VideoGenerationService {
         ))
         .into_owned();
         let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|error| validation("videogen.callback", &error.to_string()))?;
@@ -691,24 +710,15 @@ impl VideoGenerationService {
         for task in pending {
             // 认领制（复审 3d）：与 `settle` 的投递、以及别的执行体重投循环
             // 并发时，只有拿到资格的那个会 POST。
-            let claimed = VideoGenerationRepository::claim_callback_attempt(
-                &state.pool,
-                &task.task_id,
-                MAX_CALLBACK_ATTEMPTS,
-            )
-            .await
-            .unwrap_or(false);
-            if !claimed {
+            let Some(token) = VideoGenerationRepository::claim_callback_attempt(
+                &state.pool, &task.task_id, MAX_CALLBACK_ATTEMPTS,
+            ).await.unwrap_or(None) else {
                 continue;
-            }
-            if Self::deliver_callback(&task).await.is_ok() {
-                let _ = VideoGenerationRepository::mark_callback_delivered(
-                    &state.pool,
-                    &task.task_id,
-                )
-                .await;
-            }
-            // 投失败不补 bump：认领时已经 +1。
+            };
+            let delivered = Self::deliver_callback(&task, CallbackTargetPolicy::current()).await.is_ok();
+            let _ = VideoGenerationRepository::finish_callback_attempt(
+                &state.pool, &task.task_id, &token, delivered,
+            ).await;
         }
     }
 
@@ -843,6 +853,37 @@ mod tests {
             terminal_hub: Default::default(),
             event_broadcaster: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn video_alias_is_resolved_for_the_selected_account_before_native_serialization() {
+        use crate::database::{create_memory_pool, run_migrations};
+        use crate::database::repositories::route_credential_repository::RouteCredentialRepository;
+        use axum::{Json, Router};
+        use serde_json::{json, Value};
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let sink = captured.clone();
+        let app = Router::new().fallback(move |Json(payload): Json<Value>| {
+            let sink = sink.clone();
+            async move {
+                sink.lock().unwrap().push(payload);
+                Json(json!({"data":{"task_id":"alias-upstream"}}))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let account = RouteCredentialRepository::create(&pool, "codex", "api", "Kling alias", None, "ok", None, r#"{"api_key":"test-key"}"#, &json!({"base_url":format!("http://{address}/v1"),"interface_format":"kling","model_mappings":[{"from":"demo-video","to":"kling-v1","capabilities":["video.generate"]}]}).to_string(), "{}").await.unwrap();
+        RoutePoolRepository::replace_members(&pool, "codex", std::slice::from_ref(&account.id)).await.unwrap();
+        let state = test_app_state(pool.clone(), Default::default());
+        let outcome = VideoGenerationService::submit(&state, SubmitVideoInput { platform:"codex".into(), request:VideoGenerationRequest::parse(br#"{"model":"demo-video","prompt":"a cat"}"#).unwrap(), session_id:None, message_id:None, credential_ids:None, upstream_model:None, owner_user_id:None }).await.unwrap();
+        assert_eq!(captured.lock().unwrap()[0]["model_name"], "kling-v1");
+        let task = VideoGenerationRepository::get_task(&pool, &outcome.task_id).await.unwrap();
+        assert_eq!(task.model, "demo-video");
+        assert_eq!(task.upstream_model.as_deref(), Some("kling-v1"));
+        upstream.abort();
     }
 
     #[test]
@@ -982,7 +1023,7 @@ mod tests {
         let state = test_app_state(pool.clone(), RouteProxyRuntimeState::default());
 
         // ── 1) 提交 ──
-        let outcome = VideoGenerationService::submit(
+        let outcome = VideoGenerationService::submit_with_callback_policy(
             &state,
             SubmitVideoInput {
                 platform: "codex".into(),
@@ -1010,6 +1051,7 @@ mod tests {
                 upstream_model: None,
                 owner_user_id: None,
             },
+            CallbackTargetPolicy::Local,
         )
         .await
         .expect("submit succeeds against the mock upstream");
@@ -1059,9 +1101,13 @@ mod tests {
             .await
             .unwrap();
         finished.store(true, Ordering::SeqCst);
-        let advanced = VideoGenerationService::advance_all(&state, POLL_BATCH_LIMIT)
-            .await
-            .unwrap();
+        // 先按构建模式推进任务；本地回调 fixture 显式选择 Local，不影响 Server 策略。
+        let polled = VideoGenerationService::poll_once(&state, &task_id).await.unwrap();
+        let settled_task = VideoGenerationService::settle_with_callback_policy(
+            &state, &polled, VideoTaskStatus::Succeeded, polled.url.as_deref(), None,
+            CallbackTargetPolicy::Local,
+        ).await.unwrap();
+        let advanced = vec![settled_task];
         assert_eq!(advanced.len(), 1);
         if advanced[0].status != "succeeded" {
             // 轮询失败会被 `poll_once` 吞掉（留在 processing 等重试），所以失败时
@@ -1124,6 +1170,37 @@ mod tests {
         assert_eq!(callbacks.lock().unwrap().len(), 1);
 
         upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn callback_delivery_never_follows_redirects_to_another_target() {
+        use crate::database::{create_memory_pool, run_migrations};
+        use axum::{Router, http::StatusCode};
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let sink = hits.clone();
+        let target = Router::new().fallback(move || {
+            let sink = sink.clone();
+            async move { sink.fetch_add(1, Ordering::SeqCst); StatusCode::NO_CONTENT }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_url = format!("http://{}/redirected", listener.local_addr().unwrap());
+        let target_task = tokio::spawn(async move { axum::serve(listener, target).await.unwrap() });
+        let redirect = Router::new().fallback(move || {
+            let target = target_url.clone();
+            async move { (StatusCode::TEMPORARY_REDIRECT, [("location", target)]) }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let callback_url = format!("http://{}/callback", listener.local_addr().unwrap());
+        let redirect_task = tokio::spawn(async move { axum::serve(listener, redirect).await.unwrap() });
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let task = VideoGenerationRepository::create_task(&pool, NewVideoTask { task_id:"redirect-cb".into(), session_id:None, message_id:None, model:"m".into(), upstream_model:None, dialect:"kling".into(), credential_id:None, upstream_task_id:None, duration_seconds:None, size:None, callback_url:Some(callback_url), owner_user_id:None }).await.unwrap();
+        let result = VideoGenerationService::deliver_callback(&task, CallbackTargetPolicy::Local).await;
+        assert!(result.is_err(), "3xx must not be reported as delivered");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "unvalidated redirect target must not receive callback");
+        redirect_task.abort();
+        target_task.abort();
     }
 
     #[test]

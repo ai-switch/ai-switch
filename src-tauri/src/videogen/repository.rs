@@ -294,39 +294,48 @@ impl VideoGenerationRepository {
             "SELECT {TASK_COLUMNS} FROM videogen_tasks \
              WHERE callback_delivered=0 AND callback_url IS NOT NULL \
                AND status IN ('succeeded','failed') AND callback_attempts < ? \
+               AND (callback_claim_token IS NULL OR callback_claim_until<=?) \
              ORDER BY updated_at ASC LIMIT ?"
         );
         sqlx::query_as(&sql)
             .bind(max_attempts)
+            .bind(Utc::now().to_rfc3339())
             .bind(limit)
             .fetch_all(pool)
             .await
             .map_err(database)
     }
 
-    /// 认领一次回调投递资格（复审 3d，原子 CAS）。
-    ///
-    /// `settle` 与重投循环可能并发进入，两边都看到 `callback_delivered=0` 就会
-    /// 各 POST 一次。把「次数 +1」做成**带条件的认领**：只有把 `callback_attempts`
-    /// 从 `< max` 抬上去的那一个赢家才获得投递资格，输家直接跳过 —— 同一笔回调
-    /// 只会被 POST 一次。认领即计数：投递失败不需要再单独 bump，剩余预算自然
-    /// 少一次。
+    /// 认领有期限的独占回调租约；10 秒网络超时小于 30 秒租约。
     pub async fn claim_callback_attempt(
         pool: &SqlitePool,
         task_id: &str,
         max_attempts: i64,
-    ) -> Result<bool, AppError> {
+    ) -> Result<Option<String>, AppError> {
+        let now = Utc::now().to_rfc3339();
+        let until = (Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+        let token = uuid::Uuid::new_v4().to_string();
         let result = sqlx::query(
-            "UPDATE videogen_tasks SET callback_attempts=callback_attempts+1, updated_at=? \
-             WHERE task_id=? AND callback_delivered=0 AND callback_attempts < ?",
+            "UPDATE videogen_tasks SET callback_attempts=callback_attempts+1, callback_claim_token=?, callback_claim_until=?, updated_at=? \
+             WHERE task_id=? AND callback_delivered=0 AND callback_attempts < ? \
+               AND (callback_claim_token IS NULL OR callback_claim_until<=?)",
         )
-        .bind(Utc::now().to_rfc3339())
-        .bind(task_id)
-        .bind(max_attempts)
-        .execute(pool)
-        .await
-        .map_err(database)?;
-        Ok(result.rows_affected() == 1)
+        .bind(&token).bind(until).bind(&now).bind(task_id).bind(max_attempts).bind(&now)
+        .execute(pool).await.map_err(database)?;
+        Ok((result.rows_affected() == 1).then_some(token))
+    }
+
+    /// 只有租约持有人能标记投递或释放失败的认领，过期旧工作者不能修改新租约。
+    pub async fn finish_callback_attempt(
+        pool: &SqlitePool,
+        task_id: &str,
+        token: &str,
+        delivered: bool,
+    ) -> Result<VideoTask, AppError> {
+        sqlx::query("UPDATE videogen_tasks SET callback_delivered=?, callback_claim_token=NULL, callback_claim_until=NULL, updated_at=? WHERE task_id=? AND callback_claim_token=?")
+            .bind(delivered).bind(Utc::now().to_rfc3339()).bind(task_id).bind(token)
+            .execute(pool).await.map_err(database)?;
+        Self::get_task(pool, task_id).await
     }
 }
 
@@ -527,28 +536,25 @@ mod tests {
         .await
         .expect("terminal");
 
-        // 预算内认领逐次成功，且每次都消耗一格预算
+        let first = VideoGenerationRepository::claim_callback_attempt(&pool, "t-cb", 2)
+            .await.expect("first claim").expect("first claim wins");
         assert!(VideoGenerationRepository::claim_callback_attempt(&pool, "t-cb", 2)
-            .await
-            .expect("first claim wins"));
+            .await.unwrap().is_none(), "a running delivery excludes other workers");
+        VideoGenerationRepository::finish_callback_attempt(&pool, "t-cb", &first, false)
+            .await.unwrap();
+        let second = VideoGenerationRepository::claim_callback_attempt(&pool, "t-cb", 2)
+            .await.unwrap().expect("failed claim released for retry");
         assert!(VideoGenerationRepository::claim_callback_attempt(&pool, "t-cb", 2)
-            .await
-            .expect("second claim within budget"));
-        assert!(
-            !VideoGenerationRepository::claim_callback_attempt(&pool, "t-cb", 2)
-                .await
-                .expect("budget exhausted"),
-            "attempts beyond the budget must not be claimable"
-        );
-
-        // 已投递的任务不可认领（重投循环与 settle 并发时的另一半保护）
-        VideoGenerationRepository::mark_callback_delivered(&pool, "t-cb")
-            .await
-            .expect("delivered");
-        assert!(
-            !VideoGenerationRepository::claim_callback_attempt(&pool, "t-cb", 8)
-                .await
-                .expect("delivered tasks are not claimable"),
-        );
+            .await.unwrap().is_none());
+        VideoGenerationRepository::finish_callback_attempt(&pool, "t-cb", &second, true)
+            .await.unwrap();
+        sqlx::query("UPDATE videogen_tasks SET callback_attempts=0,callback_delivered=0 WHERE task_id='t-cb'").execute(&pool).await.unwrap();
+        let abandoned = VideoGenerationRepository::claim_callback_attempt(&pool, "t-cb", 8).await.unwrap().unwrap();
+        sqlx::query("UPDATE videogen_tasks SET callback_claim_until='2000-01-01T00:00:00Z' WHERE task_id='t-cb'").execute(&pool).await.unwrap();
+        let recovered = VideoGenerationRepository::claim_callback_attempt(&pool, "t-cb", 8).await.unwrap().expect("expired worker lease is recoverable");
+        let stale_finish = VideoGenerationRepository::finish_callback_attempt(&pool, "t-cb", &abandoned, true).await.unwrap();
+        assert!(!stale_finish.callback_delivered);
+        let final_task = VideoGenerationRepository::finish_callback_attempt(&pool, "t-cb", &recovered, true).await.unwrap();
+        assert!(final_task.callback_delivered);
     }
 }

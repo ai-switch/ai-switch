@@ -464,6 +464,8 @@ pub struct StreamObserver {
     /// boundary is still found.
     marker_carry: String,
     streaming_request: bool,
+    audio_stream: bool,
+    audio_started: bool,
     semantic_failure: bool,
     /// The first upstream failure frame's own `SemanticResponseFailure`, kept so
     /// the request log and health bookkeeping can surface the real message. The
@@ -501,6 +503,8 @@ impl StreamObserver {
             reasoning_deltas: 0,
             marker_carry: String::new(),
             streaming_request,
+            audio_stream: false,
+            audio_started: false,
             semantic_failure: false,
             failure: None,
             quota_failure: None,
@@ -512,6 +516,13 @@ impl StreamObserver {
             continuation_saw_terminal: false,
             client_event_framer: SseFramer::new(),
         }
+    }
+
+    /// 已校验的 OpenAI 音频事件，不继承文本终止标记与续写状态。
+    pub fn new_audio(preview_limit: usize) -> Self {
+        let mut observer = Self::new(preview_limit, true);
+        observer.audio_stream = true;
+        observer
     }
 
     /// 收续写流的帧：并 token 用量、接着累加半截正文，但不碰
@@ -668,7 +679,9 @@ impl StreamObserver {
             let take = (self.preview_limit - self.preview.len()).min(chunk.len());
             self.preview.extend_from_slice(&chunk[..take]);
         }
-        self.scan_for_terminal_marker(chunk);
+        if !self.audio_stream {
+            self.scan_for_terminal_marker(chunk);
+        }
 
         for payload in self.framer.push(chunk) {
             self.absorb_frame(&payload);
@@ -686,9 +699,13 @@ impl StreamObserver {
             byte_count: self.byte_count,
             // Only a streaming request can be truncated in this sense; a plain
             // JSON reply has no terminal event to miss.
-            disconnected_before_completion: self.streaming_request
-                && self.saw_data_frame
-                && (!self.saw_terminal_marker || self.semantic_failure),
+            disconnected_before_completion: if self.audio_stream {
+                !self.audio_started || !self.saw_terminal_marker || self.semantic_failure
+            } else {
+                self.streaming_request
+                    && self.saw_data_frame
+                    && (!self.saw_terminal_marker || self.semantic_failure)
+            },
             failure: self.failure,
             reasoning_deltas: self.reasoning_deltas,
             continuation: self.continuation,
@@ -738,6 +755,24 @@ impl StreamObserver {
             return;
         };
         self.note_semantic_failure(&value);
+        if self.audio_stream {
+            match value["type"].as_str() {
+                Some("speech.audio.delta") => {
+                    self.audio_started |= value["audio"]
+                        .as_str()
+                        .is_some_and(|audio| !audio.is_empty());
+                }
+                Some("speech.audio.done") if self.audio_started => {
+                    self.saw_terminal_marker = true;
+                }
+                _ => {}
+            }
+            self.usage
+                .merge_from(super::route_proxy_service::usage_breakdown_from_value(
+                    &value,
+                ));
+            return;
+        }
         if reasoning_text_in_frame(&value).is_some() {
             self.reasoning_deltas += 1;
         }
@@ -999,6 +1034,27 @@ mod tests {
         let mut framer = SseFramer::new();
         assert!(framer.push(b"data: {\"a\":1}").is_empty());
         assert_eq!(framer.finish(), Some(r#"{"a":1}"#.to_string()));
+    }
+
+    #[test]
+    fn audio_observer_requires_speech_done_instead_of_text_terminal_markers() {
+        let delta = b"data: {\"type\":\"speech.audio.delta\",\"audio\":\"SUQz\"}\n\n";
+        let mut completed = StreamObserver::new_audio(1024);
+        completed.observe(delta);
+        completed.observe(b"data: {\"type\":\"speech.audio.done\",\"usage\":{\"input_tokens\":4,\"output_tokens\":6,\"total_tokens\":10}}\n\n");
+        let outcome = completed.finish();
+        assert!(!outcome.disconnected_before_completion);
+        assert_eq!(outcome.usage.input_tokens, Some(4));
+        assert_eq!(outcome.usage.output_tokens, Some(6));
+        assert_eq!(outcome.continuation, StreamContinuationState::default());
+
+        let mut incomplete = StreamObserver::new_audio(1024);
+        incomplete.observe(delta);
+        incomplete.observe(b"data: [DONE]\n\n");
+        assert!(incomplete.finish().disconnected_before_completion);
+
+        let empty = StreamObserver::new_audio(1024);
+        assert!(empty.finish().disconnected_before_completion);
     }
 
     #[test]

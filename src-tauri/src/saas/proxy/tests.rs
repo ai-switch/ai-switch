@@ -1,4 +1,9 @@
 use super::*;
+
+mod audio_stream {
+    include!("audio_stream_tests.rs");
+}
+
 use crate::saas::logs::canonical_test_directory;
 use crate::saas::{domain, repository};
 use crate::services::route_proxy_service::{build_proxy_state, RouteProxyRuntimeState};
@@ -797,6 +802,47 @@ async fn video_billing_fixture(
         .await
         .unwrap();
     (pool, principal, plaintext)
+}
+
+#[tokio::test]
+async fn native_saas_video_preserves_seconds_size_reference_and_response_contract() {
+    let captured = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let sink = captured.clone();
+    let app = Router::new().fallback(post(move |Json(payload): Json<Value>| {
+        let sink = sink.clone();
+        async move {
+            sink.lock().unwrap().push(payload);
+            Json(json!({"data":{"task_id":"native-task"}}))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (pool, _principal, plaintext) = video_billing_fixture(1_000, 2_000, "kling").await;
+    let directory = canonical_test_directory();
+    sqlx::query("UPDATE saas_settings SET value_json=json_set(value_json,'$.logs',json(?)) WHERE key='config'").bind(json!({"directory":directory.path()}).to_string()).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE route_credentials SET secret_payload_json=?,config_json=json_set(config_json,'$.base_url',?) WHERE id='video-account'").bind(r#"{"api_key":"test-key"}"#).bind(format!("http://{address}/v1")).execute(&pool).await.unwrap();
+    let state = test_app_state(pool.clone());
+    let runtime = SaasRuntime::default();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::AUTHORIZATION, format!("Bearer {plaintext}").parse().unwrap());
+    let response = execute(&state, &runtime, build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default()), Method::POST, headers, "/v1/videos".parse().unwrap(), Body::from(json!({"model":"kling-v1","prompt":"a cat","seconds":"8","size":"720x1280","input_reference":"https://cdn.example/first.png"}).to_string())).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let response: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(response["object"], "video");
+    assert_eq!(response["status"], "queued");
+    assert_eq!(response["seconds"], "8");
+    assert_eq!(response["size"], "720x1280");
+    assert!(response.get("task_id").is_none());
+    let body = captured.lock().unwrap()[0].clone();
+    assert_eq!(body["duration"], 8);
+    assert_eq!(body["aspect_ratio"], "9:16");
+    assert_eq!(body["image"], "https://cdn.example/first.png");
+    let charge: i64 = sqlx::query_scalar("SELECT reserved_micros FROM saas_billing_reservations").fetch_one(&pool).await.unwrap();
+    assert_eq!(charge, 17_000);
+    runtime.logs.shutdown().await.unwrap();
+    upstream.abort();
 }
 
 /// 视频定价矩阵：起步价与按秒价**相加**，且只配一种时也能工作
@@ -1677,6 +1723,54 @@ fn transcribe_multipart(model: &str) -> (String, Vec<u8>) {
         format!("multipart/form-data; boundary={boundary}"),
         body,
     )
+}
+
+#[tokio::test]
+async fn cancelled_transcription_and_translation_release_reserved_funds() {
+    for path in ["/v1/audio/transcriptions", "/v1/audio/translations"] {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = release.clone();
+        let app = Router::new().fallback(move || {
+            let gate = gate.clone();
+            async move {
+                gate.notified().await;
+                Json(json!({"text":"hello"}))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (pool, plaintext, _directory) = transcribe_billing_fixture(&format!("http://{address}/v1"), 6_000).await;
+        let state = test_app_state(pool.clone());
+        let runtime = SaasRuntime::default();
+        let (content_type, body) = transcribe_multipart("whisper-1");
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, format!("Bearer {plaintext}").parse().unwrap());
+        headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+        let mut request = Box::pin(execute(&state, &runtime, build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default()), Method::POST, headers, path.parse().unwrap(), Body::from(body)));
+        tokio::select! {
+            response = &mut request => panic!("upstream remains blocked: {response:?}"),
+            reserved = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM saas_billing_reservations WHERE status='reserved'").fetch_one(&pool).await.unwrap();
+                    if count == 1 { break; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }) => reserved.expect("reservation committed before cancellation"),
+        }
+        drop(request);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let status: String = sqlx::query_scalar("SELECT status FROM saas_billing_reservations").fetch_one(&pool).await.unwrap();
+                if status == "refunded" { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("cancelled STT must refund, not consume concurrency indefinitely");
+        let frozen: (i64, i64) = sqlx::query_as("SELECT users.frozen_micros,keys.frozen_micros FROM saas_users users JOIN saas_api_keys keys ON keys.user_id=users.id").fetch_one(&pool).await.unwrap();
+        assert_eq!(frozen, (0, 0));
+        runtime.logs.shutdown().await.unwrap();
+        upstream.abort();
+    }
 }
 
 /// STT / 翻译的 SaaS 端到端（音频遗留 1）：认证 → 预留（按次）→ 改写 multipart

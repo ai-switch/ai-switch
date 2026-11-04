@@ -188,15 +188,31 @@ impl SpeechAudioFormat {
 pub enum SpeechStreamFormat {
     /// 完整的音频字节。
     Audio,
+    /// OpenAI 兼容的音频 SSE。
+    Sse,
 }
 
 impl SpeechStreamFormat {
     fn parse(value: Option<&str>) -> Result<Self, String> {
         match value.unwrap_or("audio").trim().to_ascii_lowercase().as_str() {
             "audio" => Ok(Self::Audio),
+            "sse" => Ok(Self::Sse),
             format => Err(format!("Unsupported speech stream format '{format}'")),
         }
     }
+}
+
+/// TTS 的 SSE 选择与文本 `stream: true` 是不同契约。
+pub fn speech_request_streams(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("stream_format")
+                .and_then(Value::as_str)
+                .map(|format| format.trim().eq_ignore_ascii_case("sse"))
+        })
+        .unwrap_or(false)
 }
 
 /// 发给上游的请求体及解码回程所需的元数据。
@@ -265,7 +281,7 @@ pub fn prepare_speech_request(
         voice_setting.insert("speed".to_string(), speed.into());
     }
 
-    let native = serde_json::json!({
+    let mut native = serde_json::json!({
         "model": model,
         "text": input,
         "voice_setting": voice_setting,
@@ -273,8 +289,11 @@ pub fn prepare_speech_request(
             "format": response_format.as_str(),
         },
         "output_format": "hex",
-        "stream": false,
+        "stream": stream_format == SpeechStreamFormat::Sse,
     });
+    if stream_format == SpeechStreamFormat::Sse {
+        native["stream_options"] = serde_json::json!({ "exclude_aggregated_audio": true });
+    }
     let body = serde_json::to_vec(&native)
         .map_err(|error| format!("Failed to encode MiniMax speech request: {error}"))?;
     Ok(PreparedSpeechRequest {
@@ -433,6 +452,12 @@ pub struct MultipartForm {
     parts: Vec<MultipartPart>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebuiltMultipart {
+    pub body: Vec<u8>,
+    pub boundary: String,
+}
+
 impl MultipartForm {
     /// 取一个**文本**字段的值（`model` / `language` / `prompt` 这些）。
     ///
@@ -456,36 +481,25 @@ impl MultipartForm {
     ///
     /// 只动这一个段的负载，其余段（包括文件段的原始字节）逐字节原样保留。
     /// 没有这个字段时返回 `None` —— 调用方应当保持原请求体不变。
-    pub fn rewrite_field(&self, name: &str, value: &str) -> Option<Vec<u8>> {
+    pub fn rewrite_field(&self, name: &str, value: &str) -> Option<RebuiltMultipart> {
         let index = self.parts.iter().position(|part| part.name == name)?;
-        Some(self.serialize_with(|at, part| {
-            if at == index {
-                value.as_bytes().to_vec()
-            } else {
-                part.payload.clone()
-            }
-        }))
-    }
-
-    /// 把所有段重新序列化成一个 multipart 体（沿用解析时的段序与头部）。
-    fn serialize_with(&self, payload: impl Fn(usize, &MultipartPart) -> Vec<u8>) -> Vec<u8> {
-        // boundary 只是序列化的分隔符：重建时用哪个都合法，只要不与内容冲突。
-        // 用一个固定值而不是从原请求继承，免得「boundary 出现在被改写的字段值里」
-        // 这种巧合把体截断 —— OpenAI 兼容的上游按头里的 boundary 解，这里写什么都行。
-        let boundary = "ai-switch-form";
+        let payloads: Vec<&[u8]> = self.parts.iter().enumerate().map(|(at, part)| {
+            if at == index { value.as_bytes() } else { part.payload.as_slice() }
+        }).collect();
+        let mut boundary = "ai-switch-form".to_string();
+        while payloads.iter().any(|payload| payload.windows(boundary.len()).any(|bytes| bytes == boundary.as_bytes())) {
+            boundary = format!("ai-switch-{}", uuid::Uuid::new_v4().simple());
+        }
         let mut body = Vec::new();
-        for (at, part) in self.parts.iter().enumerate() {
+        for (part, payload) in self.parts.iter().zip(payloads) {
             body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
             body.extend_from_slice(&part.head);
-            body.extend_from_slice(&payload(at, part));
+            body.extend_from_slice(payload);
             body.extend_from_slice(b"\r\n");
         }
         body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-        body
+        Some(RebuiltMultipart { body, boundary })
     }
-
-    /// 重建体所用的 boundary（写进 Content-Type 头的那个）。
-    pub const REBUILD_BOUNDARY: &'static str = "ai-switch-form";
 }
 
 /// 解析 multipart/form-data。
@@ -513,8 +527,14 @@ pub fn parse_multipart(body: &[u8], boundary: &str) -> Result<MultipartForm, Str
         let segment_start = cursor + 2;
         let segment_end = body[segment_start..]
             .windows(delimiter.len())
-            .position(|window| window == delimiter.as_bytes())
-            .map(|at| segment_start + at)
+            .enumerate()
+            .find(|(at, window)| {
+                if *window != delimiter.as_bytes() { return false; }
+                let suffix = &body[segment_start + at + delimiter.len()..];
+                suffix.starts_with(b"\r\n")
+                    || suffix.strip_prefix(b"--").is_some_and(|rest| rest.is_empty() || rest.starts_with(b"\r\n"))
+            })
+            .map(|(at, _)| segment_start + at)
             .ok_or_else(|| "Multipart body is missing a closing boundary".to_string())?;
         let segment = &body[segment_start..segment_end];
         // head 保存**完整的头部块**（含头与负载之间的空行 CRLFCRLF）——重建时
@@ -664,6 +684,36 @@ mod tests {
         assert_eq!(prepared.body, request);
         assert_eq!(prepared.response_format, SpeechAudioFormat::Mp3);
         assert_eq!(prepared.stream_format, SpeechStreamFormat::Audio);
+    }
+
+    #[test]
+    fn identifies_only_sse_speech_requests_as_audio_streams() {
+        assert!(speech_request_streams(br#"{"stream_format":"sse"}"#));
+        assert!(speech_request_streams(br#"{"stream_format":" SSE "}"#));
+        assert!(!speech_request_streams(br#"{"stream":true}"#));
+        assert!(!speech_request_streams(br#"{"stream_format":"audio"}"#));
+        assert!(!speech_request_streams(br#"{"stream_format":null}"#));
+        assert!(!speech_request_streams(b"not json"));
+    }
+
+    #[test]
+    fn requests_minimax_sse_without_aggregated_audio() {
+        let request = br#"{"model":"speech-02-hd","input":"hello","voice":"male-qn-qingse","response_format":"mp3","stream_format":"sse"}"#;
+        let prepared = prepare_speech_request(AudioDialect::MiniMax, request).expect("SSE request");
+        let body: Value = serde_json::from_slice(&prepared.body).expect("native body");
+
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"]["exclude_aggregated_audio"], true);
+        assert_eq!(body["output_format"], "hex");
+        assert_eq!(body["audio_setting"]["format"], "mp3");
+    }
+
+    #[test]
+    fn preserves_openai_sse_request_bytes() {
+        let request = br#"{"model":"gpt-4o-mini-tts", "input":"hello", "voice":"alloy", "stream_format":"sse"}"#;
+        let prepared = prepare_speech_request(AudioDialect::OpenAi, request).expect("SSE request");
+
+        assert_eq!(prepared.body, request);
     }
 
     #[test]
@@ -864,13 +914,32 @@ mod tests {
         let rewritten = form
             .rewrite_field("model", "upstream-whisper")
             .expect("model field exists");
-        let rebuilt = parse_multipart(&rewritten, MultipartForm::REBUILD_BOUNDARY)
+        let rebuilt = parse_multipart(&rewritten.body, &rewritten.boundary)
             .expect("rebuilt body parses");
         assert_eq!(rebuilt.field("model").as_deref(), Some("upstream-whisper"));
         assert_eq!(
             rebuilt.parts_file_bytes(),
             [0x00, 0xff, b'-', b'-', 0x7f],
         );
+    }
+
+    #[test]
+    fn multipart_rebuild_avoids_boundary_collisions_in_audio_bytes() {
+        let mut form = parse_multipart(&sample_multipart("whisper-1"), MP_BOUNDARY).unwrap();
+        let file = b"binary\r\n--ai-switch-form\r\nstill audio".to_vec();
+        form.parts[1].payload = file.clone();
+        let rebuilt = form.rewrite_field("model", "upstream-whisper").unwrap();
+        let parsed = parse_multipart(&rebuilt.body, &rebuilt.boundary).expect("collision-free rebuilt form");
+        assert_eq!(parsed.parts_file_bytes(), file);
+        assert_eq!(parsed.field("model").as_deref(), Some("upstream-whisper"));
+    }
+
+    #[test]
+    fn multipart_parser_keeps_boundary_prefixes_inside_audio_bytes() {
+        let payload = format!("audio\r\n--{MP_BOUNDARY}-suffix\r\nmore audio");
+        let body = format!("--{MP_BOUNDARY}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n--{MP_BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.mp3\"\r\n\r\n{payload}\r\n--{MP_BOUNDARY}--\r\n");
+        let parsed = parse_multipart(body.as_bytes(), MP_BOUNDARY).expect("prefix is not a delimiter line");
+        assert_eq!(parsed.parts_file_bytes(), payload.as_bytes());
     }
 
     #[test]

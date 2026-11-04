@@ -443,16 +443,9 @@ async fn execute_image_request(
 
 /// 音频（TTS）的 SaaS 执行。
 ///
-/// 与 `execute_image_request` 的**根本差异**：音频的响应是**二进制字节流**，
-/// 解析不了 —— 所以这里不去数「成功了几条」（数不出来），也不改写响应体，
-/// 直接把上游的字节与 `content-type` 原样回给客户端。
-///
-/// 由此推出两条：
-///   1. **计费用量只能来自请求**（`input` 的字符数）。这不是妥协，是正确：
-///      上游也是按 `input` 收费的，两边口径一致；而「从音频时长反推字数」
-///      那种做法既不准也不必要。
-///   2. 计费是**全有或全无**：上游 2xx 就按预留的总额收款，失败整笔退款。
-///      没有「成功几个字」这种中间态（图像/视频能从响应体里数出条数，音频不能）。
+/// 音频内容不能用来反推计费字符数：计费用量只来自请求，结算全有或全无。
+/// 二进制响应完整读完再结算；SSE 逐帧转发，非空音频、speech.audio.done 和 EOF
+/// 全部确认后才扣费。超时、断流和客户端提前退出均退款。
 ///
 /// 字符数从**同一份请求体**算（`audiogen::protocol::input_characters`），与
 /// `build_audio_upstream_request` 的校验用的是同一个函数，所以「计费的文本」与
@@ -468,6 +461,8 @@ async fn execute_audio_request(
     model: String,
     path: &str,
 ) -> Result<Response, AppError> {
+    let streaming =
+        crate::audiogen::protocol::speech_request_streams(payload.to_string().as_bytes());
     let object = payload.as_object_mut().ok_or_else(|| {
         repository::invalid("saas.validation", "Request must contain a JSON object")
     })?;
@@ -482,6 +477,26 @@ async fn execute_audio_request(
     let reservation = billing::reserve_audio(pool, &principal, &model, characters).await?;
     object.insert("model".into(), json!(reservation.upstream_model));
     let request_id = reservation.request_id.clone();
+    let mut completion = AudioCompletion {
+        pool: pool.clone(),
+        runtime: runtime.clone(),
+        started: Instant::now(),
+        record: Some(LogRecord {
+            request_id: request_id.clone(),
+            user_id: reservation.user_id.clone(),
+            key_id: reservation.key_id.clone(),
+            group_id: reservation.group_id.clone(),
+            platform: reservation.platform.clone(),
+            model: model.clone(),
+            endpoint: path.to_string(),
+            created_at: chrono::Utc::now(),
+            utc_offset_minutes: chrono::Local::now().offset().local_minus_utc() / 60,
+            status: StatusCode::BAD_GATEWAY.as_u16(),
+            ..Default::default()
+        }),
+        decision: None,
+        transcription: false,
+    };
     let deadline =
         tokio::time::Instant::now() + Duration::from_secs(reservation.timeout_seconds as u64);
     let proxy = proxy
@@ -495,8 +510,6 @@ async fn execute_audio_request(
     headers.remove("x-ai-switch-test-trace-id");
     headers.remove(header::CONTENT_LENGTH);
     headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
-    let started = Instant::now();
-    let created_at = chrono::Utc::now();
     let upstream = tokio::time::timeout_at(
         deadline,
         proxy_handler(
@@ -511,49 +524,104 @@ async fn execute_audio_request(
     let response = match upstream {
         Ok(response) => response,
         Err(_) => {
-            // 超时：上游可能已经合成了一半，但客户端什么都没拿到 —— 整笔退。
-            let _ = billing::settle_audio(pool, &request_id, false).await;
+            completion.record.as_mut().expect("pending audio").status = 504;
+            completion.complete(false, Some("upstream_timeout")).await;
             return Ok((StatusCode::GATEWAY_TIMEOUT, Json(json!({"error":{"code":"saas.upstream_timeout","message":"Upstream request timed out"}}))).into_response());
         }
     };
     let status = response.status();
+    completion.record.as_mut().expect("pending audio").status = status.as_u16();
     let (mut parts, body) = response.into_parts();
-    // 二进制体，但也要设个上限：上游不该回一个 GB 级的音频。
-    let bytes = axum::body::to_bytes(body, 128 * 1024 * 1024)
-        .await
-        .map_err(|_| repository::invalid("saas.upstream_body", "Could not read speech response"))?;
-    let settlement = billing::settle_audio(pool, &request_id, status.is_success()).await?;
-    let record = LogRecord {
-        request_id: request_id.clone(),
-        user_id: reservation.user_id,
-        key_id: reservation.key_id,
-        group_id: reservation.group_id,
-        platform: reservation.platform,
-        model,
-        endpoint: path.to_string(),
-        created_at,
-        utc_offset_minutes: chrono::Local::now().offset().local_minus_utc() / 60,
-        duration_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
-        status: status.as_u16(),
-        amount_usd_micros: settlement.price_usd_micros.unwrap_or(0),
-        settlement_status: settlement.status,
-        error_code: if status.is_success() {
-            None
-        } else {
-            Some("upstream_rejected".into())
-        },
-        ..Default::default()
-    };
-    if runtime.logs.enqueue(record).await.is_err() {
-        eprintln!("SaaS request log queue rejected a completed audio request");
-    }
     parts.headers.remove(header::SET_COOKIE);
+    parts.headers.remove(header::CONTENT_LENGTH);
     parts
         .headers
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     parts
         .headers
         .insert("x-saas-request-id", request_id.parse().unwrap());
+    if streaming && status.is_success() {
+        let stream = futures_util::stream::unfold(
+            (
+                body.into_data_stream(),
+                completion,
+                crate::audiogen::stream::SpeechStreamAdapter::new(
+                    crate::audiogen::protocol::AudioDialect::OpenAi,
+                ),
+                deadline,
+            ),
+            |(mut source, mut completion, mut adapter, deadline)| async move {
+                if completion.record.is_none() {
+                    return None;
+                }
+                loop {
+                    let next = tokio::time::timeout_at(deadline, source.next()).await;
+                    let (output, eof) = match next {
+                        Ok(Some(Ok(bytes))) => (adapter.push(&bytes), false),
+                        Ok(None) => (adapter.finish(), true),
+                        Ok(Some(Err(_))) | Err(_) => {
+                            completion
+                                .complete(false, Some("upstream_interrupted"))
+                                .await;
+                            return Some((
+                                Err(std::io::Error::other("Speech response interrupted")),
+                                (source, completion, adapter, deadline),
+                            ));
+                        }
+                    };
+                    match output {
+                        Ok(output) => {
+                            if eof {
+                                completion.complete(true, None).await;
+                            }
+                            if !output.is_empty() {
+                                return Some((
+                                    Ok(axum::body::Bytes::from(output)),
+                                    (source, completion, adapter, deadline),
+                                ));
+                            }
+                            if eof {
+                                return None;
+                            }
+                        }
+                        Err(error) => {
+                            completion
+                                .complete(false, Some("upstream_interrupted"))
+                                .await;
+                            return Some((
+                                Err(std::io::Error::other(error)),
+                                (source, completion, adapter, deadline),
+                            ));
+                        }
+                    }
+                }
+            },
+        );
+        return Ok(Response::from_parts(parts, Body::from_stream(stream)));
+    }
+    let bytes = match tokio::time::timeout_at(
+        deadline,
+        axum::body::to_bytes(body, 128 * 1024 * 1024),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) | Err(_) => {
+            completion
+                .complete(false, Some("upstream_interrupted"))
+                .await;
+            return Err(repository::invalid(
+                "saas.upstream_body",
+                "Could not read speech response",
+            ));
+        }
+    };
+    completion
+        .complete(
+            status.is_success(),
+            (!status.is_success()).then_some("upstream_rejected"),
+        )
+        .await;
     Ok(Response::from_parts(parts, Body::from(bytes)))
 }
 
@@ -587,6 +655,26 @@ async fn execute_audio_transcribe_request(
 
     let reservation = billing::reserve_transcribe(pool, &principal, &model).await?;
     let request_id = reservation.request_id.clone();
+    let mut completion = AudioCompletion {
+        pool: pool.clone(),
+        runtime: runtime.clone(),
+        started: Instant::now(),
+        record: Some(LogRecord {
+            request_id: request_id.clone(),
+            user_id: reservation.user_id.clone(),
+            key_id: reservation.key_id.clone(),
+            group_id: reservation.group_id.clone(),
+            platform: reservation.platform.clone(),
+            model: model.clone(),
+            endpoint: path.to_string(),
+            created_at: chrono::Utc::now(),
+            utc_offset_minutes: chrono::Local::now().offset().local_minus_utc() / 60,
+            status: StatusCode::BAD_GATEWAY.as_u16(),
+            ..Default::default()
+        }),
+        decision: None,
+        transcription: true,
+    };
     // 组定价行的上游模型名：改写 multipart 的 `model` 段（与 TTS 往 JSON 塞
     // `reservation.upstream_model` 是同一件事的 multipart 形状）。同名时不动体，
     // 省一次重编码。
@@ -609,15 +697,12 @@ async fn execute_audio_transcribe_request(
     if let Some(rebuilt) = &rebuilt {
         headers.insert(
             header::CONTENT_TYPE,
-            format!(
-                "multipart/form-data; boundary={}",
-                crate::audiogen::protocol::MultipartForm::REBUILD_BOUNDARY
-            )
-            .parse()
-            .unwrap(),
+            format!("multipart/form-data; boundary={}", rebuilt.boundary)
+                .parse()
+                .unwrap(),
         );
     }
-    let outbound = rebuilt.unwrap_or_else(|| body.to_vec());
+    let outbound = rebuilt.map(|form| form.body).unwrap_or_else(|| body.to_vec());
     let deadline =
         tokio::time::Instant::now() + Duration::from_secs(reservation.timeout_seconds as u64);
     let proxy = proxy
@@ -630,8 +715,6 @@ async fn execute_audio_transcribe_request(
     headers.remove("x-saas-csrf");
     headers.remove("x-ai-switch-test-trace-id");
     headers.remove(header::CONTENT_LENGTH);
-    let started = Instant::now();
-    let created_at = chrono::Utc::now();
     let upstream = tokio::time::timeout_at(
         deadline,
         proxy_handler(
@@ -646,42 +729,22 @@ async fn execute_audio_transcribe_request(
     let response = match upstream {
         Ok(response) => response,
         Err(_) => {
-            // 超时：上游可能已经转写了一半，但客户端什么都没拿到 —— 整笔退。
-            let _ = billing::settle_transcribe(pool, &request_id, false).await;
+            completion.record.as_mut().expect("pending transcription").status = 504;
+            completion.complete(false, Some("upstream_timeout")).await;
             return Ok((StatusCode::GATEWAY_TIMEOUT, Json(json!({"error":{"code":"saas.upstream_timeout","message":"Upstream request timed out"}}))).into_response());
         }
     };
     let status = response.status();
+    completion.record.as_mut().expect("pending transcription").status = status.as_u16();
     let (mut parts, body) = response.into_parts();
-    // 转写响应是小 JSON（`{"text": "…"}`），但上限与 TTS 保持同一量级。
-    let bytes = axum::body::to_bytes(body, 128 * 1024 * 1024)
-        .await
-        .map_err(|_| repository::invalid("saas.upstream_body", "Could not read transcription response"))?;
-    let settlement = billing::settle_transcribe(pool, &request_id, status.is_success()).await?;
-    let record = LogRecord {
-        request_id: request_id.clone(),
-        user_id: reservation.user_id,
-        key_id: reservation.key_id,
-        group_id: reservation.group_id,
-        platform: reservation.platform,
-        model,
-        endpoint: path.to_string(),
-        created_at,
-        utc_offset_minutes: chrono::Local::now().offset().local_minus_utc() / 60,
-        duration_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
-        status: status.as_u16(),
-        amount_usd_micros: settlement.price_usd_micros.unwrap_or(0),
-        settlement_status: settlement.status,
-        error_code: if status.is_success() {
-            None
-        } else {
-            Some("upstream_rejected".into())
-        },
-        ..Default::default()
+    let bytes = match tokio::time::timeout_at(deadline, axum::body::to_bytes(body, 128 * 1024 * 1024)).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) | Err(_) => {
+            completion.complete(false, Some("upstream_interrupted")).await;
+            return Err(repository::invalid("saas.upstream_body", "Could not read transcription response"));
+        }
     };
-    if runtime.logs.enqueue(record).await.is_err() {
-        eprintln!("SaaS request log queue rejected a completed transcription request");
-    }
+    completion.complete(status.is_success(), (!status.is_success()).then_some("upstream_rejected")).await;
     parts.headers.remove(header::SET_COOKIE);
     parts
         .headers
@@ -851,13 +914,14 @@ async fn execute_video_request(
     // 计价的时长在 `reserve_video` 内部按方言折算（`upstream_effective_duration`），
     // 这里传的是客户端请求的原始秒数 —— 校验口径；「上游真的会执行的秒数」
     // 由方言决定（Sora clamp、智谱不收时长），那是 3a 修正的口径同源。
-    let request = serde_json::from_value::<crate::videogen::protocol::VideoGenerationRequest>(
-        payload.clone(),
-    )
-    .map_err(|error| {
-        repository::invalid("saas.validation", &format!("Invalid video request: {error}"))
-    })?;
+    let native = crate::web::video_routes::is_openai_video_submit_path(path);
+    let request = if native {
+        crate::videogen::protocol::video_request_from_openai(payload.to_string().as_bytes())
+    } else {
+        crate::videogen::protocol::VideoGenerationRequest::parse(payload.to_string().as_bytes())
+    }.map_err(|error| repository::invalid("saas.validation", &format!("Invalid video request: {error}")))?;
     let duration_seconds = crate::videogen::protocol::effective_duration_seconds(&request);
+    let size = crate::videogen::protocol::effective_size(&request);
 
     let reservation =
         billing::reserve_video(pool, &principal, &model, count, duration_seconds).await?;
@@ -884,7 +948,14 @@ async fn execute_video_request(
     .await;
 
     let (status, body, success) = match outcome {
-        Ok(outcome) => (StatusCode::CREATED, outcome.body, true),
+        Ok(outcome) => {
+            let body = if native {
+                crate::videogen::protocol::openai_video_create_response(&outcome.task_id, &model, duration_seconds, size.as_deref())
+            } else {
+                outcome.body
+            };
+            (StatusCode::CREATED, body, true)
+        }
         Err(error) => {
             let status = match error.code() {
                 "validation.video_platform" | "validation.video_request" => {
@@ -970,6 +1041,72 @@ async fn execute_video_request(
             .insert("x-saas-request-id", value);
     }
     Ok(response)
+}
+
+/// 预留后立即持有，连首响应等待被取消也有退款出口。
+struct AudioCompletion {
+    pool: SqlitePool,
+    runtime: SaasRuntime,
+    started: Instant,
+    record: Option<LogRecord>,
+    decision: Option<bool>,
+    transcription: bool,
+}
+
+impl AudioCompletion {
+    async fn complete(&mut self, success: bool, error_code: Option<&str>) {
+        let Some(record) = self.record.as_mut() else {
+            return;
+        };
+        if self.decision.is_none() {
+            self.decision = Some(success);
+            record.error_code = error_code.map(str::to_string);
+        }
+        let request_id = record.request_id.clone();
+        // 不提前 take record：若结算 await 被取消，Drop 必须仍可重试同一个幂等决定。
+        let settlement = if self.transcription {
+            billing::settle_transcribe(&self.pool, &request_id, self.decision.unwrap_or(false)).await
+        } else {
+            billing::settle_audio(&self.pool, &request_id, self.decision.unwrap_or(false)).await
+        };
+        let (amount, status) = match settlement {
+            Ok(settlement) => (settlement.price_usd_micros.unwrap_or(0), settlement.status),
+            Err(_) => {
+                eprintln!("SaaS audio settlement requires reconciliation: {request_id}");
+                let _ = billing::settle(&self.pool, &request_id, None, true).await;
+                (0, "pending_review".to_string())
+            }
+        };
+        let record = self.record.as_mut().expect("pending audio record");
+        record.amount_usd_micros = amount;
+        record.settlement_status = status;
+        record.duration_ms = self.started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+        if self.runtime.logs.enqueue(record.clone()).await.is_err() {
+            eprintln!("SaaS request log queue rejected a completed audio request");
+        }
+        self.record = None;
+    }
+}
+
+impl Drop for AudioCompletion {
+    fn drop(&mut self) {
+        if self.record.is_none() {
+            return;
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let mut pending = Self {
+                pool: self.pool.clone(),
+                runtime: self.runtime.clone(),
+                started: self.started,
+                record: self.record.take(),
+                decision: self.decision,
+                transcription: self.transcription,
+            };
+            handle.spawn(async move {
+                pending.complete(false, Some("upstream_interrupted")).await;
+            });
+        }
+    }
 }
 
 struct Completion {
