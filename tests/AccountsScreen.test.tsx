@@ -390,10 +390,11 @@ function renderScreen(
   initialView: "in_pool" | "out_of_pool" | "archived" = "out_of_pool",
   sidebarCollapsed = false,
   queryClient = createQueryClient(),
+  capabilityFilter?: string,
 ) {
   const result = render(
     <QueryClientProvider client={queryClient}>
-      <AccountsScreen platform={platform} sidebarCollapsed={sidebarCollapsed} />
+      <AccountsScreen capabilityFilter={capabilityFilter} platform={platform} sidebarCollapsed={sidebarCollapsed} />
     </QueryClientProvider>,
   );
   if (initialView !== "in_pool") {
@@ -3520,6 +3521,45 @@ describe("AccountsScreen", () => {
       "Could not find a cc-switch configuration on this machine",
     );
     expect(screen.getByRole("button", { name: "导入所选账号" })).toBeDisabled();
+  });
+
+  it.each([
+    ["audio.generate", ["openai", "minimax"], "minimax", "speech-02-hd"],
+    ["video.generate", ["kling", "ark", "minimax", "zhipu", "sora"], "kling", "kling-v1"],
+  ])("creates usable media accounts from the %s segment", async (capability, dialects, dialect, model) => {
+    renderScreen("codex", "out_of_pool", false, createQueryClient(), capability as string);
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "API 账号" }));
+    const select = screen.getByLabelText("接口格式");
+    expect(within(select).getAllByRole("option").map((option) => option.getAttribute("value"))).toEqual(dialects);
+    await userEvent.selectOptions(select, dialect as string);
+    await userEvent.type(screen.getByLabelText("API 账号名称"), "Media provider");
+    await userEvent.type(screen.getByLabelText("API Key"), "sk-media");
+    await userEvent.clear(screen.getByLabelText("Base URL"));
+    await userEvent.type(screen.getByLabelText("Base URL"), "https://api.example.com/v1");
+    if (!screen.queryByLabelText("请求模型 1")) {
+      await userEvent.click(screen.getByRole("button", { name: "新增映射" }));
+    }
+    await userEvent.type(screen.getByLabelText("请求模型 1"), "public-media");
+    fireEvent.change(screen.getByLabelText("上游模型 1"), { target: { value: model } });
+    await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
+    await waitFor(() => expect(createApiRouteCredential).toHaveBeenCalled());
+    const payload = vi.mocked(createApiRouteCredential).mock.calls[0][0];
+    expect(payload.interface_format).toBe(dialect);
+    expect(payload.platform).toBe("codex");
+    expect(JSON.parse(payload.model_mappings_json ?? "[]")).toEqual([
+      expect.objectContaining({ from: "public-media", to: model, capabilities: [capability] }),
+    ]);
+  });
+
+  it("requires a populated media mapping before saving a TTS account", async () => {
+    renderScreen("codex", "out_of_pool", false, createQueryClient(), "audio.generate");
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.type(screen.getByLabelText("API 账号名称"), "Empty TTS");
+    await userEvent.type(screen.getByLabelText("API Key"), "sk-media");
+    await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("媒体账号至少需要一条完整的模型映射");
+    expect(createApiRouteCredential).not.toHaveBeenCalled();
   });
 
   it("shows readable interface format labels for OpenAI and Claude options", async () => {

@@ -146,6 +146,36 @@ pub(crate) async fn load_video_task(
     VideoGenerationRepository::get_task(&state.pool, task_id).await
 }
 
+/// 普通池 key 只能读取同池账号提交的直连任务；SaaS 任务走用户归属校验。
+pub(crate) async fn authorize_video_task_read(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Result<(), Response> {
+    let key = crate::services::route_proxy_service::extract_inbound_api_key(headers, None)
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "invalid_key", "A valid pool key is required"))?;
+    let platform = RouteProxyKeyRepository::get_platform_by_key(&state.pool, &key).await
+        .map_err(app_error_response)?
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "invalid_key", "A valid pool key is required"))?;
+    let Some(task_id) = video_task_id_from_path(uri.path())
+        .or_else(|| openai_video_content_id_from_path(uri.path()))
+        .or_else(|| openai_video_id_from_path(uri.path()))
+    else {
+        return Ok(());
+    };
+    let task = load_video_task(state, &task_id).await.map_err(app_error_response)?;
+    let task_platform: Option<String> = match task.credential_id.as_deref() {
+        Some(id) => sqlx::query_scalar("SELECT platform FROM route_credentials WHERE id=?")
+            .bind(id).fetch_optional(&state.pool).await
+            .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "task_scope", "Could not verify video task scope"))?,
+        None => None,
+    };
+    if task.owner_user_id.is_some() || task_platform.as_deref() != Some(platform.as_str()) {
+        return Err(error_response(StatusCode::FORBIDDEN, "task_scope", "This pool key cannot access the video task"));
+    }
+    Ok(())
+}
+
 /// OpenAI 原生契约的任务对象体（`GET /v1/videos/{video_id}` 的响应）。
 ///
 /// 同步、无副作用，所以能直接拿任务行单测。
@@ -644,6 +674,24 @@ fn validation(code: &'static str, message: &str) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn video_task_reads_reject_keys_from_other_pools_and_saas_owned_tasks() {
+        use crate::videogen::models::NewVideoTask;
+        let state = test_state().await;
+        sqlx::query("INSERT INTO route_credentials(id,platform,kind,display_name,status,secret_payload_json,config_json,created_at,updated_at) VALUES('task-account','codex','api','video','ok','{}','{}','2026-01-01','2026-01-01')").execute(&state.pool).await.unwrap();
+        VideoGenerationRepository::create_task(&state.pool, NewVideoTask { task_id:"scope-task".into(), session_id:None, message_id:None, model:"m".into(), upstream_model:None, dialect:"kling".into(), credential_id:Some("task-account".into()), upstream_task_id:Some("up".into()), duration_seconds:Some(5), size:None, callback_url:None, owner_user_id:None }).await.unwrap();
+        RouteProxyKeyRepository::ensure_platform_key(&state.pool, "codex", "sk-codex").await.unwrap();
+        RouteProxyKeyRepository::ensure_platform_key(&state.pool, "claude", "sk-claude").await.unwrap();
+        let uri: Uri = "/v1/videos/scope-task".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer sk-claude".parse().unwrap());
+        assert_eq!(authorize_video_task_read(&state, &headers, &uri).await.unwrap_err().status(), StatusCode::FORBIDDEN);
+        headers.insert("authorization", "Bearer sk-codex".parse().unwrap());
+        assert!(authorize_video_task_read(&state, &headers, &uri).await.is_ok());
+        sqlx::query("UPDATE videogen_tasks SET owner_user_id='tenant' WHERE task_id='scope-task'").execute(&state.pool).await.unwrap();
+        assert_eq!(authorize_video_task_read(&state, &headers, &uri).await.unwrap_err().status(), StatusCode::FORBIDDEN);
+    }
 
     #[test]
     fn recognizes_submit_and_status_paths() {

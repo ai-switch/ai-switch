@@ -222,6 +222,8 @@ import {
 } from "../lib/agentRouterGpt6";
 import { getTransport, isDesktop, isTauriRuntime } from "../lib/transport";
 import { fetchRouteProxyModels } from "../lib/routeProxyModels";
+import { AUDIO_CAPABILITY, AUDIO_DIALECTS } from "../lib/audioPlatforms";
+import { VIDEO_CAPABILITY, VIDEO_DIALECTS } from "../lib/videoPlatforms";
 import { openExternal } from "../lib/openExternal";
 import { copySensitiveText } from "../lib/routeCredentialTransfer";
 import {
@@ -868,7 +870,13 @@ function apiKeyLines(value: string) {
     .filter(Boolean);
 }
 
-function defaultInterfaceFormat(platform: PlatformKey): InterfaceFormat {
+function defaultInterfaceFormat(platform: PlatformKey, capabilityFilter?: string): InterfaceFormat {
+  if (capabilityFilter === VIDEO_CAPABILITY) {
+    return "kling";
+  }
+  if (capabilityFilter === AUDIO_CAPABILITY) {
+    return "openai";
+  }
   if (platform === "claude") {
     return "anthropic";
   }
@@ -882,7 +890,13 @@ function defaultInterfaceFormat(platform: PlatformKey): InterfaceFormat {
   return "openai";
 }
 
-function interfaceFormatsForPlatform(platform: PlatformKey): InterfaceFormat[] {
+function interfaceFormatsForPlatform(platform: PlatformKey, capabilityFilter?: string): InterfaceFormat[] {
+  if (capabilityFilter === AUDIO_CAPABILITY) {
+    return AUDIO_DIALECTS.map((item) => item.dialect);
+  }
+  if (capabilityFilter === VIDEO_CAPABILITY) {
+    return VIDEO_DIALECTS.map((item) => item.dialect);
+  }
   // Gemini CLI's inbound traffic is never bridged, so its pool can only hold
   // gemini accounts.
   if (platform === "gemini") {
@@ -900,8 +914,8 @@ function interfaceFormatsForPlatform(platform: PlatformKey): InterfaceFormat[] {
   return routeInterfaceFormats;
 }
 
-function shouldShowInterfaceFormatSelect(platform: PlatformKey) {
-  return interfaceFormatsForPlatform(platform).length > 1;
+function shouldShowInterfaceFormatSelect(platform: PlatformKey, capabilityFilter?: string) {
+  return interfaceFormatsForPlatform(platform, capabilityFilter).length > 1;
 }
 
 function isAnthropicInterfaceFormat(value: InterfaceFormat | string) {
@@ -985,8 +999,23 @@ function anthropicApiKeyFieldDescription(value: AnthropicApiKeyField) {
   return anthropicApiKeyFields.find((field) => field.value === value)?.description ?? "";
 }
 
-function defaultModelMappings(_platform: PlatformKey): ModelMapping[] {
-  return [];
+function isMediaCapability(capability?: string): boolean {
+  return capability === AUDIO_CAPABILITY || capability === VIDEO_CAPABILITY;
+}
+
+function mappingsWithMediaCapability(mappings: ModelMapping[], capability?: string): ModelMapping[] {
+  return isMediaCapability(capability)
+    ? mappings.map((mapping) => ({
+        ...mapping,
+        capabilities: Array.from(new Set([...(mapping.capabilities ?? []), capability!])),
+      }))
+    : mappings;
+}
+
+function defaultModelMappings(_platform: PlatformKey, capability?: string): ModelMapping[] {
+  return isMediaCapability(capability)
+    ? mappingsWithMediaCapability([{ from: "", to: "", label: null }], capability)
+    : [];
 }
 
 function defaultRequestedModel(platform: PlatformKey, interfaceFormat?: InterfaceFormat | string) {
@@ -2100,6 +2129,7 @@ function apiPreviewJsonWithFields(
 }
 
 type ModelMappingsEditorProps = {
+  capabilityFilter?: string,
   error?: string | null;
   fetchError?: string | null;
   fetchedModels?: FetchedRouteModel[];
@@ -2357,6 +2387,7 @@ function CodexMappingCapabilityFields({
 }
 
 function ModelMappingsEditor({
+  capabilityFilter,
   error,
   fetchError,
   fetchedModels = [],
@@ -2418,7 +2449,7 @@ function ModelMappingsEditor({
     const next = rows.map((mapping, rowIndex) =>
       rowIndex === index ? { ...mapping, ...patch } : mapping,
     );
-    onChange(next);
+    onChange(mappingsWithMediaCapability(next, capabilityFilter));
   };
 
   const removeRow = (index: number) => {
@@ -2427,11 +2458,11 @@ function ModelMappingsEditor({
   };
 
   const addRow = () => {
-    onChange([...rows, { from: "", to: "", label: null }]);
+    onChange(mappingsWithMediaCapability([...rows, { from: "", to: "", label: null }], capabilityFilter));
   };
 
   const oneClickSetup = () => {
-    onChange(buildOneClickMappings(fetchedModels, rows));
+    onChange(mappingsWithMediaCapability(buildOneClickMappings(fetchedModels, rows), capabilityFilter));
   };
 
   return (
@@ -2602,6 +2633,16 @@ function ModelMappingsEditor({
                 </button>
               </div>
             );
+            if (isMediaCapability(capabilityFilter)) {
+              return (
+                <div className="grid gap-2 rounded-lg border border-stone-200 bg-white p-2" key={rowKey}>
+                  {rowControls}
+                  <span className="text-[11px] font-medium text-stone-500">
+                    模型能力：{capabilityFilter === VIDEO_CAPABILITY ? "视频生成" : "语音合成"}
+                  </span>
+                </div>
+              );
+            }
             if (!isCodex) {
               return (
                 <div className="grid gap-2 rounded-lg border border-stone-200 bg-white p-2" key={rowKey}>
@@ -3504,7 +3545,7 @@ export function AccountsScreen({
   );
   const [apiBaseUrlAdjustment, setApiBaseUrlAdjustment] = useState<CodexBaseUrlAdjustment | null>(null);
   const [apiInterfaceFormat, setApiInterfaceFormat] = useState<InterfaceFormat>(() =>
-    defaultInterfaceFormat(activePlatform),
+    defaultInterfaceFormat(activePlatform, capabilityFilter),
   );
   const [apiResponsesCustomToolCompat, setApiResponsesCustomToolCompat] = useState(false);
   const [apiForceReasoningContent, setApiForceReasoningContent] = useState(false);
@@ -3517,7 +3558,7 @@ export function AccountsScreen({
   const [apiKeyField, setApiKeyField] = useState<AnthropicApiKeyField>(() =>
     defaultAnthropicApiKeyFieldForCreate(activePlatform),
   );
-  const [apiMappings, setApiMappings] = useState<ModelMapping[]>(() => defaultModelMappings(activePlatform));
+  const [apiMappings, setApiMappings] = useState<ModelMapping[]>(() => defaultModelMappings(activePlatform, capabilityFilter));
   const [apiMappingsError, setApiMappingsError] = useState<string | null>(null);
   const [apiFetchedModels, setApiFetchedModels] = useState<FetchedRouteModel[]>([]);
   const [apiFetchModelsError, setApiFetchModelsError] = useState<string | null>(null);
@@ -4216,7 +4257,7 @@ export function AccountsScreen({
   // Also used after a successful save, so anything added to that form belongs
   // here — a field left out is one that survives into the next account.
   const resetCreateForm = useCallback(() => {
-    const nextInterfaceFormat = defaultInterfaceFormat(activePlatform);
+    const nextInterfaceFormat = defaultInterfaceFormat(activePlatform, capabilityFilter);
     setOfficialText(defaultOfficialJson(activePlatform));
     setOfficialBatchName("");
     setCodexOAuthOpen(false);
@@ -4239,14 +4280,14 @@ export function AccountsScreen({
     setApiBaseUrl(activePlatform === "grok" ? "https://api.x.ai/v1" : "https://api.example.com/v1");
     setApiBaseUrlAdjustment(null);
     setApiKeyField(defaultAnthropicApiKeyFieldForCreate(activePlatform));
-    setApiMappings(defaultModelMappings(activePlatform));
+    setApiMappings(defaultModelMappings(activePlatform, capabilityFilter));
     setApiMappingsError(null);
     setApiFetchedModels([]);
     setApiFetchModelsError(null);
     setApiPreviewJson("");
     setApiRelayBalance(emptyRelayBalanceForm);
     setApiRelayBalancePanelAccount(emptyRelayBalancePanelAccount);
-  }, [activePlatform]);
+  }, [activePlatform, capabilityFilter]);
 
   useEffect(() => {
     resetCreateForm();
@@ -4772,6 +4813,14 @@ export function AccountsScreen({
         setApiMappingsError(normalizedMappings.error);
         setCreateTab("basic");
         throw new Error(normalizedMappings.error);
+      }
+      // 媒体账号靠 `capabilities` 里的能力声明被候选过滤认出；一条完整映射都没有
+      // 的账号保存后不会出现在它自己的分段里，宁可在创建时拦下。
+      if (isMediaCapability(capabilityFilter) && !normalizedMappings.mappings.some((mapping) => mapping.from.trim() && mapping.to.trim())) {
+        const message = "媒体账号至少需要一条完整的模型映射";
+        setApiMappingsError(message);
+        setCreateTab("basic");
+        throw new Error(message);
       }
       setApiMappingsError(null);
       const createInterfaceFormat = resolveAgentRouterInterfaceFormat(
@@ -9549,7 +9598,7 @@ export function AccountsScreen({
                         value={apiBaseUrl}
                       />
                     </label>
-                    {shouldShowInterfaceFormatSelect(activePlatform) ? (
+                    {shouldShowInterfaceFormatSelect(activePlatform, capabilityFilter) ? (
                       <label className={labelClass}>
                         接口格式
                         <select
@@ -9573,7 +9622,7 @@ export function AccountsScreen({
                           }}
                           value={apiInterfaceFormat}
                         >
-                          {interfaceFormatsForPlatform(activePlatform).map((format) => (
+                          {interfaceFormatsForPlatform(activePlatform, capabilityFilter).map((format) => (
                             <option key={format} value={format}>
                               {interfaceFormatLabel(format)}
                             </option>
@@ -9607,6 +9656,7 @@ export function AccountsScreen({
                       </label>
                     ) : null}
                     <ModelMappingsEditor
+                      capabilityFilter={capabilityFilter}
                       error={apiMappingsError}
                       fetchError={apiFetchModelsError}
                       fetchedModels={apiFetchedModels}
@@ -9838,7 +9888,7 @@ export function AccountsScreen({
             )}
 
             {createMutation.error && (
-              <p className="mt-4 rounded-xl bg-red-50 p-3 text-[13px] font-semibold text-red-700">
+              <p role="alert" className="mt-4 rounded-xl bg-red-50 p-3 text-[13px] font-semibold text-red-700">
                 {formatApiError(createMutation.error, "新增账号失败。")}
               </p>
             )}
@@ -10491,7 +10541,7 @@ export function AccountsScreen({
                       value={editApiBaseUrl}
                     />
                   </label>
-                  {shouldShowInterfaceFormatSelect(activePlatform) ? (
+                  {shouldShowInterfaceFormatSelect(activePlatform, capabilityFilter) ? (
                     <label className={labelClass}>
                       接口格式
                       <select
@@ -10516,10 +10566,10 @@ export function AccountsScreen({
                         value={editApiInterfaceFormat}
                       >
                         {[
-                          ...(interfaceFormatsForPlatform(activePlatform).includes(editApiInterfaceFormat)
+                          ...(interfaceFormatsForPlatform(activePlatform, capabilityFilter).includes(editApiInterfaceFormat)
                             ? []
                             : [editApiInterfaceFormat]),
-                          ...interfaceFormatsForPlatform(activePlatform),
+                          ...interfaceFormatsForPlatform(activePlatform, capabilityFilter),
                         ].map((format) => (
                           <option key={format} value={format}>
                             {interfaceFormatLabel(format)}
@@ -10554,6 +10604,7 @@ export function AccountsScreen({
                     </label>
                   ) : null}
                   <ModelMappingsEditor
+                    capabilityFilter={capabilityFilter}
                     error={editModelMappingsError}
                     fetchError={editFetchModelsError}
                     fetchedModels={editFetchedModels}

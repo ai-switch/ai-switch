@@ -166,7 +166,9 @@ async fn shared_fallback(
         {
             return crate::saas::proxy::handle(&context.state, method, headers, uri, body).await;
         }
-        if saas_config.enabled && !crate::web::auth::is_authorized(&headers, &context.token) {
+        if (saas_config.enabled || crate::services::route_proxy_service::is_video_generation_path(uri.path()))
+            && !crate::web::auth::is_authorized(&headers, &context.token)
+        {
             let valid = match crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository::list_all(&context.state.pool).await {
                 Ok(keys) => key.as_ref().is_some_and(|key| keys.iter().any(|(stored,_)|stored==key)),
                 Err(_) => false,
@@ -197,6 +199,11 @@ async fn shared_fallback(
             // `proxy_handler` 的处理保持一致）。
             if !crate::web::auth::is_authorized(&headers, &context.token) {
                 headers.remove("x-ai-switch-platform");
+                if method == Method::GET {
+                    if let Err(response) = crate::web::video_routes::authorize_video_task_read(&context.state, &headers, &uri).await {
+                        return response;
+                    }
+                }
             }
             return crate::web::video_routes::handle_video_request(
                 &context.state,
@@ -431,6 +438,20 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::{Duration, SystemTime};
     use tempfile::{tempdir, TempDir};
+
+    #[tokio::test]
+    async fn video_endpoints_require_a_valid_key_even_when_saas_is_disabled() {
+        let (address, handle, state, _temp) = spawn_test_router_with_state(Arc::new(AtomicBool::new(true)), "secret").await;
+        RouteProxyService::set_route_access_enabled(&state.route_proxy, true).await;
+        let client = reqwest::Client::new();
+        for path in ["/v1/video/generations/known-task", "/v1/videos/known-task", "/v1/videos/known-task/content"] {
+            let response = client.get(format!("http://{address}{path}")).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path} must authenticate before loading task");
+        }
+        let response = client.post(format!("http://{address}/v1/video/generations")).json(&json!({"platform":"codex","model":"m","prompt":"p"})).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        handle.abort();
+    }
 
     async fn spawn_test_router(
         sensitive_commands_enabled: bool,
