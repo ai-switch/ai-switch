@@ -1344,15 +1344,15 @@ async fn load_account_credential(
     platform: &str,
     account_id: &str,
 ) -> Result<SelectedCredential, AppError> {
+    // 统一账号池（G-P8 P4a）：按 id 精确加载；platform 参数是对接身份，不再过滤存储。
     let row = sqlx::query(
         "SELECT id, platform, kind, display_name, status, route_priority, max_concurrency,
                 secret_payload_json, config_json,
                 next_retry_at, cooldown_until
          FROM route_credentials
-         WHERE id = ? AND platform = ?",
+         WHERE id = ?",
     )
     .bind(account_id)
-    .bind(platform)
     .fetch_optional(pool)
     .await
     .map_err(|err| AppError::Database {

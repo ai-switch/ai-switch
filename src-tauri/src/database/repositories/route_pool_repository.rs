@@ -35,6 +35,11 @@ fn request_stat_columns(metadata_json: &str) -> (Option<i64>, Option<i64>) {
     (success, duration_ms)
 }
 
+/// 统一账号池（G-P8 P4a）的池身份：所有账号、组、成员都在这一个池里。
+/// 服务层传入的 platform 参数语义是「智能体对接身份」（给哪个客户端配置/鉴权），
+/// 凡是**找池资源**（组、成员、游标、模型模式、基线模型）的查询一律用它归一。
+pub(crate) const UNIFIED_POOL_PLATFORM: &str = "codex";
+
 impl RoutePoolRepository {
     pub async fn migrate_legacy_pool_views(pool: &SqlitePool) -> Result<(), AppError> {
         let mut tx =
@@ -175,11 +180,165 @@ impl RoutePoolRepository {
         Ok(())
     }
 
+    /// 统一账号池（G-P8 P4a）的启动收敛：迁移 202611040002 把池身份统一为
+    /// `codex` 后，这里删除无 SaaS 引用的旧平台组并把其成员并入 codex 同类视图组。
+    /// SaaS 引用组的成员原地保留（销售分组的计费候选必须有成员）。
+    ///
+    /// 不放在迁移 SQL 里做的原因：判断「组是否被 SaaS 引用」需要查 SaaS 表，而
+    /// SaaS 表由独立的 SaaS 迁移链创建、可能在核心迁移执行时尚不存在（全新库）。
+    /// 本函数与 `migrate_legacy_pool_views` 同批在 run_migrations 后执行，幂等。
+    pub async fn converge_legacy_pool_groups(pool: &SqlitePool) -> Result<(), AppError> {
+        // 绝大多数启动（已收敛过的库）无事可做：先只读检查，避免为空转拿写锁
+        // 与并发连接（备份/恢复、双开）抢锁。
+        let pending: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM route_pool_groups WHERE legacy_group = 1")
+                .fetch_one(pool)
+                .await
+                .map_err(|error| {
+                    super::route_credential_repository::database_error(
+                        "database.legacy_pool_converge",
+                        "Could not count legacy pool groups",
+                        error,
+                    )
+                })?;
+        if pending == 0 {
+            return Ok(());
+        }
+        let mut tx = pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|err| AppError::Database {
+                code: "database.legacy_pool_converge_tx",
+                message: "Could not start legacy pool group convergence".to_string(),
+                details: Some(err.to_string()),
+                recoverable: false,
+            })?;
+        let pending: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM route_pool_groups WHERE legacy_group = 1")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| {
+                    super::route_credential_repository::database_error(
+                        "database.legacy_pool_converge",
+                        "Could not count legacy pool groups",
+                        error,
+                    )
+                })?;
+        if pending > 0 {
+            // SaaS 迁移链可能尚未执行（全新库）：表不存在 = 从无 SaaS 引用，
+            // 所有旧平台组直接收敛。
+            let saas_tables: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'                    AND name IN ('saas_api_keys', 'saas_group_settings')",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| {
+                super::route_credential_repository::database_error(
+                    "database.legacy_pool_converge",
+                    "Could not check SaaS table availability",
+                    error,
+                )
+            })?;
+            let referenced: Vec<String> = if saas_tables == 0 {
+                Vec::new()
+            } else {
+                sqlx::query_scalar(
+                    "SELECT group_id FROM saas_api_keys                      UNION SELECT group_id FROM saas_group_settings",
+                )
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|error| {
+                    super::route_credential_repository::database_error(
+                        "database.legacy_pool_converge",
+                        "Could not list SaaS-referenced groups",
+                        error,
+                    )
+                })?
+            };
+            let now = crate::saas::repository::now();
+
+            // 无 SaaS 引用的旧平台组：成员并入 codex 同类视图组（out/archived 保持
+            // 不下线状态），然后删组。引用组的成员原地保留。
+            let mut move_members =
+                sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                    "UPDATE route_pool_members SET group_id = CASE                        WHEN group_id LIKE '%-out' THEN 'codex-out'                        WHEN group_id LIKE '%-archived' THEN 'codex-archived'                        ELSE 'codex-default' END, updated_at = ",
+                );
+                move_members.push_bind(&now);
+                move_members.push(
+                    " WHERE group_id IN (SELECT id FROM route_pool_groups WHERE legacy_group = 1)",
+                );
+                if referenced.is_empty() {
+                    move_members.push(" AND true");
+                } else {
+                    move_members.push(" AND group_id NOT IN (");
+                    let mut separated = move_members.separated(", ");
+                    for group_id in &referenced {
+                        separated.push_bind(group_id);
+                    }
+                    separated.push_unseparated(")");
+                }
+            move_members
+                .build()
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| {
+                    super::route_credential_repository::database_error(
+                        "database.legacy_pool_converge",
+                        "Could not move legacy pool group memberships",
+                        error,
+                    )
+                })?;
+            let mut delete_groups =
+                sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                    "DELETE FROM route_pool_groups WHERE legacy_group = 1",
+                );
+                if referenced.is_empty() {
+                    delete_groups.push(" AND true");
+                } else {
+                    delete_groups.push(" AND id NOT IN (");
+                    let mut separated = delete_groups.separated(", ");
+                    for group_id in &referenced {
+                        separated.push_bind(group_id);
+                    }
+                    separated.push_unseparated(")");
+                }
+            delete_groups
+                .build()
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| {
+                    super::route_credential_repository::database_error(
+                        "database.legacy_pool_converge",
+                        "Could not delete legacy pool groups",
+                        error,
+                    )
+                })?;
+            sqlx::query("UPDATE route_pool_groups SET legacy_group = 0")
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| {
+                    super::route_credential_repository::database_error(
+                        "database.legacy_pool_converge",
+                        "Could not clear legacy pool group markers",
+                        error,
+                    )
+                })?;
+        }
+        tx.commit().await.map_err(|err| AppError::Database {
+            code: "database.legacy_pool_converge_commit",
+            message: "Could not commit legacy pool group convergence".to_string(),
+            details: Some(err.to_string()),
+            recoverable: false,
+        })?;
+        Ok(())
+    }
+
     pub async fn list_groups(
         pool: &SqlitePool,
         platform: &str,
         include_deleted: bool,
     ) -> Result<Vec<RoutePoolGroup>, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let mut query = QueryBuilder::<Sqlite>::new(
             "SELECT g.id, g.platform, g.name, g.sort_order, g.is_internal, g.is_active,
                     g.created_at, g.updated_at, COUNT(m.route_credential_id) AS account_count
@@ -237,6 +396,7 @@ impl RoutePoolRepository {
         pool: &SqlitePool,
         platform: &str,
     ) -> Result<Option<String>, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         sqlx::query_scalar(
             "SELECT id FROM route_pool_groups
              WHERE platform = ? AND is_active = 1 AND deleted_at IS NULL
@@ -258,6 +418,7 @@ impl RoutePoolRepository {
         platform: &str,
         credential_id: &str,
     ) -> Result<Option<String>, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         sqlx::query_scalar(
             "SELECT group_id FROM route_pool_members
              WHERE platform = ? AND route_credential_id = ?",
@@ -278,6 +439,7 @@ impl RoutePoolRepository {
         pool: &SqlitePool,
         platform: &str,
     ) -> Result<Vec<String>, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let rows = sqlx::query(
             "SELECT rpm.route_credential_id
              FROM route_pool_members rpm
@@ -305,6 +467,7 @@ impl RoutePoolRepository {
         pool: &SqlitePool,
         group_id: &str,
     ) -> Result<Vec<String>, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         sqlx::query_scalar(
             "SELECT route_credential_id
              FROM route_pool_members
@@ -328,6 +491,7 @@ impl RoutePoolRepository {
         name: &str,
         is_internal: bool,
     ) -> Result<String, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         let sort_order = sqlx::query_scalar::<_, i64>(
@@ -374,6 +538,7 @@ impl RoutePoolRepository {
         platform: &str,
         ids: &[String],
     ) -> Result<HashSet<String>, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let mut seen = HashSet::with_capacity(ids.len());
         let unique_ids = ids
             .iter()
@@ -506,6 +671,7 @@ impl RoutePoolRepository {
         group_id: &str,
         account_ids: &[String],
     ) -> Result<(), AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let mut tx = pool.begin().await.map_err(|err| AppError::Database {
             code: "database.route_pool_group_members_tx",
             message: "Could not start route group member update".to_string(),
@@ -644,6 +810,7 @@ impl RoutePoolRepository {
         platform: &str,
         account_ids: &[String],
     ) -> Result<Vec<String>, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let group_id = Self::active_group_id(pool, platform)
             .await?
             .ok_or_else(|| AppError::Validation {
@@ -664,6 +831,7 @@ impl RoutePoolRepository {
         platform: &str,
         credential_ids: &[String],
     ) -> Result<usize, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         if credential_ids.is_empty() {
             return Ok(0);
         }
@@ -692,6 +860,7 @@ impl RoutePoolRepository {
         platform: &str,
         credential_ids: &[String],
     ) -> Result<usize, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         if credential_ids.is_empty() {
             return Ok(0);
         }
@@ -773,6 +942,7 @@ impl RoutePoolRepository {
         pool: &SqlitePool,
         platform: &str,
     ) -> Result<Vec<RoutePoolMemberAccount>, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let group_id = Self::active_group_id(pool, platform)
             .await?
             .ok_or_else(|| AppError::Validation {
@@ -788,6 +958,7 @@ impl RoutePoolRepository {
         pool: &SqlitePool,
         group_id: &str,
     ) -> Result<Vec<RoutePoolMemberAccount>, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let rows = sqlx::query(
             "SELECT a.id, a.display_name, a.status, a.route_priority, a.max_concurrency
              FROM route_pool_members rpm
@@ -821,6 +992,7 @@ impl RoutePoolRepository {
     /// value — reads as [`PoolModelMode::Aggregate`]: this switch must never be
     /// the thing that makes the pool unusable.
     pub async fn model_mode(pool: &SqlitePool, platform: &str) -> Result<PoolModelMode, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let row = sqlx::query("SELECT mode FROM route_pool_model_modes WHERE platform = ?")
             .bind(platform)
             .fetch_optional(pool)
@@ -842,6 +1014,7 @@ impl RoutePoolRepository {
         platform: &str,
         mode: PoolModelMode,
     ) -> Result<(), AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO route_pool_model_modes (platform, mode, updated_at)
@@ -869,6 +1042,7 @@ impl RoutePoolRepository {
         pool: &SqlitePool,
         platform: &str,
     ) -> Result<Vec<String>, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let fallback = default_models(platform);
         let row =
             sqlx::query("SELECT models_json FROM route_pool_baseline_models WHERE platform = ?")
@@ -894,6 +1068,7 @@ impl RoutePoolRepository {
         platform: &str,
         models: &[String],
     ) -> Result<(), AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let normalized = normalize_models(models)?;
         let models = if normalized.is_empty() {
             default_models(platform)
@@ -922,6 +1097,7 @@ impl RoutePoolRepository {
         Ok(())
     }
     pub async fn next_cursor_index(pool: &SqlitePool, platform: &str) -> Result<i64, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let row = sqlx::query("SELECT next_index FROM route_pool_cursors WHERE platform = ?")
             .bind(platform)
             .fetch_optional(pool)
@@ -941,6 +1117,7 @@ impl RoutePoolRepository {
         platform: &str,
         next_index: i64,
     ) -> Result<(), AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO route_pool_cursors (platform, next_index, updated_at)
@@ -1136,6 +1313,7 @@ impl RoutePoolRepository {
         request_page: i64,
         request_page_size: i64,
     ) -> Result<RoutePoolStats, AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
         let usage_since_clause = if since.is_some() {
             " AND ue.created_at >= ?"
         } else {
@@ -1385,12 +1563,12 @@ mod tests {
                 .unwrap(),
             PoolModelMode::Precise
         );
-        // Per platform: switching codex must not move claude.
+        // 统一池（G-P8 P4a）：模型模式是池级设置，任何对接平台读到的都是同一个值。
         assert_eq!(
             RoutePoolRepository::model_mode(&pool, "claude")
                 .await
                 .unwrap(),
-            PoolModelMode::Aggregate
+            PoolModelMode::Precise
         );
 
         RoutePoolRepository::save_model_mode(&pool, "codex", PoolModelMode::Aggregate)
@@ -1641,11 +1819,9 @@ mod tests {
         for index in 0..21 {
             ids.push(create_credential(&pool, "codex", &format!("Credential {index}")).await);
         }
-        let other_platform_id = create_credential(&pool, "claude", "Claude credential").await;
+        // 统一池后没有"别的平台"：改用不入池的账号验证未选中成员不进 membership map。
+        let other_platform_id = create_credential(&pool, "codex", "Unpooled credential").await;
         RoutePoolRepository::replace_members(&pool, "codex", &[ids[0].clone(), ids[20].clone()])
-            .await
-            .unwrap();
-        RoutePoolRepository::replace_members(&pool, "claude", &[other_platform_id.clone()])
             .await
             .unwrap();
         sqlx::query(
@@ -1864,9 +2040,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(rows.len(), 2, "both platforms, archived included");
+        assert_eq!(rows.len(), 2, "both accounts, archived included");
+        // 统一账号池（G-P8 P4a）：两个账号都归属唯一池，事件平台列随账号归一。
         let platforms: HashSet<&str> = rows.iter().map(|row| row.platform.as_str()).collect();
-        assert!(platforms.contains("claude") && platforms.contains("codex"));
+        assert!(platforms.contains("codex") && platforms.len() == 1);
     }
 
     #[tokio::test]
@@ -2040,9 +2217,9 @@ mod tests {
     async fn append_members_tx_obeys_caller_rollback() {
         let pool = crate::database::create_memory_pool().await.unwrap();
         crate::database::run_migrations(&pool).await.unwrap();
-        let existing = create_credential(&pool, "claude", "Existing").await;
-        let appended = create_credential(&pool, "claude", "Appended").await;
-        RoutePoolRepository::replace_members(&pool, "claude", &[existing.clone()])
+        let existing = create_credential(&pool, "codex", "Existing").await;
+        let appended = create_credential(&pool, "codex", "Appended").await;
+        RoutePoolRepository::replace_members(&pool, "codex", &[existing.clone()])
             .await
             .unwrap();
 
@@ -2050,7 +2227,7 @@ mod tests {
         assert_eq!(
             RoutePoolRepository::append_members_tx(
                 &mut tx,
-                "claude",
+                "codex",
                 std::slice::from_ref(&appended),
             )
             .await
@@ -2061,7 +2238,7 @@ mod tests {
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM route_pool_members WHERE platform = ? AND route_credential_id = ?",
             )
-            .bind("claude")
+            .bind("codex")
             .bind(&appended)
             .fetch_one(&mut *tx)
             .await
@@ -2070,7 +2247,7 @@ mod tests {
         );
         tx.rollback().await.unwrap();
 
-        let members = RoutePoolRepository::list_member_ids(&pool, "claude")
+        let members = RoutePoolRepository::list_member_ids(&pool, "codex")
             .await
             .unwrap();
         assert_eq!(members, vec![existing]);
@@ -2104,11 +2281,12 @@ mod tests {
                 .unwrap(),
             vec![first.clone(), second.clone()]
         );
+        // 统一账号池后没有"外来平台"；未知账号仍然必须被拒绝。
         assert!(RoutePoolRepository::move_group_members(
             &pool,
             "codex",
             "codex-archived",
-            &[first.clone(), foreign]
+            &[first.clone(), "missing-account".to_string()]
         )
         .await
         .is_err());

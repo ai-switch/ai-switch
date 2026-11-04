@@ -5704,6 +5704,9 @@ async fn load_scoped_candidates(
     platform: &str,
     credential_ids: Option<&HashSet<String>>,
 ) -> Result<Vec<PoolCandidate>, AppError> {
+    // 统一账号池（G-P8 P4a）：候选一律从唯一池 `codex` 加载；传入的 platform 是
+    // 对接身份，只影响请求侧的能力/方言判断，不决定账号住在哪。
+    let platform = crate::database::repositories::route_pool_repository::UNIFIED_POOL_PLATFORM;
     if credential_ids.is_some_and(HashSet::is_empty) {
         return Ok(Vec::new());
     }
@@ -8702,6 +8705,34 @@ fn build_models_list_payload(
     build_models_list_payload_with_baseline(platform, credentials, mode, None)
 }
 
+/// 模型 id（展示名）→ 该模型映射声明的媒体能力并集。
+///
+/// 纯文本模型不进这张表 —— 客户端看到空 `capabilities` 即「文本模型」。
+fn declared_capabilities_by_model(credentials: &[SelectedCredential]) -> std::collections::HashMap<String, Vec<String>> {
+    let mut declared: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for credential in credentials {
+        let capability =
+            parse_model_capability_value(&serde_json::from_str::<Value>(&credential.config_json).unwrap_or(Value::Null));
+        for mapping in &capability.mappings {
+            let from = mapping.from.trim();
+            if from.is_empty() {
+                continue;
+            }
+            let entry = declared.entry(from.to_string()).or_default();
+            for capability in &mapping.capabilities {
+                let capability = capability.trim();
+                if !capability.is_empty()
+                    && !entry.iter().any(|existing| existing == capability)
+                {
+                    entry.push(capability.to_string());
+                }
+            }
+        }
+    }
+    declared
+}
+
 fn build_models_list_payload_with_baseline(
     platform: &str,
     credentials: &[SelectedCredential],
@@ -8709,6 +8740,7 @@ fn build_models_list_payload_with_baseline(
     baseline_models: Option<&[String]>,
 ) -> Value {
     let created = Utc::now().timestamp();
+    let declared = declared_capabilities_by_model(credentials);
     let inputs = credentials
         .iter()
         .map(|credential| CatalogMemberInput {
@@ -8737,6 +8769,12 @@ fn build_models_list_payload_with_baseline(
                 "object": "model",
                 "created": created,
                 "owned_by": "ai-switch",
+                // 模态声明：映射里写的能力并集；空数组 = 纯文本模型。
+                "capabilities": declared
+                    .get(entry.base_id.as_str())
+                    .or_else(|| declared.get(entry.id.as_str()))
+                    .cloned()
+                    .unwrap_or_default(),
             });
             if platform.eq_ignore_ascii_case("codex") {
                 let (supported_reasoning_levels, default_reasoning_level) =
@@ -8798,19 +8836,86 @@ fn json_models_list_response(
     json_models_list_response_with_baseline(platform, credentials, mode, _query, None)
 }
 
+/// `type` 查询参数 → 能力过滤。`text` = 无任何媒体能力声明。
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ModelsTypeFilter {
+    All,
+    Text,
+    Media(&'static str),
+}
+
+fn models_type_capability(query: Option<&str>) -> Result<ModelsTypeFilter, String> {
+    let Some(query) = query else {
+        return Ok(ModelsTypeFilter::All);
+    };
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if !key.eq_ignore_ascii_case("type") {
+            continue;
+        }
+        return match value.trim().to_ascii_lowercase().as_str() {
+            "text" => Ok(ModelsTypeFilter::Text),
+            "image" => Ok(ModelsTypeFilter::Media("image.generate")),
+            "video" => Ok(ModelsTypeFilter::Media("video.generate")),
+            "audio" => Ok(ModelsTypeFilter::Media("audio.generate")),
+            other => Err(other.to_string()),
+        };
+    }
+    Ok(ModelsTypeFilter::All)
+}
+
 fn json_models_list_response_with_baseline(
     platform: &str,
     credentials: &[SelectedCredential],
     mode: PoolModelMode,
-    _query: Option<&str>,
+    query: Option<&str>,
     baseline_models: Option<&[String]>,
 ) -> Response {
+    let requested = match models_type_capability(query) {
+        Ok(requested) => requested,
+        Err(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("content-type", "application/json")],
+                json!({
+                    "error": {
+                        "code": "route_proxy.unknown_model_type",
+                        "message": format!("Unknown models type '{other}'; supported: text, image, video, audio"),
+                        "type": "route_proxy_error",
+                    }
+                })
+                .to_string(),
+            )
+                .into_response();
+        }
+    };
     let payload = build_route_models_list_payload_with_baseline(
         platform,
         credentials,
         mode,
         baseline_models,
     );
+    // text 过滤需要看 capabilities 本身；其余按能力匹配。
+    let mut payload = payload;
+    if let Some(data) = payload["data"].as_array().cloned() {
+        let kept: Vec<Value> = data
+            .into_iter()
+            .filter(|entry| {
+                let empty = Vec::new();
+                let declared = entry["capabilities"].as_array().unwrap_or(&empty);
+                match requested {
+                    ModelsTypeFilter::All => true,
+                    ModelsTypeFilter::Text => declared.is_empty(),
+                    ModelsTypeFilter::Media(required) => declared
+                        .iter()
+                        .any(|item| item.as_str() == Some(required)),
+                }
+            })
+            .collect();
+        payload["data"] = json!(kept);
+    }
     (
         StatusCode::OK,
         [("content-type", "application/json")],
@@ -9785,6 +9890,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn models_payload_declares_capabilities_and_type_query_filters() {
+        // 注：ids 闭包改为 async 块调用（见下）。
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let text = api_credential_with_config(
+            "text-account",
+            r#"{"base_url":"https://api.example.com/v1","interface_format":"openai","model_mappings":[{"from":"gpt-5","to":"up-gpt"}]}"#,
+        );
+        let video = api_credential_with_config(
+            "video-account",
+            r#"{"base_url":"https://api.example.com/v1","interface_format":"kling","model_mappings":[{"from":"kling-v1","to":"kling-v1","capabilities":["video.generate"]}]}"#,
+        );
+        let payload = super::build_models_list_payload_with_baseline(
+            "codex",
+            &[text, video],
+            PoolModelMode::Aggregate,
+            None,
+        );
+        let entries = payload["data"].as_array().expect("data");
+        let find = |id: &str| {
+            entries
+                .iter()
+                .find(|entry| entry["id"] == id)
+                .unwrap_or_else(|| panic!("missing {id} in {entries:?}"))
+                .clone()
+        };
+        // 纯文本模型：capabilities 为空数组（文本是默认能力，不用媒体词表伪装）。
+        assert_eq!(find("gpt-5")["capabilities"], json!([]));
+        assert_eq!(find("kling-v1")["capabilities"], json!(["video.generate"]));
+
+        // type 过滤只保留声明了对应能力的模型；text = 无媒体能力。
+        let filter = |query: &str| {
+            super::json_models_list_response_with_baseline(
+                "codex",
+                &[
+                    api_credential_with_config(
+                        "text-account",
+                        r#"{"base_url":"https://api.example.com/v1","interface_format":"openai","model_mappings":[{"from":"gpt-5","to":"up-gpt"}]}"#,
+                    ),
+                    api_credential_with_config(
+                        "video-account",
+                        r#"{"base_url":"https://api.example.com/v1","interface_format":"kling","model_mappings":[{"from":"kling-v1","to":"kling-v1","capabilities":["video.generate"]}]}"#,
+                    ),
+                ],
+                PoolModelMode::Aggregate,
+                Some(query),
+                None,
+            )
+        };
+        async fn ids(response: axum::response::Response) -> Vec<String> {
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            value["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+        let video_only = ids(filter("type=video")).await;
+        assert_eq!(video_only, vec!["kling-v1".to_string()]);
+        let text_only = ids(filter("type=text")).await;
+        assert_eq!(text_only, vec!["gpt-5".to_string()]);
+        let response = filter("type=bogus");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
     async fn saved_baseline_models_change_the_models_payload_without_restart() {
         let pool = create_memory_pool().await.expect("pool");
         run_migrations(&pool).await.expect("migrations");

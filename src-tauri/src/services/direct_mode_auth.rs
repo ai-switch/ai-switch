@@ -195,7 +195,8 @@ pub(crate) fn render(
     existing: Option<&[u8]>,
     existing_auth: Option<&[u8]>,
 ) -> Result<RenderedDirectProfile, AppError> {
-    if !matches!(platform, "codex" | "claude") || !matches!(kind, "api" | "official") {
+    // platform 实参是直连客户端 key（"codex" / "claude_code"）。
+    if !matches!(platform, "codex" | "claude_code") || !matches!(kind, "api" | "official") {
         return Err(failure(
             "direct_mode.unsupported",
             "直连模式仅支持 Codex / Claude 的 API 和官方账号。",
@@ -210,7 +211,7 @@ pub(crate) fn render(
             .and_then(Value::as_str)
             .unwrap_or("");
         let supported = (platform == "codex" && dialect == "openai-responses")
-            || (platform == "claude" && dialect == "anthropic");
+            || (platform == "claude_code" && dialect == "anthropic");
         if !supported {
             return Err(failure("direct_mode.unsupported_protocol", "该账号协议不能被此客户端直接使用，请改用算力池精确模式（Codex 需要 Responses，Claude 需要 Anthropic）。"));
         }
@@ -494,7 +495,7 @@ mod tests {
     fn claude_api_removes_oauth_and_route_overrides_but_keeps_user_preferences() {
         let old = br#"{"permissions":{"allow":["Read"]},"apiKeyHelper":"old-helper","env":{"CLAUDE_CODE_OAUTH_TOKEN":"old", "ANTHROPIC_AUTH_TOKEN":"route-key", "EDITOR":"vim"},"aiSwitch":{"routeProxy":{"enabled":true}}}"#;
         let result = render(
-            "claude",
+            "claude_code",
             "api",
             r#"{"api_key":"test-key"}"#,
             &api_config("anthropic"),
@@ -519,7 +520,7 @@ mod tests {
     fn claude_official_emits_native_oauth_fields_and_preserves_other_credentials() {
         let secret = json!({"access_token":"at", "refresh_token":"rt"});
         let config = json!({"expired":"2099-01-01T00:00:00Z", "raw":{"scopes":["user:inference","user:profile"],"subscriptionType":"max"}});
-        let result = render("claude", "official", &secret.to_string(), &config.to_string(),
+        let result = render("claude_code", "official", &secret.to_string(), &config.to_string(),
             Some(br#"{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:19527","ANTHROPIC_AUTH_TOKEN":"route"}}"#),
             Some(br#"{"other":{"keep":true}}"#)).unwrap();
         let settings: Value = serde_json::from_slice(&result.config).unwrap();
@@ -540,7 +541,7 @@ mod tests {
     fn claude_api_base_does_not_duplicate_the_native_v1_messages_path() {
         let config = json!({"base_url":"https://upstream.example/anthropic/v1", "interface_format":"anthropic"});
         let rendered = render(
-            "claude",
+            "claude_code",
             "api",
             r#"{"api_key":"test-key"}"#,
             &config.to_string(),
@@ -567,7 +568,7 @@ mod tests {
         )
         .is_err());
         assert!(render(
-            "claude",
+            "claude_code",
             "api",
             r#"{"api_key":"test"}"#,
             &api_config("openai-responses"),
@@ -585,7 +586,7 @@ mod tests {
         )
         .is_err());
         assert!(render(
-            "claude",
+            "claude_code",
             "official",
             r#"{"access_token":"at"}"#,
             "{}",
@@ -607,7 +608,7 @@ mod tests {
         )
         .is_err());
         assert!(render(
-            "claude",
+            "claude_code",
             "api",
             r#"{"api_key":"test"}"#,
             &api_config("anthropic"),
@@ -616,7 +617,7 @@ mod tests {
         )
         .is_err());
         assert!(render(
-            "claude",
+            "claude_code",
             "api",
             r#"{"api_key":"test"}"#,
             &api_config("anthropic"),

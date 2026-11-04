@@ -370,6 +370,28 @@ async fn create_with_connection(
     max_concurrency: i64,
     external_source: Option<ExternalSourceRef<'_>>,
 ) -> Result<RouteCredential, AppError> {
+    // 统一账号池（G-P8 P4a）：凭据一律落在唯一池 `codex`；调用方传入的 platform
+    // 是「智能体对接身份」，不再决定存储归属——但仍是 provider 的来源：
+    // official 账号的厂商原本就由调用平台表达，api 账号按 base_url 识别预设。
+    let provider = match kind {
+        "official" => match platform {
+            "codex" => "openai",
+            other => other,
+        },
+        _ => {
+            let lower = config_json.to_ascii_lowercase();
+            if lower.contains("openrouter.ai") {
+                "openrouter"
+            } else if lower.contains("packycode") {
+                "packycode"
+            } else if lower.contains("agentrouter") {
+                "agentrouter"
+            } else {
+                "custom"
+            }
+        }
+    };
+    let platform = super::route_pool_repository::UNIFIED_POOL_PLATFORM;
     let now = Utc::now().to_rfc3339();
     let id = Uuid::new_v4().to_string();
     let quota = quota_columns_from_config_json(config_json);
@@ -396,11 +418,11 @@ async fn create_with_connection(
             subscription_type, primary_remain, weekly_remain, reset_primary, reset_weekly,
             quota_remaining, quota_limit, quota_used, quota_updated_at,
             external_source_client, external_source_id,
-            created_at, updated_at
+            created_at, updated_at, provider
          )
          VALUES (
              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
          )",
     )
     .bind(&id)
@@ -429,6 +451,7 @@ async fn create_with_connection(
     .bind(external_source.map(|source| source.source_id))
     .bind(&now)
     .bind(&now)
+    .bind(provider)
     .execute(&mut *connection)
     .await
     .map_err(|err| AppError::Database {
@@ -829,6 +852,10 @@ impl RouteCredentialRepository {
         ids: &[String],
         selection: &RouteCredentialSelectionContext,
     ) -> Result<Vec<RouteCredential>, AppError> {
+        // 统一账号池（G-P8 P4a）：凭据只存在于唯一池 `codex`；selection.platform
+        // 是「智能体对接身份」，不再过滤存储归属——各智能体读到的是全池账号，
+        // 由各自的模型映射/槽位决定用什么。
+        let platform = super::route_pool_repository::UNIFIED_POOL_PLATFORM;
         let mut seen = HashSet::with_capacity(ids.len());
         let unique_ids = ids
             .iter()
@@ -876,7 +903,7 @@ impl RouteCredentialRepository {
              LEFT JOIN batches b ON b.id = rc.batch_id
              WHERE rc.platform = ",
         );
-        query.push_bind(&selection.platform).push(" AND rc.id IN (");
+        query.push_bind(platform).push(" AND rc.id IN (");
         let mut separated = query.separated(", ");
         for id in unique_ids {
             separated.push_bind(id);
@@ -3185,10 +3212,12 @@ mod tests {
             .iter()
             .map(|item| (item.platform.as_str(), item.kind.as_str(), item.id.as_str()))
             .collect::<Vec<_>>();
+        // 统一账号池（G-P8 P4a）：四个账号都归属唯一池，grok 也进指纹候选。
         let mut expected = vec![
             ("codex", "official", codex_official.id.as_str()),
             ("codex", "api", codex_api.id.as_str()),
-            ("claude", "api", claude_api.id.as_str()),
+            ("codex", "api", claude_api.id.as_str()),
+            ("codex", "api", _grok_api.id.as_str()),
         ];
         expected.sort_unstable();
         assert_eq!(actual, expected);
@@ -3209,7 +3238,8 @@ mod tests {
         let pool_tie_b = create_api_credential(&pool, "codex", "Pool tie B").await;
         let outside = create_api_credential(&pool, "codex", "Outside").await;
         let disabled_member = create_api_credential(&pool, "codex", "Disabled member").await;
-        let other_platform = create_api_credential(&pool, "claude", "Claude pool").await;
+        // 统一池后没有"别的平台"：other 账号留在池外，验证 InPool 过滤仍排除它。
+        let other_platform = create_api_credential(&pool, "codex", "Outside selection").await;
         crate::database::repositories::route_pool_repository::RoutePoolRepository::replace_members(
             &pool,
             "codex",
@@ -3220,13 +3250,6 @@ mod tests {
                 pool_tie_b.id.clone(),
                 disabled_member.id.clone(),
             ],
-        )
-        .await
-        .unwrap();
-        crate::database::repositories::route_pool_repository::RoutePoolRepository::replace_members(
-            &pool,
-            "claude",
-            &[other_platform.id.clone()],
         )
         .await
         .unwrap();
@@ -3308,12 +3331,17 @@ mod tests {
         )
         .await
         .unwrap();
+        let out_ids = out_of_pool
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
         assert_eq!(
-            out_of_pool
-                .iter()
-                .map(|item| item.id.as_str())
-                .collect::<Vec<_>>(),
-            vec![outside.id.as_str(), disabled_member.id.as_str()]
+            out_ids,
+            std::collections::HashSet::from([
+                outside.id.as_str(),
+                disabled_member.id.as_str(),
+                other_platform.id.as_str(),
+            ])
         );
     }
 

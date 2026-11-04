@@ -273,6 +273,59 @@ async fn claude_models_only_include_active_enabled_models_with_accounts() {
         .unwrap();
     let active: Value = serde_json::from_slice(&active_body).unwrap();
     assert_eq!(active["data"][0]["id"], "provider-sonnet");
+    // 定价推断的模态声明：该行只挂文本价格 → capabilities 为空数组（纯文本）。
+    assert_eq!(active["data"][0]["capabilities"], json!([]));
+
+    // type 查询参数：文本模型只出现在 type=text；video 过滤为空；未知值 400。
+    let text_only = execute(
+        &state,
+        &runtime,
+        proxy.clone(),
+        Method::GET,
+        headers.clone(),
+        "/v1/models?type=text".parse().unwrap(),
+        Body::empty(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(text_only.status(), StatusCode::OK);
+    let text_body = axum::body::to_bytes(text_only.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text_value: Value = serde_json::from_slice(&text_body).unwrap();
+    assert_eq!(text_value["data"][0]["id"], "provider-sonnet");
+
+    let video_only = execute(
+        &state,
+        &runtime,
+        proxy.clone(),
+        Method::GET,
+        headers.clone(),
+        "/v1/models?type=video".parse().unwrap(),
+        Body::empty(),
+    )
+    .await
+    .unwrap();
+    let video_body = axum::body::to_bytes(video_only.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let video_value: Value = serde_json::from_slice(&video_body).unwrap();
+    assert_eq!(video_value["data"].as_array().map(Vec::len), Some(0));
+
+    let bogus = execute(
+        &state,
+        &runtime,
+        proxy.clone(),
+        Method::GET,
+        headers.clone(),
+        "/v1/models?type=bogus".parse().unwrap(),
+        Body::empty(),
+    )
+    .await;
+    match bogus {
+        Err(error) => assert_eq!(error.code(), "saas.unknown_model_type"),
+        Ok(response) => panic!("unknown type must fail, got {}", response.status()),
+    }
 
     sqlx::query("UPDATE saas_group_models SET enabled=0 WHERE group_id='claude-saas'")
         .execute(&pool)
@@ -323,6 +376,8 @@ async fn claude_responses_is_allowed_but_chat_completions_is_rejected() {
         assert_ne!(error.code(), "saas.endpoint_not_allowed");
     }
 
+    // 统一账号池（G-P8 P4a，用户拍板）：一个 key 全模态 —— 端点不再按 key 的
+    // 原平台限制；chat 走到模型/预留链路（消息为空由上游侧语义兜底，不在此断言）。
     let chat = execute(
         &state,
         &runtime,
@@ -330,11 +385,12 @@ async fn claude_responses_is_allowed_but_chat_completions_is_rejected() {
         Method::POST,
         headers,
         "/v1/chat/completions".parse().unwrap(),
-        Body::from(json!({"model":"provider-sonnet","messages":[]}).to_string()),
+        Body::from(json!({"model":"provider-sonnet","messages":[{"role":"user","content":"hi"}]}).to_string()),
     )
     .await;
-    assert!(chat.is_err());
-    assert_eq!(chat.unwrap_err().code(), "saas.endpoint_not_allowed");
+    if let Err(error) = chat {
+        assert_ne!(error.code(), "saas.endpoint_not_allowed");
+    }
 }
 /// The full Claude SaaS path in one test: automatic discovery, an administrator
 /// pricing and enabling the model, the public catalog, a real request, and the
@@ -496,7 +552,8 @@ async fn claude_saas_end_to_end_sync_price_request_and_bill() {
     .await
     .unwrap();
     assert_eq!(reservation.0, "provider-sonnet");
-    assert_eq!(reservation.2, "claude");
+    // 统一账号池后预留的 platform 是唯一池身份。
+    assert_eq!(reservation.2, "codex");
     assert!(reservation.3 > 0);
     task.abort();
 }

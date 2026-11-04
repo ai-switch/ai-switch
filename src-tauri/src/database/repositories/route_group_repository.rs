@@ -21,6 +21,9 @@ impl RoutePoolRepository {
         group_id: &str,
         account_ids: &[String],
     ) -> Result<(), AppError> {
+        // 统一账号池（G-P8 P4a）：成员表只存在于唯一池；platform 参数是
+        // 「智能体对接身份」，写池资源时归一。
+        let platform = super::route_pool_repository::UNIFIED_POOL_PLATFORM;
         if account_ids.len() > 10000 {
             return Err(invalid(
                 "validation.route_pool_group_members_limit",

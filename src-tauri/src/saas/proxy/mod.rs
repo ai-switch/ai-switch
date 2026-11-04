@@ -58,26 +58,86 @@ async fn execute(
     let path = uri.path().trim_end_matches('/').to_string();
     if matches!(path.as_str(), "/v1/models" | "/models") && method == Method::GET {
         crate::saas::domain::model_sync::ensure_group_current(pool, &principal.group_id).await?;
-        let models: Vec<String> = sqlx::query_scalar(
-            "SELECT model FROM saas_group_models
+        // 定价列推断模态（与 Task 2c 计划一致）：SaaS 组没有能力声明列，
+        // 卖价挂在哪个模态列上，模型就属于哪个模态。
+        let rows: Vec<(String, i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT model,video_price_micros,video_price_per_second_micros,
+                    audio_price_micros_per_1k_chars,image_price_micros
+             FROM saas_group_models
              WHERE group_id=? AND sync_state='active' AND enabled=1 ORDER BY model",
         )
         .bind(&principal.group_id)
         .fetch_all(pool)
         .await
         .map_err(repository::db_error)?;
+        let models: Vec<(String, Vec<&'static str>)> = rows
+            .into_iter()
+            .map(|(model, video, video_per_second, audio, image)| {
+                let mut capabilities = Vec::new();
+                if video > 0 || video_per_second > 0 {
+                    capabilities.push("video.generate");
+                }
+                if audio > 0 {
+                    capabilities.push("audio.generate");
+                }
+                if image > 0 {
+                    capabilities.push("image.generate");
+                }
+                (model, capabilities)
+            })
+            .collect();
         // 列表判定要与提交时一致。**但这里不再按模态过滤** —— 模态不是平台，
         // 一个 `codex` 组里同时挂着文本、生图、视频、TTS 的模型，每个模态的提交
         // 各自要求自己的能力声明，而 `permitted_accounts_for_model` 列的正是
         // 「组里至少有一个账号声明了这个模型名」的那些，提交时的能力过滤会命中
         // 同一批账号。曾经需要过滤，是因为模态被钉在组上（视频组只该列视频模型）。
+        // type 查询参数：与本地路由同词表（text/image/video/audio），未知值 400。
+        let type_filter = match uri.query() {
+            Some(query) => {
+                let mut parsed = None;
+                for pair in query.split('&') {
+                    let Some((key, value)) = pair.split_once('=') else {
+                        continue;
+                    };
+                    if key.eq_ignore_ascii_case("type") {
+                        parsed = Some(match value.trim().to_ascii_lowercase().as_str() {
+                            "text" => "text",
+                            "image" => "image.generate",
+                            "video" => "video.generate",
+                            "audio" => "audio.generate",
+                            other => {
+                                return Err(repository::invalid(
+                                    "saas.unknown_model_type",
+                                    &format!(
+                                        "Unknown models type '{other}'; supported: text, image, video, audio"
+                                    ),
+                                ));
+                            }
+                        });
+                    }
+                }
+                parsed
+            }
+            None => None,
+        };
         let mut available = Vec::new();
-        for model in models {
+        for (model, capabilities) in models {
             let permitted =
                 groups::permitted_accounts_for_model(pool, &principal.group_id, &model).await?;
-            if !permitted.is_empty() {
-                available.push(json!({"id":model,"object":"model","owned_by":"ai-switch"}));
+            if permitted.is_empty() {
+                continue;
             }
+            let matches = match type_filter {
+                Some("text") => capabilities.is_empty(),
+                Some(required) => capabilities.contains(&required),
+                None => true,
+            };
+            if !matches {
+                continue;
+            }
+            available.push(
+                json!({"id":model,"object":"model","owned_by":"ai-switch","capabilities":capabilities}),
+            );
         }
         return Ok(Json(json!({"object":"list","data":available})).into_response());
     }
@@ -117,11 +177,10 @@ async fn execute(
     // 这里**不再有**「视频 key 只能打视频端点」这类守卫 —— 视频 / 音频不是平台，
     // 它们住在账号的模态分类里，所以没有专属的 key 需要约束。一把 codex key
     // 本来就该能打这个池里的所有模态，这正是「一个 key 通吃」的落点。
+    // 统一账号池（G-P8 P4a，用户拍板）：一个 key 全模态 —— 端点不再按 key 的
+    // 原平台限制；可打哪些模型由组定价行决定（saas.model_not_allowed）。
     if (!video_get && method != Method::POST)
         || !(anthropic || responses || chat || images || videos || audio || audio_transcribe)
-        || (principal.platform == "claude" && !(anthropic || responses))
-        || (principal.platform == "gemini" && !images)
-        || (principal.platform == "codex" && anthropic)
     {
         return Err(repository::invalid(
             "saas.endpoint_not_allowed",

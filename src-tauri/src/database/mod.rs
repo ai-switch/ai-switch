@@ -121,6 +121,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
     })?;
     repositories::route_pool_repository::RoutePoolRepository::migrate_legacy_pool_views(pool)
         .await?;
+    repositories::route_pool_repository::RoutePoolRepository::converge_legacy_pool_groups(pool)
+        .await?;
     Ok(())
 }
 
@@ -844,6 +846,9 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     value.push(suffix);
     PathBuf::from(value)
 }
+
+#[cfg(test)]
+mod migration_unified_pool_tests;
 
 #[cfg(test)]
 mod migration_checksum_manifest_tests {

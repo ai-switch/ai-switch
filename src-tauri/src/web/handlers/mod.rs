@@ -2055,7 +2055,17 @@ mod tests {
             dispatch_command(fixture.state, "copy_route_credential", json!({ "id": id }))
                 .await
                 .expect("legacy copy");
-        assert_eq!(legacy_copy["platform"], "claude");
+        // 统一账号池（G-P8 P4a）：legacy copy 无 target_platform 时默认目标协议是
+        // codex，而源账号是 anthropic —— 跨协议转换照常发生（base_url 加 /v1）。
+        assert_eq!(legacy_copy["platform"], "codex");
+        assert_eq!(
+            legacy_copy["config_json"].as_str().map(|raw| {
+                serde_json::from_str::<Value>(raw)
+                    .expect("config value")["base_url"]
+                    .clone()
+            }),
+            Some(json!("https://api.example.com/v1"))
+        );
     }
 
     #[tokio::test]

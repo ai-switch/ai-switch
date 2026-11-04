@@ -78,8 +78,10 @@ pub(crate) async fn reconcile_group_connection(
     connection: &mut SqliteConnection,
     group_id: &str,
 ) -> Result<SaasModelSyncResult, AppError> {
-    let group: Option<(String, bool)> = sqlx::query_as(
-        "SELECT platform,is_internal FROM route_pool_groups
+    // 统一账号池（G-P8 P4a）：组的 platform 已统一为 `codex`，组的智能体归属
+    // 由 `agent` 列承载；成员/模型目录查询随之归一。
+    let group: Option<(String, String, bool)> = sqlx::query_as(
+        "SELECT platform,agent,is_internal FROM route_pool_groups
          WHERE id=? AND deleted_at IS NULL
            AND (platform IN ('codex','claude','gemini','video','audio'))",
     )
@@ -87,11 +89,17 @@ pub(crate) async fn reconcile_group_connection(
     .fetch_optional(&mut *connection)
     .await
     .map_err(db_error)?;
-    let Some((platform, _is_internal)) = group else {
+    let Some((platform, agent, _is_internal)) = group else {
         return Err(invalid("saas.group_not_found", "Core group is unavailable"));
     };
+    let agent_platform = if agent.is_empty() { platform } else { agent };
 
-    let (members, mode) = source_members(connection, group_id, &platform).await?;
+    let (members, mode) = source_members(
+        connection,
+        group_id,
+        crate::database::repositories::route_pool_repository::UNIFIED_POOL_PLATFORM,
+    )
+    .await?;
     let source_fingerprint = fingerprint(&members, mode);
     let previous: Option<SyncState> = sqlx::query_as(
         "SELECT source_fingerprint,last_success_at,last_error
@@ -102,7 +110,7 @@ pub(crate) async fn reconcile_group_connection(
     .await
     .map_err(db_error)?;
 
-    if platform != "claude" {
+    if agent_platform != "claude" {
         return result_from_connection(
             connection,
             group_id,
@@ -288,18 +296,26 @@ pub async fn ensure_group_current(pool: &SqlitePool, group_id: &str) -> Result<(
 /// managed by the pool; other platforms return success without touching any
 /// hand-configured model rows. Errors are returned so callers can log them, but
 /// callers must not fail the primary operation because of a sync problem.
-pub async fn best_effort_sync_platform(pool: &SqlitePool, platform: &str) -> Result<(), AppError> {
-    if platform != "claude" {
-        return Ok(());
-    }
-    let group_ids: Vec<String> = sqlx::query_scalar(
+pub async fn best_effort_sync_platform(
+    pool: &SqlitePool,
+    platform: Option<&str>,
+) -> Result<(), AppError> {
+    // 统一账号池（G-P8 P4a）：组的 platform 已统一，按 `agent` 归属找要同步的
+    // 销售分组；无归属（agent 为空）的组保持手工定价（no-op）。
+    // `None` 刷新所有有归属的组（池成员变化可能影响任何生态的目录）。
+    let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
         "SELECT id FROM route_pool_groups
-         WHERE platform='claude' AND deleted_at IS NULL
-         ORDER BY id",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(db_error)?;
+         WHERE deleted_at IS NULL AND agent != ''",
+    );
+    if let Some(platform) = platform {
+        query.push(" AND agent = ").push_bind(platform);
+    }
+    query.push(" ORDER BY id");
+    let group_ids: Vec<String> = query
+        .build_query_scalar()
+        .fetch_all(pool)
+        .await
+        .map_err(db_error)?;
     for group_id in group_ids {
         if let Err(error) = sync_group(pool, &group_id).await {
             return Err(error);

@@ -386,7 +386,8 @@ mod tests {
     async fn missing_wrong_platform_and_wrong_pool_scope_are_all_or_nothing() {
         let pool = pool().await;
         let valid = api(&pool, "codex", "Valid").await;
-        let wrong_platform = api(&pool, "claude", "Wrong platform").await;
+        // 统一账号池（G-P8 P4a）：平台维度消亡；越界场景只剩「不存在」与
+        // 「在池成员用 OutOfPool 上下文导出」。
         let pool_member = api(&pool, "codex", "Pool member").await;
         RoutePoolRepository::replace_members(&pool, "codex", &[pool_member.id.clone()])
             .await
@@ -394,7 +395,6 @@ mod tests {
 
         for ids in [
             vec![valid.id.clone(), "missing".into()],
-            vec![valid.id.clone(), wrong_platform.id.clone()],
             vec![valid.id.clone(), pool_member.id.clone()],
         ] {
             let result = export_route_credentials(

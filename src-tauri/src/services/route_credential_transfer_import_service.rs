@@ -1639,18 +1639,12 @@ mod tests {
             .expect("pool restore");
         assert_eq!(restored.restored_pool_members, 2);
 
+        // 统一账号池（G-P8 P4a）：gemini 账号同样落唯一池，恢复的成员都在 codex。
         let codex_members = RoutePoolRepository::list_member_ids(&pool, "codex")
             .await
             .expect("codex members");
-        assert_eq!(codex_members.len(), 2);
+        assert_eq!(codex_members.len(), 3);
         assert_eq!(codex_members[0], existing.id);
-        assert_eq!(
-            RoutePoolRepository::list_member_ids(&pool, "gemini")
-                .await
-                .expect("gemini members")
-                .len(),
-            1
-        );
     }
 
     #[tokio::test]
@@ -1718,7 +1712,7 @@ mod tests {
 
         let member_pool = migrated_pool().await;
         sqlx::query(
-            "CREATE TRIGGER fail_after_member BEFORE INSERT ON route_pool_members WHEN NEW.platform = 'gemini' BEGIN SELECT RAISE(FAIL, 'forced member failure'); END",
+            "CREATE TRIGGER fail_after_member BEFORE INSERT ON route_pool_members WHEN NEW.platform = 'codex' BEGIN SELECT RAISE(FAIL, 'forced member failure'); END",
         )
         .execute(&member_pool)
         .await

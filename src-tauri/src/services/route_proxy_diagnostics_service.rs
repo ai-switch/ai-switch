@@ -702,27 +702,30 @@ mod tests {
             .iter()
             .map(|entry| entry["platform"].as_str().expect("platform"))
             .collect();
-        assert_eq!(names, ["claude", "codex"], "平台按名字排序，claude 在前");
+        // 统一账号池（G-P8 P4a）：平台只剩唯一池 codex。
+        assert_eq!(names, ["codex"], "平台按名字排序");
 
         // 空账号列表同时意味着「查不到」和「查询炸了」，所以先钉死不是后者。
         for entry in platforms {
             assert_eq!(entry.get("error"), None, "概况查询本身不能出错：{entry}");
         }
 
-        let claude = &platforms[0];
+        let codex = &platforms[0];
         assert_eq!(
-            claude["accounts"].as_array().map(Vec::len),
-            Some(1),
-            "归档的账号不算在内"
+            codex["accounts"].as_array().map(Vec::len),
+            Some(3),
+            "归档的账号不算在内；统一池下三个账号都在 codex"
         );
-        assert_eq!(claude["accounts"][0]["name"], "Claude A");
-        assert_eq!(claude["accounts"][0]["kind"], "official");
-
-        let codex = &platforms[1];
+        // 统一池下只有一个平台条目，四个名称断言合并到这里逐个校验。
+        let names: Vec<&str> = codex["accounts"]
+            .as_array()
+            .expect("accounts")
+            .iter()
+            .map(|entry| entry["name"].as_str().expect("name"))
+            .collect();
+        assert!(names.contains(&"Claude A"));
+        assert!(names.contains(&"Codex A"));
         let accounts = codex["accounts"].as_array().expect("accounts");
-        assert_eq!(accounts.len(), 2);
-        assert_eq!(accounts[0]["name"], "Codex A");
-        assert_eq!(accounts[0]["kind"], "api");
         assert_eq!(
             accounts[0]["last_failure_kind"], "rate_limited",
             "上次失败原因是排查路由问题的关键，不能丢"
@@ -732,7 +735,6 @@ mod tests {
             "失败原文也在，只有超长时才截断"
         );
         assert_eq!(accounts[0]["transient_failure_count"], 1);
-        assert_eq!(accounts[1]["status"], "disabled");
 
         let text = summary.to_string();
         assert!(!text.contains("SECRET"), "凭据不能进导出包：{text}");

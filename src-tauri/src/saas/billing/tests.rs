@@ -461,7 +461,8 @@ async fn dashboards_read_core_groups_and_usage_totals_span_all_pages() {
     let pool = repository::test_pool().await;
     let principal = repository::test_principal(&pool, 1000).await;
     let admin = domain::admin(&pool, "overview", json!({})).await.unwrap();
-    assert!(admin["groupCount"].as_i64().unwrap() >= 7);
+    // 统一账号池（G-P8 P4a）：组收敛为一套视图分组，不再按平台计 7 组。
+assert!(admin["groupCount"].as_i64().unwrap() >= 3);
     for days in [0, 1] {
         let reservation = reserve(&pool, &principal, "gpt-test", 2, 2).await.unwrap();
         sqlx::query(

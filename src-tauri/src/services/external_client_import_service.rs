@@ -251,7 +251,12 @@ fn overwrite_target<'a>(
         None => Ok(None),
         Some(matched)
             if matched.kind.eq_ignore_ascii_case("api")
-                && PlatformId::parse(&matched.platform).is_ok_and(|local| local == platform) =>
+                // 统一账号池（G-P8 P4a）：已有账号的 platform 恒为 `codex`；
+                // 覆盖匹配只要求它是本功能写入的 API 账号。
+                && PlatformId::parse(&matched.platform).is_ok_and(|local| {
+                    local.as_str()
+                        == crate::database::repositories::route_pool_repository::UNIFIED_POOL_PLATFORM
+                }) =>
         {
             Ok(Some(matched))
         }
@@ -783,7 +788,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refuses_to_overwrite_a_local_row_this_platform_does_not_own() {
+    async fn source_matched_row_is_overwritten_regardless_of_origin_platform() {
         // The unique index is global, so a source record could be bound to a row
         // on another platform (e.g. the provider was imported under Codex, then
         // re-typed as Claude in cc-switch). Overwriting it would silently rewrite
@@ -835,13 +840,10 @@ mod tests {
         )
         .await
         .expect("preview");
-        assert_eq!(preview.counts.errors, 1);
-        assert_eq!(preview.counts.importable, 0);
-        assert_eq!(preview.items[0].disposition, "error");
-        assert_eq!(
-            preview.items[0].issue_codes,
-            vec!["external_import.conflicting_local_account".to_string()]
-        );
+        // 统一账号池（G-P8 P4a）：来源匹配的行可被同源导入覆盖，平台维度不再构成冲突。
+        assert_eq!(preview.counts.errors, 0);
+        assert_eq!(preview.counts.importable, 1);
+        assert_eq!(preview.items[0].disposition, "overwrite");
 
         let outcome = import_external_client_accounts(
             &pool,
@@ -854,15 +856,15 @@ mod tests {
         )
         .await
         .expect("import");
-        assert_eq!(outcome.failed, 1);
+        // 同源覆盖：外部行被新内容覆盖，且仍只有一个账号。
+        assert_eq!(outcome.failed, 0);
         assert_eq!(outcome.created, 0);
-        assert_eq!(outcome.overwritten, 0);
-        // The Codex row is untouched.
-        let untouched = RouteCredentialRepository::get(&pool, &foreign.id)
+        assert_eq!(outcome.overwritten, 1);
+        let overwritten = RouteCredentialRepository::get(&pool, &foreign.id)
             .await
-            .expect("foreign row still there");
-        assert_eq!(untouched.display_name, "Imported as Codex");
-        assert!(untouched.secret_payload_json.contains("sk-codex"));
+            .expect("row still there");
+        assert_eq!(overwritten.display_name, "Moved provider");
+        assert!(overwritten.secret_payload_json.contains("sk-one"));
     }
 
     #[test]

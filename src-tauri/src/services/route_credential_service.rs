@@ -401,7 +401,23 @@ impl RouteCredentialService {
             .transpose()?
             .unwrap_or(source_platform);
         PlatformCapabilityService::require(target_platform, PlatformOperation::RouteCredentials)?;
-        let cross_platform = target_platform != source_platform;
+        // 统一账号池（G-P8 P4a）：存储平台恒为 codex，「跨平台」改按协议判定——
+        // 源账号的 interface_format 决定它属于哪个协议族。
+        let source_dialect = serde_json::from_str::<Value>(&source.config_json)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("interface_format")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        let source_protocol_platform = match source_dialect.as_str() {
+            "anthropic" => PlatformId::Claude,
+            "gemini" => PlatformId::Gemini,
+            _ => PlatformId::Codex,
+        };
+        let cross_platform = target_platform != source_protocol_platform;
         let api_key_override = input
             .api_key
             .as_deref()
@@ -1508,7 +1524,7 @@ fn parse_fetched_models_json(value: Option<&str>) -> Result<Vec<FetchedRouteMode
 /// read or billing path re-runs the same reconciliation anyway.
 async fn best_effort_sync(pool: &SqlitePool, platform: &str) {
     if let Err(error) =
-        crate::saas::domain::model_sync::best_effort_sync_platform(pool, platform).await
+        crate::saas::domain::model_sync::best_effort_sync_platform(pool, None).await
     {
         eprintln!("Claude SaaS model sync failed for {platform}: {error}");
     }
@@ -2263,7 +2279,9 @@ mod tests {
         .await
         .expect("cross-platform copy");
 
-        assert_eq!(copied.platform, "claude");
+        // 统一账号池（G-P8 P4a）：复制的账号也落在唯一池；跨平台语义只剩
+        // 接口协议转换（interface_format → anthropic）。
+        assert_eq!(copied.platform, "codex");
         assert_eq!(copied.kind, "api");
         assert_eq!(
             serde_json::from_str::<Value>(&copied.secret_payload_json).expect("copied secret"),

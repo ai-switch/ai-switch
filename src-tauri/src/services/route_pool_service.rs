@@ -262,14 +262,15 @@ impl RoutePoolService {
             .filter(|id| seen.insert(id.clone()))
             .collect();
 
+        // 统一账号池（G-P8 P4a）：凭据一律归属唯一池，平台维度不再区分账号；
+        // 校验收窄为「账号存在且属于统一池」。
         for account_id in &account_ids {
             let account_platform = RouteCredentialRepository::platform_of(pool, account_id).await?;
-            let account_platform = PlatformId::parse(&account_platform)?;
-            if account_platform != platform {
+            if account_platform != crate::database::repositories::route_pool_repository::UNIFIED_POOL_PLATFORM {
                 return Err(AppError::Validation {
                     code: "validation.route_pool_platform_mismatch",
                     message: "Route pool account belongs to another platform".to_string(),
-                    details: Some(format!("{account_id}:{}", account_platform.as_str())),
+                    details: Some(format!("{account_id}:{account_platform}")),
                     recoverable: true,
                 });
             }
@@ -663,7 +664,7 @@ fn non_negative(value: i64, field: &'static str) -> Result<i64, AppError> {
 /// read or billing path re-runs the same reconciliation anyway.
 async fn best_effort_sync(pool: &SqlitePool, platform: &str) {
     if let Err(error) =
-        crate::saas::domain::model_sync::best_effort_sync_platform(pool, platform).await
+        crate::saas::domain::model_sync::best_effort_sync_platform(pool, None).await
     {
         eprintln!("Claude SaaS model sync failed for {platform}: {error}");
     }
@@ -980,10 +981,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dynamic_group_membership_rejects_foreign_platform_accounts() {
+    async fn dynamic_group_membership_rejects_unknown_accounts() {
         let pool = create_memory_pool().await.expect("pool");
         run_migrations(&pool).await.expect("migrations");
-        let claude_account = account(&pool, "claude", "ClaudeOne").await;
+        // 统一账号池后平台维度不再区分账号；mismatch 路径由未知账号触发。
+        let claude_account = "missing-account-id".to_string();
         let default_group_id = RoutePoolRepository::active_group_id(&pool, "codex")
             .await
             .expect("active group")
@@ -998,11 +1000,11 @@ mod tests {
             },
         )
         .await
-        .expect_err("foreign platform accounts must fail");
+        .expect_err("unknown accounts must fail");
         assert!(matches!(
             error,
             AppError::Validation {
-                code: "validation.route_pool_platform_mismatch",
+                code: "validation.route_credential_not_found",
                 ..
             }
         ));
@@ -1238,10 +1240,11 @@ mod tests {
             .await
             .expect("state");
 
+        // 统一账号池（G-P8 P4a）：claude 账号同属唯一池，其 usage 计入统计。
         assert_eq!(state.stats.member_count, 1);
-        assert_eq!(state.stats.request_count, 2);
+        assert_eq!(state.stats.request_count, 3);
         assert_eq!(state.stats.token_count, 512);
-        assert_eq!(state.stats.request_row_count, 2);
+        assert_eq!(state.stats.request_row_count, 3);
         assert_eq!(state.stats.request_page, 1);
         assert_eq!(state.stats.request_page_size, 20);
 
@@ -1253,7 +1256,7 @@ mod tests {
             .collect();
         assert!(request_names.contains(&"RemovedCodex"));
         assert!(request_names.contains(&"ActiveCodex"));
-        assert!(!request_names.contains(&"ClaudeOne"));
+        assert!(request_names.contains(&"ClaudeOne"));
     }
 
     #[tokio::test]
@@ -1355,10 +1358,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_members_rejects_accounts_from_another_platform() {
+    async fn set_members_rejects_unknown_accounts() {
         let pool = create_memory_pool().await.expect("pool");
         run_migrations(&pool).await.expect("migrations");
-        let account_id = account(&pool, "claude_code", "ClaudeOne").await;
+        // 统一账号池后平台维度不再区分账号；mismatch 路径由未知账号触发。
+        let account_id = "missing-account-id".to_string();
 
         let error = RoutePoolService::set_members(
             &pool,
@@ -1368,11 +1372,11 @@ mod tests {
             },
         )
         .await
-        .expect_err("platform mismatch");
+        .expect_err("unknown account");
 
         match error {
             AppError::Validation { code, .. } => {
-                assert_eq!(code, "validation.route_pool_platform_mismatch");
+                assert_eq!(code, "validation.route_credential_not_found");
             }
             _ => panic!("expected validation error"),
         }

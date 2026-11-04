@@ -71,14 +71,60 @@ struct Record {
     updated_at: String,
 }
 
-fn client_for(platform: &str) -> Result<&'static str, AppError> {
-    match platform {
-        "codex" => Ok("codex"),
-        "claude" => Ok("claude_code"),
-        _ => Err(failure(
-            "direct_mode.unsupported",
-            "直连模式仅支持 Codex 和 Claude。",
-        )),
+/// 统一账号池（G-P8 P4a）：账号不再自带平台，直连客户端由账号的**协议族**
+/// 推导（anthropic → Claude Code，openai-responses → Codex CLI）。
+fn client_for(platform: &str, interface_format: &str) -> Result<&'static str, AppError> {
+    match interface_format {
+        // api 账号走协议族；official 账号走 provider 值（openai / claude）。
+        "anthropic" | "claude" => Ok("claude_code"),
+        "openai-responses" | "openai" => Ok("codex"),
+        _ => {
+            let _ = platform;
+            Err(failure(
+                "direct_mode.unsupported",
+                "直连模式仅支持 Codex 和 Claude。",
+            ))
+        }
+    }
+}
+
+async fn credential_client_protocol(
+    pool: &sqlx::SqlitePool,
+    credential_id: &str,
+    kind: &str,
+    config_json: &str,
+) -> &'static str {
+    if kind == "official" {
+        let provider: Option<String> =
+            sqlx::query_scalar("SELECT provider FROM route_credentials WHERE id = ?")
+                .bind(credential_id)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
+        return match provider.as_deref() {
+            Some("openai") => "openai",
+            Some("claude") => "claude",
+            _ => "",
+        };
+    }
+    credential_interface_format(config_json)
+}
+
+fn credential_interface_format(config_json: &str) -> &'static str {
+    let dialect = serde_json::from_str::<serde_json::Value>(config_json)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("interface_format")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    match dialect.as_str() {
+        "anthropic" => "anthropic",
+        "openai-responses" => "openai-responses",
+        _ => "",
     }
 }
 fn config_path(home: &Path, client: &str) -> PathBuf {
@@ -88,6 +134,12 @@ fn config_path(home: &Path, client: &str) -> PathBuf {
         ".claude/settings.json"
     })
 }
+/// 统一账号池（G-P8 P4a）：直连记录的 platform 存的是客户端 key
+/// （"codex" / "claude_code"；历史行可能是 "claude"）。
+fn is_codex_client(platform: &str) -> bool {
+    platform != "claude" && platform != "claude_code"
+}
+
 fn state_error() -> AppError {
     failure(
         "direct_mode.state_failed",
@@ -141,7 +193,15 @@ impl DirectModeService {
             .home_dir()
             .to_path_buf();
         let credential = RouteCredentialRepository::get(pool, id).await?;
-        ensure_environment(&credential.platform, &home)?;
+        let protocol = credential_client_protocol(
+            pool,
+            &credential.id,
+            &credential.kind,
+            &credential.config_json,
+        )
+        .await;
+        let client = client_for(&credential.platform, protocol)?;
+        ensure_environment(client, &home)?;
         Self::enable_for_home(paths, pool, runtime, &home, id).await
     }
 
@@ -164,7 +224,14 @@ impl DirectModeService {
                 "请先恢复已归档账号，再启用直连模式。",
             ));
         }
-        let client = client_for(&credential.platform)?;
+        let protocol = credential_client_protocol(
+            pool,
+            &credential.id,
+            &credential.kind,
+            &credential.config_json,
+        )
+        .await;
+        let client = client_for(&credential.platform, protocol)?;
         let path = config_path(home, client);
         let lock = runtime.lock_for_path(&path).await?;
         let _guard = lock.lock().await;
@@ -186,8 +253,10 @@ impl DirectModeService {
             .filter(|saved| saved.id == id)
             .map(|saved| (saved.secret.as_str(), saved.config.as_str()))
             .unwrap_or((&credential.secret_payload_json, &credential.config_json));
+        // 统一账号池（G-P8 P4a）：直连写哪个客户端由用户勾选的 client 决定；
+        // 协议匹配按客户端与账号 interface_format 判定，与账号存储平台无关。
         let rendered = direct_mode_auth::render(
-            &credential.platform,
+            client,
             &credential.kind,
             secret,
             config,
@@ -195,10 +264,10 @@ impl DirectModeService {
             existing_auth.bytes.as_deref(),
         )?;
         let mut auth: Value = serde_json::from_slice(&rendered.auth).map_err(|_| state_error())?;
-        if credential.platform == "claude" && credential.kind == "official" {
+        if !is_codex_client(client) && credential.kind == "official" {
             // Claude 的原生刷新会保留根对象其他项；完整替换认证会丢失该绑定。
             auth["aiSwitchDirectCredentialId"] = json!(id);
-        } else if credential.platform == "claude" {
+        } else if !is_codex_client(client) {
             auth.as_object_mut()
                 .expect("object")
                 .remove("aiSwitchDirectCredentialId");
@@ -224,14 +293,11 @@ impl DirectModeService {
         let row = Record {
             client_key: client.into(),
             credential_id: id.into(),
-            platform: credential.platform.clone(),
+            platform: client.to_string(),
             credential_kind: credential.kind.clone(),
             config_path: path.to_string_lossy().into_owned(),
             auth_location: serde_json::to_string(&auth_location).map_err(|_| state_error())?,
-            config_fingerprint: direct_mode_auth::fingerprint(
-                &credential.platform,
-                &rendered.config,
-            )?,
+            config_fingerprint: direct_mode_auth::fingerprint(client, &rendered.config)?,
             config_backup_path: old
                 .as_ref()
                 .map(|r| r.config_backup_path.clone())
@@ -403,7 +469,14 @@ impl DirectModeService {
         credential: &SelectedCredential,
     ) -> Result<Option<SelectedCredential>, String> {
         // 调用者持有 authentication_guard，覆盖整个代理刷新过程而非只保护文件读取。
-        let client = match client_for(&credential.platform) {
+        let protocol = credential_client_protocol(
+            pool,
+            &credential.id,
+            &credential.kind,
+            &credential.config_json,
+        )
+        .await;
+        let client = match client_for(&credential.platform, protocol) {
             Ok(c) => c,
             Err(_) => return Ok(None),
         };
@@ -590,7 +663,7 @@ async fn native_credentials(
         .bytes
         .ok_or_else(auth_changed)?;
     let auth: Value = serde_json::from_slice(&auth).map_err(|_| state_error())?;
-    let native = if row.platform == "codex" {
+    let native = if is_codex_client(&row.platform) {
         if auth["auth_mode"]
             .as_str()
             .is_some_and(|mode| mode != "chatgpt")
@@ -617,7 +690,7 @@ async fn native_credentials(
         ("refresh_token", "refreshToken"),
         ("id_token", "idToken"),
     ] {
-        let key = if row.platform == "codex" {
+        let key = if is_codex_client(&row.platform) {
             snake
         } else {
             camel
@@ -658,10 +731,11 @@ async fn native_credentials(
 
 fn clean_for_route(
     platform: &str,
+    // platform 是直连客户端 key（"codex" / "claude_code"）。
     current: Option<&[u8]>,
     original: Option<&[u8]>,
 ) -> Result<Vec<u8>, AppError> {
-    if platform == "claude" {
+    if platform == "claude" || platform == "claude_code" {
         return Ok(
             serde_json::to_vec_pretty(&direct_mode_auth::clean_claude_settings(current)?)
                 .expect("value"),
@@ -707,12 +781,12 @@ fn refreshed_baseline(
     let before: Value = serde_json::from_str(&saved.before_secret).map_err(|_| state_error())?;
     let latest: Value = serde_json::from_str(&saved.secret).map_err(|_| state_error())?;
     let config: Value = serde_json::from_str(&saved.config).map_err(|_| state_error())?;
-    let (root, refresh) = if platform == "codex" {
+    let (root, refresh) = if is_codex_client(platform) {
         ("tokens", "refresh_token")
     } else {
         ("claudeAiOauth", "refreshToken")
     };
-    let same = if platform == "codex" {
+    let same = if is_codex_client(platform) {
         auth[root]["account_id"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -793,8 +867,7 @@ fn restore_auth(
     }
 }
 
-fn ensure_environment(platform: &str, home: &Path) -> Result<(), AppError> {
-    let client = client_for(platform)?;
+fn ensure_environment(client: &str, home: &Path) -> Result<(), AppError> {
     let (home_key, expected) = if client == "codex" {
         ("CODEX_HOME", home.join(".codex"))
     } else {
@@ -806,7 +879,7 @@ fn ensure_environment(platform: &str, home: &Path) -> Result<(), AppError> {
     {
         return Err(failure("direct_mode.environment_conflict",&format!("检测到自定义 {home_key}。为避免写错客户端目录，本次未修改；请先使用默认客户端目录。")));
     }
-    let keys: Vec<&str> = if platform == "codex" {
+    let keys: Vec<&str> = if client == "codex" {
         vec!["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_API_KEY"]
     } else {
         direct_mode_auth::claude_managed_env().collect()

@@ -276,8 +276,8 @@ pub(crate) async fn insert_claude_sync_fixture(pool: &SqlitePool) {
     crate::database::run_migrations(pool).await.unwrap();
     sqlx::query(
         "INSERT OR IGNORE INTO route_pool_groups
-           (id,platform,name,sort_order,is_internal,is_active,created_at,updated_at)
-         VALUES('claude-saas','claude','Claude SaaS',20,0,0,'2026-09-16','2026-09-16')",
+           (id,platform,agent,name,sort_order,is_internal,is_active,created_at,updated_at)
+         VALUES('claude-saas','codex','claude','Claude SaaS',20,0,0,'2026-09-16','2026-09-16')",
     )
     .execute(pool)
     .await
@@ -298,7 +298,7 @@ pub(crate) async fn insert_claude_sync_fixture(pool: &SqlitePool) {
         sqlx::query(
             "INSERT INTO route_credentials
                (id,platform,kind,display_name,status,config_json,created_at,updated_at)
-             VALUES(?,'claude','api',?,'ok',?,'2026-09-16','2026-09-16')",
+             VALUES(?,'codex','api',?,'ok',?,'2026-09-16','2026-09-16')",
         )
         .bind(id)
         .bind(display_name)
@@ -309,7 +309,7 @@ pub(crate) async fn insert_claude_sync_fixture(pool: &SqlitePool) {
         sqlx::query(
             "INSERT INTO route_pool_members
                (id,platform,route_credential_id,enabled,group_id,created_at,updated_at)
-             VALUES(?,'claude',?,1,'claude-saas','2026-09-16','2026-09-16')",
+             VALUES(?,'codex',?,1,'claude-saas','2026-09-16','2026-09-16')",
         )
         .bind(format!("member-{id}"))
         .bind(id)

@@ -113,6 +113,9 @@ struct CoreGroup {
     id: String,
     name: String,
     platform: String,
+    /// 组的智能体归属（G-P8 P4a）：组的 platform 已统一为 `codex`，
+    /// 「这是面向哪个智能体生态的销售分组」由该列承载。
+    agent: String,
     is_internal: bool,
     is_active: bool,
 }
@@ -177,7 +180,7 @@ async fn core_group(
     group_id: &str,
 ) -> Result<Option<CoreGroup>, AppError> {
     sqlx::query_as(
-        "SELECT id,name,platform,is_internal,is_active
+        "SELECT id,name,platform,agent,is_internal,is_active
          FROM route_pool_groups
          WHERE id=? AND deleted_at IS NULL
            AND (platform IN ('codex','claude','gemini','video','audio'))",
@@ -223,14 +226,14 @@ async fn eligible_accounts(
     group: &CoreGroup,
 ) -> Result<Vec<Account>, AppError> {
     sqlx::query_as(
+        // 统一账号池（G-P8 P4a）：账号恒在唯一池，组内资格只看成员关系。
         "SELECT rc.id,rc.platform,rc.kind,rc.display_name,rc.config_json
          FROM route_credentials rc
          JOIN route_pool_members pm ON pm.route_credential_id=rc.id AND pm.platform=rc.platform
-         WHERE pm.group_id=? AND rc.platform=? AND rc.status='ok'
+         WHERE pm.group_id=? AND rc.status='ok'
          ORDER BY rc.id",
     )
     .bind(&group.id)
-    .bind(&group.platform)
     .fetch_all(&mut *connection)
     .await
     .map_err(db_error)
@@ -498,7 +501,7 @@ pub async fn list(pool: &SqlitePool, payload: Value, user_only: bool) -> Result<
     let mut connection = pool.acquire().await.map_err(db_error)?;
     let rows: Vec<CoreGroup> = if let Some(platform) = platform {
         sqlx::query_as(
-            "SELECT id,name,platform,is_internal,is_active
+            "SELECT id,name,platform,agent,is_internal,is_active
              FROM route_pool_groups
              WHERE platform=? AND deleted_at IS NULL
              ORDER BY sort_order,created_at,id",
@@ -509,7 +512,7 @@ pub async fn list(pool: &SqlitePool, payload: Value, user_only: bool) -> Result<
         .map_err(db_error)?
     } else {
         sqlx::query_as(
-            "SELECT id,name,platform,is_internal,is_active
+            "SELECT id,name,platform,agent,is_internal,is_active
              FROM route_pool_groups
              WHERE (platform IN ('codex','claude','gemini','video','audio'))
                AND deleted_at IS NULL
@@ -552,7 +555,7 @@ pub async fn available(pool: &SqlitePool, payload: Value) -> Result<Value, AppEr
     let (limit, offset) = repository::page(&payload)?;
     let mut connection = pool.acquire().await.map_err(db_error)?;
     let rows: Vec<CoreGroup> = sqlx::query_as(
-        "SELECT groups.id,groups.name,groups.platform,groups.is_internal,groups.is_active
+        "SELECT groups.id,groups.name,groups.platform,groups.agent,groups.is_internal,groups.is_active
          FROM route_pool_groups groups
          WHERE (groups.platform IN ('codex','claude','gemini','video','audio'))
            AND groups.deleted_at IS NULL
@@ -624,7 +627,7 @@ pub async fn delete_model(pool: &SqlitePool, payload: Value) -> Result<Value, Ap
     let group = core_group(&mut *transaction, group_id)
         .await?
         .ok_or_else(|| invalid("saas.group_not_found", "Core group is unavailable"))?;
-    if group.platform != "claude" {
+    if group.agent != "claude" {
         return Err(invalid(
             "saas.validation",
             "Only Claude groups manage models from the pool",
@@ -714,7 +717,7 @@ pub async fn save(pool: &SqlitePool, payload: Value) -> Result<Value, AppError> 
     let group = core_group(&mut *transaction, &identifier)
         .await?
         .ok_or_else(|| invalid("saas.group_not_found", "Core group is unavailable"))?;
-    if group.platform == "claude"
+    if group.agent == "claude"
         && input
             .models
             .iter()

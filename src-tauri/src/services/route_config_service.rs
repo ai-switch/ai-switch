@@ -2713,12 +2713,13 @@ command = "npx"
     ) {
         let credential_id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
+        // 统一账号池（G-P8 P4a）：夹具账号一律落唯一池 codex + 默认组；
+        // platform 参数保留为对接身份（决定给哪个客户端写配置），不影响存储。
         sqlx::query(
             "INSERT INTO route_credentials (id, platform, kind, display_name, secret_payload_json, config_json, preview_json, created_at, updated_at)
-             VALUES (?, ?, 'api', ?, '{}', ?, '{}', ?, ?)",
+             VALUES (?, 'codex', 'api', ?, '{}', ?, '{}', ?, ?)",
         )
         .bind(&credential_id)
-        .bind(platform)
         .bind(display_name)
         .bind(config_json)
         .bind(&now)
@@ -2728,14 +2729,12 @@ command = "npx"
         .expect("insert credential");
         sqlx::query(
             "INSERT INTO route_pool_members (id, platform, route_credential_id, created_at, updated_at, group_id)
-             VALUES (?, ?, ?, ?, ?, ?)",
+             VALUES (?, 'codex', ?, ?, ?, 'codex-default')",
         )
         .bind(Uuid::new_v4().to_string())
-        .bind(platform)
         .bind(&credential_id)
         .bind(&now)
         .bind(&now)
-        .bind(format!("{platform}-default"))
         .execute(pool)
         .await
         .expect("insert pool member");
