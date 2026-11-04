@@ -64,7 +64,7 @@ use crate::services::route_protocol_bridge::{
     force_reasoning_content_on_chat_body, is_anthropic_count_tokens_path,
     prepare_request as prepare_protocol_bridge_request,
     transform_response_with_tool_namespaces as transform_protocol_bridge_response, turn_reminder,
-    IncrementalResponseBridge, PreparedBridgeRequest, ProtocolBridgeKind,
+    IncrementalResponseBridge, PreparedBridgeRequest, ProtocolBridgeKind, TransformedBridgeResponse,
 };
 use crate::services::route_proxy_live_log::{
     stage_preview, truncated_stage_names, RouteProxyLiveLog, RouteProxyLiveLogEntry,
@@ -578,12 +578,19 @@ impl RouteProxyRuntimeState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AudioResponseAdapter {
+    pub(crate) dialect: crate::audiogen::protocol::AudioDialect,
+    pub(crate) response_format: crate::audiogen::protocol::SpeechAudioFormat,
+}
+
 #[derive(Debug)]
 pub(crate) struct BuiltUpstreamRequest {
     pub(crate) target_url: String,
     pub(crate) headers: HeaderMap,
     pub(crate) body: Vec<u8>,
     pub(crate) bridge_kind: Option<ProtocolBridgeKind>,
+    pub(crate) audio_response_adapter: Option<AudioResponseAdapter>,
     pub(crate) tool_namespaces: BTreeMap<String, String>,
     pub(crate) streaming_request: bool,
     pub(crate) reasoning_sanitized: bool,
@@ -1477,6 +1484,7 @@ pub(crate) async fn forward_request(
             headers: mut request_headers,
             body: outbound_body,
             bridge_kind,
+            audio_response_adapter,
             tool_namespaces,
             streaming_request,
             reasoning_sanitized: outbound_reasoning_sanitized,
@@ -2028,17 +2036,26 @@ pub(crate) async fn forward_request(
             upstream_content_type,
             streaming_request,
         );
-        if let Some(bridge_kind) = bridge_kind {
+        // 文本协议桥与音频方言回程共用同一个「转换 → 失败即切号」的出口。
+        // 音频只转 2xx：错误体按上游原样透传（与协议桥的口径一致）。
+        let response_transform = if let Some(bridge_kind) = bridge_kind {
             let content_type = upstream_headers
                 .get(axum::http::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok());
-            let transformed = match transform_protocol_bridge_response(
+            Some(transform_protocol_bridge_response(
                 bridge_kind,
                 status.as_u16(),
                 content_type,
                 &response_bytes,
                 &tool_namespaces,
-            ) {
+            ))
+        } else if let Some(adapter) = audio_response_adapter.filter(|_| status.is_success()) {
+            Some(transform_audio_upstream_response(adapter, &response_bytes))
+        } else {
+            None
+        };
+        if let Some(response_transform) = response_transform {
+            let transformed = match response_transform {
                 Ok(response) => response,
                 Err(error) => {
                     let error_message = format!(
@@ -6634,6 +6651,7 @@ fn build_api_upstream_request(
         headers: headers.clone(),
         body: rewritten_body,
         bridge_kind,
+        audio_response_adapter: None,
         tool_namespaces,
         streaming_request,
         reasoning_sanitized,
@@ -6673,6 +6691,7 @@ fn build_video_upstream_request(
         headers: headers.clone(),
         body: body.to_vec(),
         bridge_kind: None,
+        audio_response_adapter: None,
         tool_namespaces: BTreeMap::new(),
         streaming_request: false,
         reasoning_sanitized: false,
@@ -6681,18 +6700,16 @@ fn build_video_upstream_request(
 
 /// 音频（TTS）的上游请求构造。**直路**，不进文本的 `ApiDialect` 体系。
 ///
-/// 与 [`build_video_upstream_request`] 的差别只有一处：音频的上游体**就是客户端
-/// 给的那个 JSON**，不需要方言转换，只需要把 `model` 按账号的 `model_mappings`
-/// 改写。音频方言目前只有 OpenAI 兼容一种，它的字段名就是 OpenAI 风格的 `model`，
-/// 所以 `apply_model_mappings_with_mode` 能直接作用（可灵那条链路上它改写不到，
-/// 因为可灵用的是 `model_name`）。
+/// 先按账号的 `model_mappings` 改写 OpenAI 形状的 `model`，再按方言转换：
+///   - `openai`：改写后的 JSON 原样发出，回程原样透传（不带回程适配器）；
+///   - `minimax`：转成 `/v1/t2a_v2` 原生体，回程是 JSON + hex，由
+///     [`AudioResponseAdapter`] 在重试循环里还原成音频字节。HTTP 200 里的业务
+///     错误也在那里变成转换失败，从而进入切号，而不是被当成成功结算。
 ///
-/// 上游路径取自**方言**而不是入站的 `path`：现在两者相同（都是
-/// `/v1/audio/speech`），但加非兼容方言时（MiniMax `/v1/t2a_v2`、火山
-/// `/api/v1/tts`）上游路径会与入站路径分离，那时这个取值方式就不需要改。
+/// 上游路径取自**方言**而不是入站的 `path`。
 ///
-/// 鉴权头现在硬写 `Bearer`。**加 ElevenLabs（`xi-api-key`）或 Azure
-/// （`Ocp-Apim-Subscription-Key`）时必须改成按方言取头名。**
+/// 鉴权头现在硬写 `Bearer`（OpenAI 与 MiniMax 都是）。**加 ElevenLabs
+/// （`xi-api-key`）或 Azure（`Ocp-Apim-Subscription-Key`）时必须改成按方言取头名。**
 fn build_audio_upstream_request(
     credential: &SelectedCredential,
     path: &str,
@@ -6720,7 +6737,7 @@ fn build_audio_upstream_request(
     )
     .ok_or_else(|| {
         format!(
-            "Route credential {} has an unsupported audio interface_format '{}'; expected openai",
+            "Route credential {} has an unsupported audio interface_format '{}'; expected openai or minimax",
             credential.display_name,
             string_value(config, "interface_format").unwrap_or("")
         )
@@ -6733,21 +6750,55 @@ fn build_audio_upstream_request(
     crate::audiogen::protocol::validate_speech_request(dialect, body)
         .map_err(|error| format!("validation.audio_request: {error}"))?;
 
-    // `model` 改写：客户端看到的名字 → 上游认的名字。其余字段一律原样透传
-    // （`voice` 是各家私有的，统一词表是自找的抽象泄漏）。
+    // `model` 改写：客户端看到的名字 → 上游认的名字。OpenAI 方言其余字段一律原样
+    // 透传（`voice` 是各家私有的，统一词表是自找的抽象泄漏）。
     let mappings = parse_model_capability_value(config).mappings;
     let rewritten_body = apply_model_mappings_with_mode(body, &mappings, model_match_mode);
+    let (rewritten_body, audio_response_adapter) = match dialect {
+        crate::audiogen::protocol::AudioDialect::OpenAi => (rewritten_body, None),
+        crate::audiogen::protocol::AudioDialect::MiniMax => {
+            let prepared =
+                crate::audiogen::protocol::prepare_speech_request(dialect, &rewritten_body)
+                    .map_err(|error| format!("validation.audio_request: {error}"))?;
+            (
+                prepared.body,
+                Some(AudioResponseAdapter {
+                    dialect,
+                    response_format: prepared.response_format,
+                }),
+            )
+        }
+    };
 
     insert_header(headers, "authorization", &format!("Bearer {api_key}"))?;
+    if audio_response_adapter.is_some() {
+        insert_header(headers, "content-type", "application/json")?;
+    }
     let target_url = build_target_url(base_url, dialect.speech_path(), query);
     Ok(BuiltUpstreamRequest {
         target_url,
         headers: headers.clone(),
         body: rewritten_body,
         bridge_kind: None,
+        audio_response_adapter,
         tool_namespaces: BTreeMap::new(),
         streaming_request: false,
         reasoning_sanitized: false,
+    })
+}
+
+/// 把非 OpenAI 音频方言的回程还原成 OpenAI `/v1/audio/speech` 的原始字节。
+///
+/// 只对 2xx 调用（错误体原样透传，与协议桥同一口径）。失败（含 MiniMax 在 HTTP 200
+/// 里报的业务错误）由调用方归类为 `response_transform`，进入切号。
+fn transform_audio_upstream_response(
+    adapter: AudioResponseAdapter,
+    body: &[u8],
+) -> Result<TransformedBridgeResponse, String> {
+    let audio = crate::audiogen::protocol::extract_audio_response(adapter.dialect, body)?;
+    Ok(TransformedBridgeResponse {
+        body: audio,
+        content_type: Some(adapter.response_format.content_type().to_string()),
     })
 }
 
@@ -6786,17 +6837,24 @@ fn build_audio_transcribe_upstream_request(
             credential.display_name
         )
     })?;
-    // 方言校验与 TTS 同一条规则：账号的 `interface_format` 必须是音频方言。
-    if crate::audiogen::protocol::dialect_from_interface_format(
-        string_value(config, "interface_format").unwrap_or_default(),
-    )
-    .is_none()
-    {
-        return Err(format!(
-            "Route credential {} has an unsupported audio interface_format '{}'; expected openai",
-            credential.display_name,
-            string_value(config, "interface_format").unwrap_or("")
-        ));
+    // 方言校验：账号的 `interface_format` 必须是**支持 STT** 的音频方言。
+    // MiniMax 只有 TTS，误配到 STT 的账号在这里拒绝，不能落到 OpenAI 的 multipart 路径上。
+    let interface_format = string_value(config, "interface_format").unwrap_or_default();
+    match crate::audiogen::protocol::dialect_from_interface_format(interface_format) {
+        Some(dialect) if dialect.supports_transcription() => {}
+        Some(dialect) => {
+            return Err(format!(
+                "Route credential {} uses the '{}' audio dialect, which does not support transcription",
+                credential.display_name,
+                dialect.as_str()
+            ));
+        }
+        None => {
+            return Err(format!(
+                "Route credential {} has an unsupported audio interface_format '{}'; expected openai",
+                credential.display_name, interface_format
+            ));
+        }
     }
 
     let content_type = headers
@@ -6841,6 +6899,7 @@ fn build_audio_transcribe_upstream_request(
         headers: headers.clone(),
         body: rewritten_body,
         bridge_kind: None,
+        audio_response_adapter: None,
         tool_namespaces: BTreeMap::new(),
         streaming_request: false,
         reasoning_sanitized: false,
@@ -6980,6 +7039,7 @@ fn build_official_upstream_request(
         headers: headers.clone(),
         body: rewritten_body,
         bridge_kind,
+        audio_response_adapter: None,
         tool_namespaces: BTreeMap::new(),
         streaming_request,
         reasoning_sanitized: false,
@@ -14769,6 +14829,76 @@ mod tests {
         let mut credential = api_credential(name, "openai");
         credential.config_json = config_json.to_string();
         credential
+    }
+
+    #[test]
+    fn builds_minimax_speech_request_after_model_mapping() {
+        let credential = api_credential("minimax-audio", "minimax");
+        let built = build_upstream_request_with_bridge(
+            &credential,
+            "codex",
+            "/v1/audio/speech",
+            None,
+            HeaderMap::new(),
+            br#"{"model":"gpt-5","input":"hello","voice":"male-qn-qingse","response_format":"wav"}"#,
+            TurnReminderMode::Apply,
+        )
+        .expect("MiniMax speech request");
+        let body: Value = serde_json::from_slice(&built.body).expect("native body");
+
+        assert_eq!(built.target_url, "https://api.example.com/v1/t2a_v2");
+        assert_eq!(body["model"], "up-gpt");
+        assert_eq!(body["text"], "hello");
+        assert_eq!(body["voice_setting"]["voice_id"], "male-qn-qingse");
+        assert_eq!(body["audio_setting"]["format"], "wav");
+        assert_eq!(body["output_format"], "hex");
+        assert_eq!(body["stream"], false);
+        assert_eq!(
+            built.audio_response_adapter,
+            Some(AudioResponseAdapter {
+                dialect: crate::audiogen::protocol::AudioDialect::MiniMax,
+                response_format: crate::audiogen::protocol::SpeechAudioFormat::Wav,
+            })
+        );
+    }
+
+    #[test]
+    fn transforms_minimax_success_and_rejects_http_200_provider_errors() {
+        let adapter = AudioResponseAdapter {
+            dialect: crate::audiogen::protocol::AudioDialect::MiniMax,
+            response_format: crate::audiogen::protocol::SpeechAudioFormat::Wav,
+        };
+        let transformed = transform_audio_upstream_response(
+            adapter,
+            br#"{"data":{"audio":"52494646"},"base_resp":{"status_code":0}}"#,
+        )
+        .expect("decoded audio");
+
+        assert_eq!(transformed.body, b"RIFF");
+        assert_eq!(transformed.content_type.as_deref(), Some("audio/wav"));
+
+        let error = transform_audio_upstream_response(
+            adapter,
+            br#"{"base_resp":{"status_code":1004,"status_msg":"insufficient balance"}}"#,
+        )
+        .expect_err("HTTP 200 provider failures must enter failover");
+        assert!(error.contains("1004") && error.contains("insufficient balance"));
+    }
+
+    #[test]
+    fn rejects_minimax_for_transcription_routes() {
+        let credential = api_credential("minimax-audio", "minimax");
+        let error = build_upstream_request(
+            &credential,
+            "codex",
+            "/v1/audio/transcriptions",
+            None,
+            HeaderMap::new(),
+            b"not multipart",
+        )
+        .expect_err("MiniMax has no transcription dialect");
+
+        assert!(error.contains("does not support transcription"), "{error}");
     }
 
     #[test]

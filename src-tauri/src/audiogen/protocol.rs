@@ -13,7 +13,7 @@
 //! ```
 //!
 //! **供应商差异住在这里**（账号的 `config_json.interface_format`），不在 `platform`
-//! 里 —— 与视频同构。目前只有一个方言 `openai`。
+//! 里 —— 与视频同构。目前支持 `openai` 与 `minimax` 两种方言。
 //!
 //! 本文件只放**纯函数**：方言表、请求校验、字符计数、multipart 解析/重建。
 //!
@@ -25,14 +25,15 @@
 //! | --- | --- | --- | --- |
 //! | OpenAI | `/v1/audio/speech` | `Bearer` | 原始字节 |
 //! | ElevenLabs | `/v1/text-to-speech/{voice_id}` | `xi-api-key` | 原始字节 |
-//! | MiniMax | `/v1/t2a_v2?GroupId=` | `Bearer` | **JSON，`data.audio` 是 hex** |
+//! | MiniMax（已支持） | `/v1/t2a_v2` | `Bearer` | **JSON，`data.audio` 是 hex** |
 //! | 火山/豆包 | `/api/v1/tts` | `Bearer;<token>` | **JSON，base64** |
 //! | Azure | `/cognitiveservices/v1` | `Ocp-Apim-Subscription-Key` | 原始字节（要 SSML） |
 //! | Google | `/v1/text:synthesize?key=` | `?key=` | **JSON，base64** |
 //!
-//! 所以那时要加三样东西：方言变体（含 `speech_path` / 鉴权头口径）、
-//! **回程解码**（把 JSON 里的 hex/base64 还原成字节）、以及按方言计的 `input` 上限。
-//! 现在不做回程解码，是因为唯一的方言回的就是原始字节 —— 写一个恒等函数只是噪声。
+//! 每加一家要做三样东西：方言变体（含 `speech_path` / 鉴权头口径）、请求转换
+//! （[`prepare_speech_request`]）与**回程解码**（[`extract_audio_response`]，把 JSON
+//! 里的 hex/base64 还原成字节），以及按方言计的 `input` 上限。MiniMax 当前官方契约
+//! 不需要 `GroupId` 查询参数。
 //!
 //! **鉴权头不统一**这件事与现有链路冲突：`build_audio_upstream_request` 现在硬写
 //! `Authorization: Bearer`，加 ElevenLabs / Azure 时要改成按方言取头名。
@@ -75,12 +76,15 @@ pub enum AudioDialect {
     /// 视频那边刻意**排除**了 `openai` 别名，因为那里 `interface_format: "openai"`
     /// 会静默变成「Sora」；音频这里 `openai` 是正当取值。结论相反是因为语义不同。
     OpenAi,
+    /// MiniMax 原生的 `/v1/t2a_v2`。
+    MiniMax,
 }
 
 impl AudioDialect {
     pub fn as_str(&self) -> &'static str {
         match self {
             AudioDialect::OpenAi => "openai",
+            AudioDialect::MiniMax => "minimax",
         }
     }
 
@@ -89,27 +93,33 @@ impl AudioDialect {
             "openai" | "openai_speech" | "openai-speech" | "speech" | "tts" => {
                 Some(AudioDialect::OpenAi)
             }
+            "minimax" | "mini-max" | "hailuo" => Some(AudioDialect::MiniMax),
             _ => None,
         }
     }
 
     /// 上游 TTS 路径。
-    ///
-    /// OpenAI 兼容端点的上游路径与入站路径**相同**，所以这里就是那个字面量。
-    /// 加非兼容方言时它会变成各家自己的路径。
     pub const fn speech_path(&self) -> &'static str {
-        "/v1/audio/speech"
+        match self {
+            AudioDialect::OpenAi => "/v1/audio/speech",
+            AudioDialect::MiniMax => "/v1/t2a_v2",
+        }
     }
 
     /// 单次请求 `input` 的**字符**上限。
     ///
-    /// OpenAI 是 4096（MiniMax 是 10000）。**超限必须拒绝，不能截断**：截断会让
-    /// 「计费的文本」与「实际合成的文本」不一致 —— 视频那条「计价口径与上游口径
-    /// 必须同源」的同一个教训。
+    /// **超限必须拒绝，不能截断**：截断会让「计费的文本」与「实际合成的文本」
+    /// 不一致 —— 视频那条「计价口径与上游口径必须同源」的同一个教训。
     pub const fn max_input_characters(&self) -> usize {
         match self {
             AudioDialect::OpenAi => 4096,
+            AudioDialect::MiniMax => 10_000,
         }
+    }
+
+    /// 该方言是否支持 OpenAI 兼容的 STT / 翻译端点。
+    pub const fn supports_transcription(&self) -> bool {
+        matches!(self, AudioDialect::OpenAi)
     }
 }
 
@@ -124,6 +134,209 @@ pub fn dialect_from_interface_format(value: &str) -> Option<AudioDialect> {
 /// 是 3 个字节 —— 按字节计费会多收 3 倍。
 pub fn input_characters(input: &str) -> usize {
     input.chars().count()
+}
+
+/// OpenAI 兼容请求声明的音频编码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeechAudioFormat {
+    Mp3,
+    Opus,
+    Aac,
+    Flac,
+    Wav,
+    Pcm,
+}
+
+impl SpeechAudioFormat {
+    fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value.unwrap_or("mp3").trim().to_ascii_lowercase().as_str() {
+            "mp3" => Ok(Self::Mp3),
+            "opus" => Ok(Self::Opus),
+            "aac" => Ok(Self::Aac),
+            "flac" => Ok(Self::Flac),
+            "wav" => Ok(Self::Wav),
+            "pcm" => Ok(Self::Pcm),
+            format => Err(format!("Unsupported speech response format '{format}'")),
+        }
+    }
+
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Mp3 => "mp3",
+            Self::Opus => "opus",
+            Self::Aac => "aac",
+            Self::Flac => "flac",
+            Self::Wav => "wav",
+            Self::Pcm => "pcm",
+        }
+    }
+
+    pub const fn content_type(&self) -> &'static str {
+        match self {
+            Self::Mp3 => "audio/mpeg",
+            Self::Opus => "audio/opus",
+            Self::Aac => "audio/aac",
+            Self::Flac => "audio/flac",
+            Self::Wav => "audio/wav",
+            Self::Pcm => "audio/pcm",
+        }
+    }
+}
+
+/// 客户端期望的 TTS 回程形状。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeechStreamFormat {
+    /// 完整的音频字节。
+    Audio,
+}
+
+impl SpeechStreamFormat {
+    fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value.unwrap_or("audio").trim().to_ascii_lowercase().as_str() {
+            "audio" => Ok(Self::Audio),
+            format => Err(format!("Unsupported speech stream format '{format}'")),
+        }
+    }
+}
+
+/// 发给上游的请求体及解码回程所需的元数据。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedSpeechRequest {
+    pub body: Vec<u8>,
+    pub response_format: SpeechAudioFormat,
+    pub stream_format: SpeechStreamFormat,
+}
+
+/// 把 OpenAI 兼容的 TTS 请求转换成账号方言。
+pub fn prepare_speech_request(
+    dialect: AudioDialect,
+    body: &[u8],
+) -> Result<PreparedSpeechRequest, String> {
+    validate_speech_request(dialect, body)?;
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|error| format!("Invalid speech request: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "Speech request must be a JSON object".to_string())?;
+    let response_format = SpeechAudioFormat::parse(
+        object.get("response_format").and_then(Value::as_str),
+    )?;
+    let stream_format = SpeechStreamFormat::parse(
+        object.get("stream_format").and_then(Value::as_str),
+    )?;
+
+    if dialect == AudioDialect::OpenAi {
+        return Ok(PreparedSpeechRequest {
+            body: body.to_vec(),
+            response_format,
+            stream_format,
+        });
+    }
+
+    if response_format == SpeechAudioFormat::Aac {
+        return Err("MiniMax does not support the 'aac' speech response format".to_string());
+    }
+    let model = object
+        .get("model")
+        .and_then(Value::as_str)
+        .expect("validated speech model");
+    let input = object
+        .get("input")
+        .and_then(Value::as_str)
+        .expect("validated speech input");
+    let voice = object
+        .get("voice")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if voice.is_empty() {
+        return Err("MiniMax speech requests require voice".to_string());
+    }
+
+    let mut voice_setting = serde_json::Map::new();
+    voice_setting.insert("voice_id".to_string(), Value::String(voice.to_string()));
+    if let Some(speed) = object.get("speed") {
+        let speed = speed
+            .as_f64()
+            .ok_or_else(|| "Speech request speed must be a number".to_string())?;
+        if !(0.5..=2.0).contains(&speed) {
+            return Err("MiniMax speech request speed must be between 0.5 and 2.0".to_string());
+        }
+        voice_setting.insert("speed".to_string(), speed.into());
+    }
+
+    let native = serde_json::json!({
+        "model": model,
+        "text": input,
+        "voice_setting": voice_setting,
+        "audio_setting": {
+            "format": response_format.as_str(),
+        },
+        "output_format": "hex",
+        "stream": false,
+    });
+    let body = serde_json::to_vec(&native)
+        .map_err(|error| format!("Failed to encode MiniMax speech request: {error}"))?;
+    Ok(PreparedSpeechRequest {
+        body,
+        response_format,
+        stream_format,
+    })
+}
+
+/// 把供应商回程还原成 OpenAI 音频端点的原始字节。
+pub fn extract_audio_response(dialect: AudioDialect, body: &[u8]) -> Result<Vec<u8>, String> {
+    if dialect == AudioDialect::OpenAi {
+        return Ok(body.to_vec());
+    }
+
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|error| format!("Invalid MiniMax speech response: {error}"))?;
+    let status_code = value
+        .pointer("/base_resp/status_code")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "MiniMax speech response is missing base_resp.status_code".to_string())?;
+    if status_code != 0 {
+        let message = value
+            .pointer("/base_resp/status_msg")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown provider error");
+        return Err(format!(
+            "MiniMax speech request failed with status {status_code}: {message}"
+        ));
+    }
+    let audio = value
+        .pointer("/data/audio")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "MiniMax speech response is missing data.audio".to_string())?;
+    decode_hex_audio(audio)
+}
+
+fn decode_hex_audio(value: &str) -> Result<Vec<u8>, String> {
+    if value.len() % 2 != 0 {
+        return Err("MiniMax speech audio has an odd-length hex payload".to_string());
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = hex_nibble(pair[0])?;
+            let low = hex_nibble(pair[1])?;
+            Ok((high << 4) | low)
+        })
+        .collect()
+}
+
+fn hex_nibble(value: u8) -> Result<u8, String> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        _ => Err(format!(
+            "MiniMax speech audio contains non-hex character '{}'",
+            char::from(value)
+        )),
+    }
 }
 
 /// 校验一次 TTS 请求体，返回 `input` 的字符数。
@@ -395,15 +608,120 @@ mod tests {
                 "{alias}"
             );
         }
+        for alias in ["minimax", "MiniMax", "mini-max", "hailuo"] {
+            assert_eq!(
+                dialect_from_interface_format(alias),
+                Some(AudioDialect::MiniMax),
+                "{alias}"
+            );
+        }
         assert_eq!(AudioDialect::OpenAi.as_str(), "openai");
-        assert_eq!(
-            dialect_from_interface_format(AudioDialect::OpenAi.as_str()),
-            Some(AudioDialect::OpenAi)
-        );
-        // 视频方言不能落进音频表里（反过来也一样）—— 两个方向的静默死数据
-        for foreign in ["kling", "ark", "minimax", "zhipu", "sora", "anthropic", "gemini"] {
+        assert_eq!(AudioDialect::MiniMax.as_str(), "minimax");
+        assert_eq!(AudioDialect::OpenAi.speech_path(), "/v1/audio/speech");
+        assert_eq!(AudioDialect::MiniMax.speech_path(), "/v1/t2a_v2");
+        assert_eq!(AudioDialect::OpenAi.max_input_characters(), 4096);
+        assert_eq!(AudioDialect::MiniMax.max_input_characters(), 10_000);
+        assert!(AudioDialect::OpenAi.supports_transcription());
+        assert!(!AudioDialect::MiniMax.supports_transcription());
+        // 其它视频方言与文本方言不能静默落进音频表里。
+        for foreign in ["kling", "ark", "zhipu", "sora", "anthropic", "gemini"] {
             assert_eq!(dialect_from_interface_format(foreign), None, "{foreign}");
         }
+    }
+
+    #[test]
+    fn maps_openai_speech_request_to_minimax_without_changing_the_billing_text() {
+        let request = serde_json::to_vec(&serde_json::json!({
+            "model": "speech-02-hd",
+            "input": "你好，世界",
+            "voice": "male-qn-qingse",
+            "response_format": "wav",
+            "speed": 1.25,
+            "stream_format": "audio",
+        }))
+        .expect("json");
+        let prepared = prepare_speech_request(AudioDialect::MiniMax, &request).expect("request");
+        let body: Value = serde_json::from_slice(&prepared.body).expect("json");
+
+        assert_eq!(body["model"], "speech-02-hd");
+        assert_eq!(body["text"], "你好，世界");
+        assert_eq!(body["voice_setting"]["voice_id"], "male-qn-qingse");
+        assert_eq!(body["voice_setting"]["speed"], 1.25);
+        assert_eq!(body["audio_setting"]["format"], "wav");
+        assert_eq!(body["output_format"], "hex");
+        assert_eq!(body["stream"], false);
+        assert_eq!(prepared.response_format, SpeechAudioFormat::Wav);
+        assert_eq!(prepared.stream_format, SpeechStreamFormat::Audio);
+        assert_eq!(prepared.response_format.content_type(), "audio/wav");
+        assert_eq!(validate_speech_request(AudioDialect::MiniMax, &request), Ok(5));
+    }
+
+    #[test]
+    fn keeps_openai_speech_requests_wire_compatible() {
+        let request = br#"{"model":"tts-1","input":"hello","voice":"alloy"}"#;
+        let prepared = prepare_speech_request(AudioDialect::OpenAi, request).expect("request");
+
+        assert_eq!(prepared.body, request);
+        assert_eq!(prepared.response_format, SpeechAudioFormat::Mp3);
+        assert_eq!(prepared.stream_format, SpeechStreamFormat::Audio);
+    }
+
+    #[test]
+    fn rejects_minimax_settings_that_cannot_be_mapped_safely() {
+        for request in [
+            serde_json::json!({
+                "model": "speech-02-hd",
+                "input": "hello",
+            }),
+            serde_json::json!({
+                "model": "speech-02-hd",
+                "input": "hello",
+                "voice": "male-qn-qingse",
+                "response_format": "aac",
+            }),
+            serde_json::json!({
+                "model": "speech-02-hd",
+                "input": "hello",
+                "voice": "male-qn-qingse",
+                "speed": 0.49,
+            }),
+            serde_json::json!({
+                "model": "speech-02-hd",
+                "input": "hello",
+                "voice": "male-qn-qingse",
+                "speed": 2.01,
+            }),
+        ] {
+            let body = serde_json::to_vec(&request).expect("json");
+            assert!(
+                prepare_speech_request(AudioDialect::MiniMax, &body).is_err(),
+                "{request}"
+            );
+        }
+    }
+
+    #[test]
+    fn decodes_minimax_hex_audio_and_rejects_provider_or_encoding_failures() {
+        let audio = extract_audio_response(
+            AudioDialect::MiniMax,
+            br#"{"data":{"audio":"49443300ff"},"base_resp":{"status_code":0,"status_msg":"success"}}"#,
+        )
+        .expect("audio");
+        assert_eq!(audio, [b'I', b'D', b'3', 0, 0xff]);
+
+        for body in [
+            br#"{"data":{"audio":"abc"},"base_resp":{"status_code":0}}"#.as_slice(),
+            br#"{"data":{"audio":"gg"},"base_resp":{"status_code":0}}"#.as_slice(),
+            br#"{"base_resp":{"status_code":0}}"#.as_slice(),
+        ] {
+            assert!(extract_audio_response(AudioDialect::MiniMax, body).is_err());
+        }
+        let error = extract_audio_response(
+            AudioDialect::MiniMax,
+            br#"{"base_resp":{"status_code":1004,"status_msg":"insufficient balance"}}"#,
+        )
+        .expect_err("provider-level failures are not audio");
+        assert!(error.contains("1004") && error.contains("insufficient balance"), "{error}");
     }
 
     /// 中文必须按**字符**数，不是字节数。

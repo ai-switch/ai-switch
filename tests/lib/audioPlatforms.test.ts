@@ -12,7 +12,7 @@ describe("audioPlatforms", () => {
   /// 这就是它和视频（方言与文本不相交，可按方言判）的结构差别。
   it("identifies an audio account by capability, not by dialect", () => {
     expect(AUDIO_CAPABILITY).toBe("audio.generate");
-    expect(AUDIO_DIALECT_VALUES).toEqual(["openai"]);
+    expect(AUDIO_DIALECT_VALUES).toEqual(["openai", "minimax"]);
   });
 
   it("carries the provider in the interface format, not the platform", () => {
@@ -24,13 +24,14 @@ describe("audioPlatforms", () => {
   /// 音频**认** `openai`，而视频刻意**不认**（视频那边收了它
   /// `interface_format: "openai"` 会静默变成「Sora」）。两处结论相反是刻意的，
   /// 所以把音频这一侧钉住。
-  it("accepts openai as a first-class audio dialect", () => {
+  it("accepts openai and minimax as first-class audio dialects", () => {
     expect(audioDialectLabel("openai")).toBe("OpenAI");
     expect(audioDialectLabel("  OPENAI ")).toBe("OpenAI");
+    expect(audioDialectLabel("minimax")).toBe("MiniMax");
+    expect(audioDialectLabel("  MiniMax ")).toBe("MiniMax");
   });
 
   it("falls back to the raw value for unknown dialects", () => {
-    expect(audioDialectLabel("minimax")).toBe("minimax");
     expect(audioDialectLabel("kling")).toBe("kling");
   });
 });

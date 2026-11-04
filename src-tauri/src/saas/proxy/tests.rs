@@ -1153,6 +1153,14 @@ async fn audio_billing_fixture(
     base_url: &str,
     price_per_1k_chars: i64,
 ) -> (SqlitePool, String, tempfile::TempDir) {
+    audio_billing_fixture_with_dialect(base_url, price_per_1k_chars, "openai").await
+}
+
+async fn audio_billing_fixture_with_dialect(
+    base_url: &str,
+    price_per_1k_chars: i64,
+    interface_format: &str,
+) -> (SqlitePool, String, tempfile::TempDir) {
     let pool = repository::test_pool().await;
     crate::database::run_migrations(&pool).await.unwrap();
     repository::test_enable(&pool).await;
@@ -1173,7 +1181,7 @@ async fn audio_billing_fixture(
     .bind(
         json!({
             "base_url": base_url,
-            "interface_format": "openai",
+            "interface_format": interface_format,
             "model_mappings": [{
                 "from": "tts-1",
                 "to": "tts-1-upstream",
@@ -1441,6 +1449,99 @@ async fn saas_audio_request_refunds_the_whole_reservation_when_the_upstream_fail
     assert_eq!(logs.items[0].amount_usd_micros, 0);
     assert_eq!(logs.items[0].status, 502);
 
+    upstream.abort();
+}
+
+/// MiniMax 方言端到端：OpenAI 形状的请求被转成 `/v1/t2a_v2` 原生体，JSON+hex
+/// 回程被还原成音频字节并带正确的 Content-Type；HTTP 200 里的业务错误必须退款。
+#[tokio::test]
+async fn saas_minimax_audio_decodes_hex_and_refunds_http_200_provider_errors() {
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fail_flag = fail.clone();
+    let app = Router::new().route(
+        "/v1/t2a_v2",
+        post(move |Json(payload): Json<Value>| {
+            let fail = fail_flag.clone();
+            async move {
+                assert_eq!(payload["model"], "tts-1-upstream");
+                assert_eq!(payload["text"], "你好世界");
+                assert_eq!(payload["voice_setting"]["voice_id"], "male-qn-qingse");
+                assert_eq!(payload["output_format"], "hex");
+                let body = if fail.load(Ordering::SeqCst) {
+                    json!({"base_resp":{"status_code":1004,"status_msg":"insufficient balance"}})
+                } else {
+                    json!({"data":{"audio":"4944332d6d696e696d6178"},"base_resp":{"status_code":0,"status_msg":"success"}})
+                };
+                ([(header::CONTENT_TYPE, "application/json")], body.to_string()).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let (pool, plaintext, _log_dir) =
+        audio_billing_fixture_with_dialect(&format!("http://{address}/v1"), 15_000, "minimax")
+            .await;
+    let state = test_app_state(pool.clone());
+    let runtime = SaasRuntime::default();
+    let send = || {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {plaintext}").parse().unwrap(),
+        );
+        execute(
+            &state,
+            &runtime,
+            build_proxy_state(pool.clone(), &RouteProxyRuntimeState::default()),
+            Method::POST,
+            headers,
+            "/v1/audio/speech".parse().unwrap(),
+            Body::from(
+                json!({"model":"tts-1","input":"你好世界","voice":"male-qn-qingse"}).to_string(),
+            ),
+        )
+    };
+
+    let response = send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(content_type.as_deref(), Some("audio/mpeg"));
+    assert_eq!(&bytes[..], b"ID3-minimax");
+
+    fail.store(true, Ordering::SeqCst);
+    let response = send().await.unwrap();
+    assert!(!response.status().is_success(), "{}", response.status());
+
+    let statuses: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT status,reserved_micros FROM saas_billing_reservations ORDER BY created_at, rowid",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        statuses,
+        vec![("settled".to_string(), 60), ("refunded".to_string(), 60)]
+    );
+    let ledger: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*),COALESCE(SUM(amount_micros),0) FROM saas_wallet_ledger WHERE kind='usage'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ledger, (1, -60));
+
+    runtime.logs.shutdown().await.unwrap();
     upstream.abort();
 }
 

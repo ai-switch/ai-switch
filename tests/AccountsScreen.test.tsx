@@ -4035,6 +4035,52 @@ describe("AccountsScreen", () => {
     confirmSpy.mockRestore();
   });
 
+  it.each([
+    ["minimax", "audio.generate"],
+    ["kling", "video.generate"],
+  ])("keeps the %s media dialect when an account is opened and saved", async (dialect, capability) => {
+    const api = {
+      ...credentialsFixture[1],
+      platform: "codex" as const,
+      display_name: "Media API",
+      config_json: JSON.stringify({
+        base_url: "https://api.example.com/v1",
+        interface_format: dialect,
+        model_mappings: [{ from: "media-1", to: "media-1", capabilities: [capability] }],
+      }),
+    };
+    vi.mocked(listRouteCredentials).mockResolvedValue([api]);
+    vi.mocked(updateRouteCredential).mockResolvedValue(api);
+
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 Media API" }));
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
+    const config = JSON.parse(vi.mocked(updateRouteCredential).mock.calls[0][1].config_json);
+    expect(config.interface_format).toBe(dialect);
+  });
+
+  it("shows an existing MiniMax audio dialect in the edit format select", async () => {
+    const api = {
+      ...credentialsFixture[1],
+      platform: "codex" as const,
+      display_name: "Media API",
+      config_json: JSON.stringify({
+        base_url: "https://api.example.com/v1",
+        interface_format: "minimax",
+        model_mappings: [{ from: "speech-02", to: "speech-02", capabilities: ["audio.generate"] }],
+      }),
+    };
+    vi.mocked(listRouteCredentials).mockResolvedValue([api]);
+
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 Media API" }));
+
+    expect(screen.getByLabelText("编辑接口格式")).toHaveValue("minimax");
+    expect(screen.getByRole("option", { name: "MiniMax" })).toBeInTheDocument();
+  });
+
   it("hides the preset select on platforms without presets", async () => {
     // Claude and Codex both have presets now, so Gemini is what proves the
     // select is conditional rather than always rendered.

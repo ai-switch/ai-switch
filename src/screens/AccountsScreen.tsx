@@ -1384,9 +1384,11 @@ function credentialBaseUrlLink(credential: RouteCredential): { href: string; hos
   }
 }
 
+// 账号已有的媒体方言（视频 / 音频）必须原样保留：编辑抽屉只为文本提供下拉选项，
+// 把认不出的值一律当成 `openai` 会让「打开再保存」静默改坏 MiniMax / 可灵账号。
 function interfaceFormatFromConfig(config: Record<string, unknown>): InterfaceFormat {
   const value = stringFromRecord(config, "interface_format");
-  return routeInterfaceFormats.includes(value as InterfaceFormat) ? (value as InterfaceFormat) : "openai";
+  return value in interfaceFormatLabels ? (value as InterfaceFormat) : "openai";
 }
 
 function apiSecretJsonWithKey(
@@ -10513,7 +10515,12 @@ export function AccountsScreen({
                         }}
                         value={editApiInterfaceFormat}
                       >
-                        {interfaceFormatsForPlatform(activePlatform).map((format) => (
+                        {[
+                          ...(interfaceFormatsForPlatform(activePlatform).includes(editApiInterfaceFormat)
+                            ? []
+                            : [editApiInterfaceFormat]),
+                          ...interfaceFormatsForPlatform(activePlatform),
+                        ].map((format) => (
                           <option key={format} value={format}>
                             {interfaceFormatLabel(format)}
                           </option>
