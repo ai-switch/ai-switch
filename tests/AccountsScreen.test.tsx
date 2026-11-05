@@ -1659,6 +1659,8 @@ describe("AccountsScreen", () => {
         page_size: 20,
         // 拖拽排序要回同一批账号，所以能力过滤跟着走（这里没有过滤，故为 null）
         capability: null,
+        kind: null,
+        provider: null,
       }),
     );
     expect(screen.queryByTestId("account-drop-placeholder")).not.toBeInTheDocument();
@@ -1693,6 +1695,8 @@ describe("AccountsScreen", () => {
         page_size: 20,
         // 拖拽排序要回同一批账号，所以能力过滤跟着走（这里没有过滤，故为 null）
         capability: null,
+        kind: null,
+        provider: null,
       }),
     );
   });
@@ -2258,6 +2262,8 @@ describe("AccountsScreen", () => {
         page_size: 20,
         // 拖拽排序要回同一批账号，所以能力过滤跟着走（这里没有过滤，故为 null）
         capability: null,
+        kind: null,
+        provider: null,
       }),
     );
   });
@@ -2286,6 +2292,8 @@ describe("AccountsScreen", () => {
         page_size: 20,
         // 拖拽排序要回同一批账号，所以能力过滤跟着走（这里没有过滤，故为 null）
         capability: null,
+        kind: null,
+        provider: null,
       }),
     );
   });
@@ -3560,6 +3568,74 @@ describe("AccountsScreen", () => {
     await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("媒体账号至少需要一条完整的模型映射");
     expect(createApiRouteCredential).not.toHaveBeenCalled();
+  });
+
+  it("creates and edits API account provider independently of the wire protocol", async () => {
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.selectOptions(screen.getByLabelText("API 账号来源"), "packycode");
+    await userEvent.type(screen.getByLabelText("API 账号名称"), "Relay source");
+    await userEvent.type(screen.getByLabelText("API Key"), "sk-provider");
+    await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
+    await waitFor(() => expect(createApiRouteCredential).toHaveBeenCalled());
+    expect(vi.mocked(createApiRouteCredential).mock.calls[0][0]).toEqual(expect.objectContaining({ provider: "packycode", interface_format: "openai" }));
+  });
+
+  it("shows provider badges and filters account kinds and providers in the server query", async () => {
+    const official = { ...credentialsFixture[0], platform: "codex", provider: "claude", display_name: "Subscription source" };
+    const api = { ...credentialsFixture[1], provider: "openrouter", display_name: "Relay source" };
+    vi.mocked(listRouteCredentials).mockResolvedValue([official, api]);
+    // 模拟服务端按 kind/provider 过滤：查询参数生效时页面只返回命中的账号。
+    vi.mocked(listRouteCredentialPage).mockImplementation(async (input) => {
+      const scoped = [official, api]
+        .filter((credential) => !input.kind || credential.kind === input.kind)
+        .filter((credential) => !input.provider || credential.provider === input.provider);
+      return {
+        items: scoped,
+        total: scoped.length,
+        page: 1,
+        page_count: 1,
+        page_size: input.page_size,
+        previous_page_account_id: null,
+        next_page_account_id: null,
+        official_account_count: [official, api].filter((credential) => credential.kind === "official").length,
+        filter_options: [],
+      };
+    });
+    renderScreen();
+    expect(await screen.findByTitle("账号来源：Claude")).toBeInTheDocument();
+    expect(screen.getByTitle("账号来源：OpenRouter")).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText("账号类型筛选"), "api");
+    await userEvent.selectOptions(screen.getByLabelText("账号来源筛选"), "openrouter");
+    await waitFor(() => expect(listRouteCredentialPage).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "api", provider: "openrouter" })));
+    expect(screen.queryByRole("button", { name: "编辑 Subscription source" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "编辑 Relay source" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "编辑 Relay source" }));
+    expect(screen.getByLabelText("编辑 API 账号来源")).toHaveValue("openrouter");
+    await userEvent.selectOptions(screen.getByLabelText("编辑 API 账号来源"), "custom");
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
+    expect(vi.mocked(updateRouteCredential).mock.calls[0][1].provider).toBe("custom");
+  });
+
+  it("media create screens do not offer official subscription imports", async () => {
+    renderScreen("codex", "out_of_pool", false, createQueryClient(), "video.generate");
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    expect(screen.queryByRole("button", { name: "批量导入" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "导入其他客户端" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "API 账号" })).toBeInTheDocument();
+  });
+
+  it("uses the selected official provider when importing subscriptions in the general pool", async () => {
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "批量导入" }));
+    await userEvent.selectOptions(screen.getByLabelText("官方订阅来源"), "claude");
+    await userEvent.type(screen.getByLabelText("导入批量名称"), "Claude subscriptions");
+    await userEvent.clear(screen.getByLabelText("账号 JSON"));
+    fireEvent.change(screen.getByLabelText("账号 JSON"), { target: { value: '{"type":"claude","access_token":"at-test"}' } });
+    await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
+    await waitFor(() => expect(importOfficialRouteCredentialsFromText).toHaveBeenCalledWith(expect.objectContaining({ platform: "claude", batch_name: "Claude subscriptions" })));
   });
 
   it("shows readable interface format labels for OpenAI and Claude options", async () => {

@@ -71,6 +71,8 @@ export function CodexChannelsScreen({
   imageGenerationEnabled,
   onOpenImageStudio,
   initialSegment,
+  modality,
+  hideSegmentTabs = false,
 }: {
   onOpenSessions?: (platform: PlatformId) => void;
   sidebarCollapsed?: boolean;
@@ -85,11 +87,14 @@ export function CodexChannelsScreen({
   /// 外部指定的初始分段（P4b：左侧模态导航直达对应段）。只影响**本次挂载**，
   /// 选中后仍按既有规则记住上次选择。
   initialSegment?: CodexSegment;
+  modality?: CodexSegment;
+  hideSegmentTabs?: boolean;
 }) {
   const { t } = useI18n();
-  const [segment, setSegment] = useState<CodexSegment>(() =>
+  const [storedSegment, setSegment] = useState<CodexSegment>(() =>
     initialSegment ?? readStoredSegment(),
   );
+  const segment = modality ?? storedSegment;
 
   const select = (next: CodexSegment) => {
     setSegment(next);
@@ -98,7 +103,7 @@ export function CodexChannelsScreen({
 
   return (
     <div className="space-y-3">
-      <div
+      {!hideSegmentTabs && <div
         aria-label={t("codex.segments")}
         className="flex flex-wrap items-center gap-1 border-b border-stone-200 px-1 pb-2"
         role="tablist"
@@ -120,7 +125,7 @@ export function CodexChannelsScreen({
             {t(SEGMENT_LABEL_KEYS[item])}
           </button>
         ))}
-      </div>
+      </div>}
 
       {segment === "general" ? (
         <AccountsScreen
@@ -165,7 +170,7 @@ export function CodexChannelsScreen({
         <div className="space-y-3">
           {/* 向量（embedding）模态预留位：功能未做，入口先占住导航位。 */}
           <p className="rounded-xl border border-stone-200 bg-white px-4 py-6 text-center text-[13px] font-medium text-stone-500">
-            向量（embedding）渠道尚未开放，敬请期待。
+            {t("codex.segment.vectorPending")}
           </p>
         </div>
       ) : null}

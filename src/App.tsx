@@ -4,25 +4,21 @@ import { AnimatePresence, motion } from "motion/react";
 import { DeepLinkImportDialog } from "./components/deeplink/DeepLinkImportDialog";
 import { LowDiskSpaceBanner } from "./components/system/LowDiskSpaceBanner";
 import { AutoUpdatePrompt } from "./components/updates/AutoUpdatePrompt";
+import { AppLayout } from "./components/layout/AppLayout";
 import {
-  AppLayout,
-  agentScreenByPlatform,
-  platformByAgentScreen,
-  type AgentPlatform,
-} from "./components/layout/AppLayout";
-import {
-  readAgentVisibility,
-  resolveVisibleAgentScreen,
-  writeAgentVisibility,
-  type AgentVisibility,
-} from "./lib/agentVisibility";
+  modalityForScreen,
+  modalityScreenById,
+  readModalityVisibility,
+  resolveVisibleModalityScreen,
+  writeModalityVisibility,
+  type ModalityVisibility,
+} from "./lib/accountModalities";
 import { WebAuthGate } from "./components/auth/WebAuthGate";
 import { ErrorBoundary } from "./components/ui/ErrorBoundary";
 import { ThemeSync } from "./components/theme/ThemeSync";
 import { I18nProvider } from "./lib/i18n";
 import { createQueryClient } from "./lib/query/queryClient";
 import { isDesktop, isLocalWebDevRuntime } from "./lib/transport";
-import { AccountsScreen } from "./screens/AccountsScreen";
 import { UsageOverviewPanel } from "./components/accounts/UsageOverviewPanel";
 import { AboutScreen } from "./screens/AboutScreen";
 import { BatchesScreen } from "./screens/BatchesScreen";
@@ -48,18 +44,8 @@ import { getSettings } from "./lib/api/client";
 
 const queryClient = createQueryClient();
 
-const agentScreens = new Set([
-  "Codex",
-  "Claude",
-  "Grok",
-  "Gemini",
-  "OpenCode",
-  "OpenClaw",
-  "Hermes",
-]);
-
 const implementedScreens = new Set([
-  ...agentScreens,
+  ...Object.values(modalityScreenById),
   "Dashboard",
   "Batches",
   "Providers",
@@ -107,17 +93,17 @@ export function App() {
       .then((settings) => setImageGenerationEnabled(settings.image_generation_enabled))
       .catch(() => setImageGenerationEnabled(false));
   }, [webReady]);
-  const [screen, setScreen] = useState("Codex");
-  const screenRef = useRef("Codex");
+  const [screen, setScreen] = useState(modalityScreenById.general);
+  const screenRef = useRef(modalityScreenById.general);
   const [navigationDirection, setNavigationDirection] = useState<MotionDirection>("neutral");
   const [sessionPlatform, setSessionPlatform] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [poolScopeFocus, setPoolScopeFocus] = useState<PoolScopeFocus | null>(null);
-  const [agentVisibility, setAgentVisibility] = useState<AgentVisibility>(readAgentVisibility);
+  const [modalityVisibility, setModalityVisibility] = useState<ModalityVisibility>(readModalityVisibility);
   // Vibe keeps live terminals; once it has been opened we keep it mounted and only
   // hide it so switching back and forth never drops running sessions or scrollback.
   const [vibeMounted, setVibeMounted] = useState(false);
-  const agentPlatform = platformByAgentScreen[screen];
+  const accountModality = modalityForScreen(screen);
   const vibeActive = screen === "Vibe";
 
   useEffect(() => {
@@ -125,16 +111,16 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    writeAgentVisibility(agentVisibility);
-  }, [agentVisibility]);
+    writeModalityVisibility(modalityVisibility);
+  }, [modalityVisibility]);
 
   useEffect(() => {
-    const nextScreen = resolveVisibleAgentScreen(screen, agentVisibility);
+    const nextScreen = resolveVisibleModalityScreen(screen, modalityVisibility);
     if (nextScreen === screen) return;
     screenRef.current = nextScreen;
     setNavigationDirection("neutral");
     setScreen(nextScreen);
-  }, [agentVisibility, screen]);
+  }, [modalityVisibility, screen]);
 
   useEffect(() => {
     if (vibeActive) {
@@ -182,17 +168,13 @@ export function App() {
   };
 
   const handleDeepLinkImported = useCallback(
-    (platform: string, options?: { joinedPool?: boolean }) => {
-      const nextScreen = agentScreenByPlatform[platform as AgentPlatform];
-      if (nextScreen) {
-        setNavigationDirection("forward");
-        screenRef.current = nextScreen;
-        setScreen(nextScreen);
-      }
-      // Land the user on the segment where the imported account now lives so it
-      // doesn't look like the import silently failed.
+    (_platform: string, options?: { joinedPool?: boolean }) => {
+      setNavigationDirection("forward");
+      screenRef.current = modalityScreenById.general;
+      setScreen(modalityScreenById.general);
+      // 所有导入账号都属于统一池；导入厂商不再决定导航入口。
       setPoolScopeFocus({
-        platform,
+        platform: "codex",
         scope: options?.joinedPool ? "in_pool" : "out_of_pool",
         nonce: Date.now(),
       });
@@ -225,7 +207,7 @@ export function App() {
                 transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
               >
                 <ErrorBoundary label="Vibe">
-                  <VibeScreen onExitVibe={() => navigate("Codex")} />
+                  <VibeScreen onExitVibe={() => navigate(modalityScreenById.general)} />
                 </ErrorBoundary>
               </motion.div>
             )}
@@ -233,8 +215,8 @@ export function App() {
               <AppLayout
                 saasEnabled={saasEnabled}
                 activeScreen={screen}
-                agentVisibility={agentVisibility}
-                onAgentVisibilityChange={setAgentVisibility}
+                modalityVisibility={modalityVisibility}
+                onModalityVisibilityChange={setModalityVisibility}
                 onNavigate={navigate}
                 onOpenVibe={() => navigate("Vibe")}
                 onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
@@ -243,28 +225,18 @@ export function App() {
               >
                 <AnimatePresence initial={false} mode="wait">
                   <MotionPage direction={navigationDirection} key={screen}>
-                    {/* codex 页多一层模态分段器（通用 / 生图 / 视频 / TTS）——
-                        多模态渠道不再是独立的导航入口，见 CodexChannelsScreen。
-                        其余池身份仍直接是 AccountsScreen。 */}
-                    {agentPlatform === "codex" && (
-                  <CodexChannelsScreen
-                    imageGenerationEnabled={imageGenerationEnabled}
-                    onOpenImageStudio={() => navigate("ImageGen")}
-                    onOpenSessions={openSessions}
-                    onPoolScopeFocusConsumed={handlePoolScopeFocusConsumed}
-                    poolScopeFocus={poolScopeFocus}
-                    sidebarCollapsed={sidebarCollapsed}
-                  />
-                )}
-                    {agentPlatform && agentPlatform !== "codex" && (
-                  <AccountsScreen
-                    onOpenSessions={openSessions}
-                    platform={agentPlatform}
-                    poolScopeFocus={poolScopeFocus}
-                    onPoolScopeFocusConsumed={handlePoolScopeFocusConsumed}
-                    sidebarCollapsed={sidebarCollapsed}
-                  />
-                )}
+                    {accountModality && (
+                      <CodexChannelsScreen
+                        hideSegmentTabs
+                        modality={accountModality}
+                        imageGenerationEnabled={imageGenerationEnabled}
+                        onOpenImageStudio={() => navigate("ImageGen")}
+                        onOpenSessions={openSessions}
+                        onPoolScopeFocusConsumed={handlePoolScopeFocusConsumed}
+                        poolScopeFocus={poolScopeFocus}
+                        sidebarCollapsed={sidebarCollapsed}
+                      />
+                    )}
                 {screen === "Dashboard" && <DashboardScreen />}
                 {screen === "Batches" && <BatchesScreen />}
                 {screen === "Providers" && <ProvidersScreen />}
@@ -276,9 +248,9 @@ export function App() {
                 {screen === "Updates" && <UpdatesScreen />}
                 {screen === "Settings" && (
                   <SettingsScreen
-                    agentVisibility={agentVisibility}
-                    onAgentVisibilityChange={(platform, visible) =>
-                      setAgentVisibility((current) => ({ ...current, [platform]: visible }))
+                    modalityVisibility={modalityVisibility}
+                    onModalityVisibilityChange={(modality, visible) =>
+                      setModalityVisibility((current) => ({ ...current, [modality]: visible }))
                     }
                     onSaasConfigChanged={() => void refreshSaas()}
                     onImageGenerationEnabledChange={setImageGenerationEnabled}

@@ -19,7 +19,8 @@ import {
   Terminal,
 } from "lucide-react";
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { agentPlatforms, type AgentPlatform } from "../components/layout/AppLayout";
+import { clientPlatforms } from "../lib/clientPlatforms";
+import type { PlatformId as AgentPlatform } from "../lib/api/types";
 import { getSessionMessages, listSessions, openSessionTerminal } from "../lib/api/client";
 import { useI18n, type Language } from "../lib/i18n";
 import type { SessionMessage, SessionMeta } from "../lib/api/types";
@@ -46,10 +47,10 @@ const platformLabels: Record<AgentPlatform, string> = {
 
 /// 会话只可能来自池身份平台。多模态渠道（视频 / 音频）没有生成会话模型，
 /// 它们也不是导航目的地（收在 codex 页的分段器里），所以这里不需要排除项。
-const sessionPlatformOptions = agentPlatforms;
+const sessionPlatformOptions = clientPlatforms;
 
 function isAgentPlatform(value: string | null | undefined): value is AgentPlatform {
-  return Boolean(value && agentPlatforms.includes(value as AgentPlatform));
+  return Boolean(value && clientPlatforms.includes(value as AgentPlatform));
 }
 
 function sessionKey(session: Pick<SessionMeta, "providerId" | "sessionId" | "sourcePath">) {

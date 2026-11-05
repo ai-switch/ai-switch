@@ -1896,6 +1896,7 @@ command = "npx"
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await

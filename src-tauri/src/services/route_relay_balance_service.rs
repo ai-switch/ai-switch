@@ -2110,6 +2110,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: access_token.map(str::to_string),
                 relay_balance_access_token_user_id: user_id.map(str::to_string),
+                provider: None,
             },
         )
         .await

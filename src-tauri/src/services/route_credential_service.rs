@@ -8,7 +8,7 @@ use crate::models::batch::NewBatch;
 use crate::models::platform::{ApiDialect, PlatformId, PlatformOperation};
 use crate::models::route_credential::{
     is_fallback_mapping, is_masked_secret_payload, normalize_anthropic_api_key_field,
-    CopyRouteCredentialInput, CreateApiRouteCredentialInput, ImportOfficialFilesInput,
+    AccountProvider, CopyRouteCredentialInput, CreateApiRouteCredentialInput, ImportOfficialFilesInput,
     ImportOfficialTextInput, ModelMapping, ReorderRouteCredentialInput, RouteCredential,
     RouteCredentialFailurePolicy, RouteCredentialImportFailure, RouteCredentialImportResult,
     RouteCredentialPage, RouteCredentialPageRequest, UpdateRouteCredentialInput,
@@ -142,6 +142,14 @@ impl RouteCredentialService {
         validate_required("base_url", &input.base_url)?;
         // 在 `platform` 被 shadow 成 `&str` 之前校验：合法取值**按平台分**。
         validate_interface_format(platform, &input.interface_format)?;
+        let provider = input.provider.as_deref().map(|value| {
+            AccountProvider::parse_api(value).ok_or_else(|| AppError::Validation {
+                code: "validation.account_provider",
+                message: "API provider must be custom, openrouter, packycode, or agentrouter".to_string(),
+                details: None,
+                recoverable: true,
+            })
+        }).transpose()?;
         let platform = platform.as_str();
         crate::services::responses_plaintext_reasoning::validate(
             input
@@ -240,7 +248,7 @@ impl RouteCredentialService {
             RoutePreviewService::generate(&platform, "api", &secret_payload_json, &config_json)
         });
 
-        let created = RouteCredentialRepository::create(
+        let created = RouteCredentialRepository::create_with_routing_settings(
             pool,
             &platform,
             "api",
@@ -251,6 +259,10 @@ impl RouteCredentialService {
             &secret_payload_json,
             &config_json,
             &preview_json,
+            crate::models::route_credential::DEFAULT_ROUTE_CREDENTIAL_PRIORITY,
+            crate::models::route_credential::DEFAULT_ROUTE_CREDENTIAL_MAX_CONCURRENCY,
+            None,
+            provider.map(AccountProvider::as_str),
         )
         .await?;
         best_effort_sync(pool, platform).await;
@@ -356,6 +368,28 @@ impl RouteCredentialService {
             })?;
         }
         let mut input = input;
+        if let Some(provider) = input.provider.as_deref() {
+            let current = RouteCredentialRepository::get(pool, &id).await?;
+            let normalized = provider.trim().to_ascii_lowercase();
+            if current.kind == "official" {
+                if normalized != current.provider {
+                    return Err(AppError::Validation {
+                        code: "validation.official_provider_immutable",
+                        message: "An official subscription's provider cannot be reassigned".to_string(),
+                        details: None,
+                        recoverable: true,
+                    });
+                }
+            } else if AccountProvider::parse_api(&normalized).is_none() {
+                return Err(AppError::Validation {
+                    code: "validation.account_provider",
+                    message: "API provider must be custom, openrouter, packycode, or agentrouter".to_string(),
+                    details: None,
+                    recoverable: true,
+                });
+            }
+            input.provider = Some(normalized);
+        }
         // 模态账号禁 fallback 也覆盖**更新**路径：前端编辑抽屉保存的是整个
         // `config_json`，不在这里拦就绕过了创建时的那道关。
         if let Ok(config) = serde_json::from_str::<Value>(&input.config_json) {
@@ -475,6 +509,7 @@ impl RouteCredentialService {
             // unset keeps the unique index free for the original, so a later
             // re-import overwrites that row rather than this copy.
             None,
+            Some(&source.provider),
         )
         .await?;
 
@@ -2026,6 +2061,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_api_provider_survives_create_and_update_without_protocol_changes() {
+        let pool = crate::database::create_memory_pool().await.unwrap();
+        crate::database::run_migrations(&pool).await.unwrap();
+        let input: CreateApiRouteCredentialInput = serde_json::from_value(json!({
+            "platform": "codex", "display_name": "Relay", "api_key": "sk-test",
+            "base_url": "https://relay.example/v1", "interface_format": "openai",
+            "model_mappings_json": "[]", "provider": "packycode"
+        })).unwrap();
+        let created = RouteCredentialService::create_api(&pool, input).await.unwrap();
+        assert_eq!(created.provider, "packycode");
+        let update: UpdateRouteCredentialInput = serde_json::from_value(json!({
+            "display_name": "Renamed relay", "email": null, "status": "ok",
+            "route_priority": 3, "max_concurrency": 5,
+            "secret_payload_json": created.secret_payload_json,
+            "config_json": created.config_json, "preview_json": created.preview_json
+        })).unwrap();
+        let renamed = RouteCredentialService::update(&pool, created.id.clone(), update.clone()).await.unwrap();
+        assert_eq!(renamed.provider, "packycode", "omitted provider must not erase source");
+        let mut value = serde_json::to_value(update).unwrap();
+        value["provider"] = json!("custom");
+        let changed = RouteCredentialService::update(&pool, created.id, serde_json::from_value(value).unwrap()).await.unwrap();
+        assert_eq!(changed.provider, "custom");
+        assert_eq!(serde_json::from_str::<Value>(&changed.config_json).unwrap()["interface_format"], "openai");
+    }
+
+    #[tokio::test]
+    async fn official_copy_preserves_vendor_and_rejects_provider_reassignment() {
+        let pool = crate::database::create_memory_pool().await.unwrap();
+        crate::database::run_migrations(&pool).await.unwrap();
+        let official = RouteCredentialRepository::create(&pool, "claude", "official", "Subscription", None, "ok", None, "{}", "{}", "{}").await.unwrap();
+        let copied = RouteCredentialService::copy(&pool, official.id.clone()).await.unwrap();
+        assert_eq!(copied.provider, "claude");
+        let update: UpdateRouteCredentialInput = serde_json::from_value(json!({
+            "display_name": "Subscription", "email": null, "status": "ok", "route_priority": 3,
+            "max_concurrency": 5, "secret_payload_json": "{}", "config_json": "{}", "preview_json": "{}",
+            "provider": "openai"
+        })).unwrap();
+        assert!(RouteCredentialService::update(&pool, official.id, update).await.is_err(), "official source changes would invalidate authentication");
+    }
+
+    #[tokio::test]
     async fn create_api_credential_persists_fetched_models() {
         let pool = crate::database::create_memory_pool().await.expect("pool");
         crate::database::run_migrations(&pool)
@@ -2058,6 +2134,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -2105,6 +2182,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -2155,6 +2233,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -2242,6 +2321,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -2333,6 +2413,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -2388,6 +2469,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -2441,6 +2523,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -2495,6 +2578,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -2546,6 +2630,7 @@ mod tests {
                 relay_balance_provider: Some("new_api".into()),
                 relay_balance_access_token: Some("pat-panel-token".into()),
                 relay_balance_access_token_user_id: Some("42".into()),
+                provider: None,
             },
         )
         .await
@@ -2671,6 +2756,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -2726,6 +2812,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -2833,6 +2920,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -2876,6 +2964,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -2919,6 +3008,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -2962,6 +3052,7 @@ mod tests {
                 relay_balance_provider: None,
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -3099,6 +3190,7 @@ mod tests {
                 relay_balance_provider: Some("new_api".into()),
                 relay_balance_access_token: None,
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -3145,6 +3237,7 @@ mod tests {
                 relay_balance_provider: Some("new_api".into()),
                 relay_balance_access_token: Some("  pat-panel-token  ".into()),
                 relay_balance_access_token_user_id: None,
+                provider: None,
             },
         )
         .await
@@ -3196,6 +3289,7 @@ mod tests {
                     relay_balance_provider: Some("new_api".into()),
                     relay_balance_access_token: token.clone(),
                     relay_balance_access_token_user_id: None,
+                provider: None,
                 },
             )
             .await
@@ -3242,6 +3336,7 @@ mod tests {
                     relay_balance_provider: provider.clone(),
                     relay_balance_access_token: None,
                     relay_balance_access_token_user_id: None,
+                provider: None,
                 },
             )
             .await
@@ -3287,6 +3382,7 @@ mod tests {
                     relay_balance_provider: Some(provider.into()),
                     relay_balance_access_token: None,
                     relay_balance_access_token_user_id: None,
+                provider: None,
                 },
             )
             .await
@@ -3458,6 +3554,7 @@ mod tests {
             &pool,
             current.id.clone(),
             UpdateRouteCredentialInput {
+                provider: None,
                 display_name: current.display_name.clone(),
                 email: current.email.clone(),
                 status: current.status.clone(),

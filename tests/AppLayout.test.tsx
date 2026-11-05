@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { act } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppLayout } from "../src/components/layout/AppLayout";
-import { createDefaultAgentVisibility } from "../src/lib/agentVisibility";
+import { createDefaultModalityVisibility } from "../src/lib/accountModalities";
 import { I18nProvider } from "../src/lib/i18n";
 
 function dispatchPointerEvent(
@@ -38,6 +38,45 @@ describe("AppLayout", () => {
   beforeEach(() => {
     window.localStorage.clear();
     (window as Window & { innerWidth: number }).innerWidth = 1024;
+  });
+
+  it("shows five independent account modalities instead of agent platforms", () => {
+    window.localStorage.setItem("ai-switch.agent-visibility", JSON.stringify({ codex: false, claude: false }));
+    render(
+      <I18nProvider initialLanguage="zh-CN">
+        <AppLayout activeScreen="PoolVideo" onNavigate={vi.fn()} onToggleSidebar={vi.fn()} sidebarCollapsed={false}>
+          <div>content</div>
+        </AppLayout>
+      </I18nProvider>,
+    );
+    const modalities = ["通用", "图片", "视频", "音频", "向量"];
+    const buttons = modalities.map((name) => screen.getByRole("button", { name }));
+    for (let index = 1; index < buttons.length; index += 1) {
+      expect(buttons[index - 1].compareDocumentPosition(buttons[index]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    expect(screen.getByRole("button", { name: "视频" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getAllByRole("button").filter((button) => button.getAttribute("aria-current") === "page")).toHaveLength(1);
+    for (const name of ["Codex", "Claude", "Grok", "Gemini", "OpenCode", "OpenClaw", "Hermes"]) {
+      expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    }
+  });
+
+  it("navigates each modality to its own route and closes the narrow drawer", async () => {
+    setViewportWidth(500);
+    const onNavigate = vi.fn();
+    render(
+      <I18nProvider initialLanguage="zh-CN">
+        <AppLayout activeScreen="PoolGeneral" onNavigate={onNavigate} onToggleSidebar={vi.fn()} sidebarCollapsed={false}>
+          <div>content</div>
+        </AppLayout>
+      </I18nProvider>,
+    );
+    for (const [label, route] of [["通用", "PoolGeneral"], ["图片", "PoolImage"], ["视频", "PoolVideo"], ["音频", "PoolAudio"], ["向量", "PoolVector"]]) {
+      await userEvent.click(screen.getByRole("button", { name: "展开侧栏" }));
+      await userEvent.click(screen.getByRole("button", { name: label }));
+      expect(onNavigate).toHaveBeenLastCalledWith(route);
+      expect(screen.getByTestId("app-sidebar")).not.toHaveClass("app-sidebar-drawer");
+    }
   });
 
   it("shows SaaS first in system navigation only when enabled", async () => {
@@ -133,21 +172,12 @@ describe("AppLayout", () => {
     expect(mcp).not.toHaveAttribute("aria-current");
   });
 
-  it("hides disabled agents from the sidebar", () => {
+  it("hides only the disabled modality from the sidebar", () => {
     render(
       <I18nProvider initialLanguage="zh-CN">
         <AppLayout
-          activeScreen="Codex"
-          agentVisibility={{
-            ...createDefaultAgentVisibility(),
-            codex: true,
-            claude: false,
-            grok: true,
-            gemini: true,
-            opencode: true,
-            openclaw: true,
-            hermes: true,
-          }}
+          activeScreen="PoolGeneral"
+          modalityVisibility={{ ...createDefaultModalityVisibility(), video: false }}
           onNavigate={vi.fn()}
           onToggleSidebar={vi.fn()}
           sidebarCollapsed={false}
@@ -157,15 +187,16 @@ describe("AppLayout", () => {
       </I18nProvider>,
     );
 
-    expect(screen.getByRole("button", { name: "Codex" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Claude" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "通用" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "音频" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "视频" })).not.toBeInTheDocument();
   });
 
-  it("toggles and persists agent visibility from the sidebar menu", async () => {
+  it("toggles and persists modality visibility from the sidebar menu", async () => {
     render(
       <I18nProvider initialLanguage="zh-CN">
         <AppLayout
-          activeScreen="Codex"
+          activeScreen="PoolGeneral"
           onNavigate={vi.fn()}
           onToggleSidebar={vi.fn()}
           sidebarCollapsed={false}
@@ -175,11 +206,14 @@ describe("AppLayout", () => {
       </I18nProvider>,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "智能体显示选项" }));
-    await userEvent.click(screen.getByRole("checkbox", { name: "显示 Claude" }));
+    await userEvent.click(screen.getByRole("button", { name: "模态显示选项" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "显示 视频" }));
 
-    expect(screen.queryByRole("button", { name: "Claude" })).not.toBeInTheDocument();
-    expect(JSON.parse(window.localStorage.getItem("ai-switch.agent-visibility") ?? "{}").claude).toBe(false);
+    expect(screen.queryByRole("button", { name: "视频" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "音频" })).toBeInTheDocument();
+    expect(JSON.parse(window.localStorage.getItem("ai-switch.modality-visibility") ?? "{}").video).toBe(false);
+    await userEvent.click(screen.getByRole("button", { name: "显示全部模态" }));
+    expect(screen.getByRole("button", { name: "视频" })).toBeInTheDocument();
   });
 
   it("highlights About on its own instead of the Settings area", () => {
@@ -254,11 +288,11 @@ describe("AppLayout", () => {
 
     expect(screen.getByRole("button", { name: "展开侧栏" })).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByTestId("app-shell")).toHaveClass("min-[600px]:grid-cols-[56px_minmax(0,1fr)]");
-    expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute("title", "Codex");
-    expect(screen.getByRole("button", { name: "Codex" }).querySelector("svg")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Codex" }).querySelector("span.font-medium")).toHaveClass("sr-only");
+    expect(screen.getByRole("button", { name: "通用" })).toHaveAttribute("title", "通用");
+    expect(screen.getByRole("button", { name: "通用" }).querySelector("svg")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "通用" }).querySelector("span.font-medium")).toHaveClass("sr-only");
     expect(screen.getByRole("combobox", { name: "语言" }).parentElement).toHaveClass("hidden");
-    expect(screen.getByText("智能体")).toHaveClass("hidden");
+    expect(screen.getByText("账号池")).toHaveClass("hidden");
   });
 
   it("opens the full sidebar as a fixed drawer on narrow windows", async () => {
@@ -294,7 +328,7 @@ describe("AppLayout", () => {
       "aria-expanded",
       "true",
     );
-    expect(screen.getByText("智能体")).not.toHaveClass("hidden");
+    expect(screen.getByText("账号池")).not.toHaveClass("hidden");
     expect(screen.getByText("content").parentElement).toHaveClass("col-start-2");
 
     await userEvent.click(screen.getByTestId("app-sidebar-drawer-backdrop"));

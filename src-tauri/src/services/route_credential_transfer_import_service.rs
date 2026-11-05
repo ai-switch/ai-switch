@@ -1594,6 +1594,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn import_route_credentials_carries_api_provider_through_metadata() {
+        let pool = migrated_pool().await;
+
+        let mut packy = api_item("codex-api-key", "codex", "openai-responses");
+        packy.insert("api-key".to_string(), json!("packy-key"));
+        metadata_mut(&mut packy).insert("provider".to_string(), json!("PackyCode"));
+
+        let mut unknown = api_item("codex-api-key", "codex", "openai-responses");
+        unknown.insert("api-key".to_string(), json!("unknown-key"));
+        metadata_mut(&mut unknown)
+            .insert("display_name".to_string(), json!("Unknown source"));
+        metadata_mut(&mut unknown)
+            .insert("provider".to_string(), json!("mystery-relay"));
+
+        import_route_credentials(&pool, import_input(vec![packy, unknown], false))
+            .await
+            .expect("provider import");
+
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT display_name, provider FROM route_credentials",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("imported providers");
+        let by_name: HashMap<String, String> = rows.into_iter().collect();
+        assert_eq!(by_name["Portable route"], "packycode");
+        // 未知来源忽略并回退到 base_url 推导（示例端点 → custom）。
+        assert_eq!(by_name["Unknown source"], "custom");
+    }
+
+    #[tokio::test]
     async fn import_route_credentials_restores_pool_membership_only_when_opted_in_and_appends() {
         let pool = migrated_pool().await;
         let existing = RouteCredentialRepository::create(
@@ -1752,7 +1783,7 @@ use crate::database::repositories::route_pool_repository::RoutePoolRepository;
 use crate::error::AppError;
 use crate::models::batch::NewBatch;
 use crate::models::platform::{ApiDialect, PlatformId};
-use crate::models::route_credential::{normalize_anthropic_api_key_field, ModelMapping};
+use crate::models::route_credential::{normalize_anthropic_api_key_field, AccountProvider, ModelMapping};
 use crate::models::route_credential_transfer::{
     ImportRouteCredentialsInput, PreviewRouteCredentialImportInput, RouteCredentialImportOutcome,
     RouteCredentialImportPreview, RouteCredentialImportPreviewCounts,
@@ -1845,6 +1876,7 @@ const TRANSFER_METADATA_FIELDS: &[&str] = &[
     "model_mappings",
     "turn_reminder",
     "turn_reminder_text",
+    "provider",
 ];
 
 pub(crate) struct CompleteSourceIdentity {
@@ -1876,6 +1908,7 @@ pub(crate) struct NormalizedImportItem {
     pub(crate) source_identity: Option<CompleteSourceIdentity>,
     pub(crate) batch_key: Option<ImportBatchKey>,
     pub(crate) in_pool: bool,
+    pub(crate) provider: Option<String>,
     pub(crate) fingerprint: String,
     pub(crate) issue_codes: Vec<String>,
 }
@@ -1897,6 +1930,7 @@ struct TransferMetadata {
     turn_reminder_text: Option<String>,
     api_key_field: Option<String>,
     model_mappings: Option<Value>,
+    provider: Option<String>,
     issue_codes: Vec<String>,
 }
 
@@ -2242,7 +2276,7 @@ pub async fn import_route_credentials(
             None
         };
 
-        let credential = RouteCredentialRepository::create_tx(
+        let credential = RouteCredentialRepository::create_tx_with_explicit_provider(
             &mut tx,
             &item.platform,
             &item.kind,
@@ -2253,6 +2287,7 @@ pub async fn import_route_credentials(
             &item.secret_payload_json,
             &item.config_json,
             &item.preview_json,
+            item.provider.as_deref(),
         )
         .await?;
 
@@ -2691,6 +2726,26 @@ fn parse_transfer_metadata(
         &mut issue_codes,
     )?;
 
+    // `provider` 只对 API 账号透传；官方账号的来源由 platform 推导且不可改。
+    let provider = optional_string(object, "provider")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    let provider = match (kind.as_str(), provider) {
+        (_, None) => None,
+        ("api", Some(value)) => {
+            if AccountProvider::parse_api(&value).is_some() {
+                Some(value)
+            } else {
+                push_issue_code(&mut issue_codes, "transfer.metadata_field_ignored");
+                None
+            }
+        }
+        _ => {
+            push_issue_code(&mut issue_codes, "transfer.metadata_field_ignored");
+            None
+        }
+    };
+
     Ok(Some(TransferMetadata {
         schema_version,
         platform,
@@ -2708,6 +2763,7 @@ fn parse_transfer_metadata(
         turn_reminder_text: optional_string(object, "turn_reminder_text"),
         api_key_field: optional_string(object, "api_key_field"),
         model_mappings,
+        provider,
         issue_codes,
     }))
 }
@@ -2839,6 +2895,7 @@ fn metadata_for_legacy_official(platform: PlatformId) -> TransferMetadata {
         turn_reminder_text: None,
         api_key_field: None,
         model_mappings: None,
+        provider: None,
         issue_codes: Vec::new(),
     }
 }
@@ -2863,6 +2920,7 @@ fn metadata_for_legacy_api(legacy_type: Option<&str>) -> TransferMetadata {
         turn_reminder_text: None,
         api_key_field: None,
         model_mappings: None,
+        provider: None,
         issue_codes: Vec::new(),
     }
 }
@@ -3072,6 +3130,7 @@ fn normalize_official_item(
         source_identity,
         batch_key,
         in_pool: metadata.in_pool,
+        provider: None,
         fingerprint,
         issue_codes,
     })
@@ -3272,6 +3331,7 @@ fn normalize_api_item(
             source_identity,
             batch_key,
             in_pool: metadata.in_pool,
+            provider: metadata.provider.clone(),
             fingerprint,
             issue_codes,
         }),

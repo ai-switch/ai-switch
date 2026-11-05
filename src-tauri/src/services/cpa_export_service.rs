@@ -456,6 +456,9 @@ fn metadata(
         ("platform".to_string(), json!(credential.platform)),
         ("kind".to_string(), json!(kind)),
     ]);
+    if !credential.provider.trim().is_empty() {
+        metadata.insert("provider".to_string(), json!(credential.provider));
+    }
     if let Some(cpa_section) = cpa_section {
         metadata.insert("cpa_section".to_string(), json!(cpa_section));
     }
@@ -732,6 +735,7 @@ mod tests {
             id: "credential-1".to_string(),
             platform: platform.to_string(),
             kind: kind.to_string(),
+            provider: if kind == "official" { platform.to_string() } else { "custom".to_string() },
             display_name: "Test credential".to_string(),
             email: Some("current@example.com".to_string()),
             status: "ok".to_string(),

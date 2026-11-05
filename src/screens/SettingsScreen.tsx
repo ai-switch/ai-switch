@@ -21,11 +21,12 @@ import { UsageStorageSettings } from "../components/settings/usage-storage-setti
 import { WebServiceSettings } from "../components/settings/web-service-settings";
 import { useState } from "react";import { MotionPresence } from "../components/motion/MotionPrimitives";
 import {
-  agentPlatforms,
-  createDefaultAgentVisibility,
-  type AgentPlatform,
-  type AgentVisibility,
-} from "../lib/agentVisibility";
+  accountModalities,
+  createDefaultModalityVisibility,
+  modalityLabelKeys,
+  type AccountModality,
+  type ModalityVisibility,
+} from "../lib/accountModalities";
 import { PluginManagementSettings } from "../components/settings/plugin-management-settings";
 
 type FeatureEntry = {
@@ -98,21 +99,11 @@ const featureEntries: FeatureEntry[] = [
 
 type SettingsScreenProps = {
   onOpenFeature?: (screen: string) => void;
-  agentVisibility?: AgentVisibility;
-  onAgentVisibilityChange?: (platform: AgentPlatform, visible: boolean) => void;
+  modalityVisibility?: ModalityVisibility;
+  onModalityVisibilityChange?: (modality: AccountModality, visible: boolean) => void;
   onSaasConfigChanged?: () => void;
   onImageGenerationEnabledChange?: (enabled: boolean) => void;
 };
-
-const agentLabelKeys = {
-  codex: "nav.agent.codex",
-  claude: "nav.agent.claude",
-  grok: "nav.agent.grok",
-  gemini: "nav.agent.gemini",
-  opencode: "nav.agent.opencode",
-  openclaw: "nav.agent.openclaw",
-  hermes: "nav.agent.hermes",
-} as const;
 
 const themeOptions: {
   value: ThemePreference;
@@ -125,15 +116,15 @@ const themeOptions: {
 
 export function SettingsScreen({
   onOpenFeature,
-  agentVisibility,
-  onAgentVisibilityChange,
+  modalityVisibility,
+  onModalityVisibilityChange,
   onSaasConfigChanged,
   onImageGenerationEnabledChange,
 }: SettingsScreenProps) {
   const queryClient = useQueryClient();
   const { language, setLanguage, t } = useI18n();
   const [activeSection, setActiveSection] = useState<"webService" | "https" | "notification" | "plugins">("webService");
-  const [localAgentVisibility, setLocalAgentVisibility] = useState(createDefaultAgentVisibility);
+  const [localModalityVisibility, setLocalModalityVisibility] = useState(createDefaultModalityVisibility);
   // Proxy drafts as `null` = "follow the loaded settings"; they overlay the
   // settings while the user edits. Hooks stay above the loading early-returns.
   const [proxyEnabledDraft, setProxyEnabledDraft] = useState<boolean | null>(null);
@@ -172,13 +163,13 @@ export function SettingsScreen({
   }
 
   const settings = settingsQuery.data;
-  const effectiveAgentVisibility = agentVisibility ?? localAgentVisibility;
-  const handleAgentVisibilityChange = (platform: AgentPlatform, visible: boolean) => {
-    if (onAgentVisibilityChange) {
-      onAgentVisibilityChange(platform, visible);
+  const effectiveModalityVisibility = modalityVisibility ?? localModalityVisibility;
+  const handleModalityVisibilityChange = (modality: AccountModality, visible: boolean) => {
+    if (onModalityVisibilityChange) {
+      onModalityVisibilityChange(modality, visible);
       return;
     }
-    setLocalAgentVisibility((current) => ({ ...current, [platform]: visible }));
+    setLocalModalityVisibility((current) => ({ ...current, [modality]: visible }));
   };
   const handleLanguageChange = (nextLanguage: Language) => {
     setLanguage(nextLanguage);
@@ -446,23 +437,23 @@ export function SettingsScreen({
         <h2 className="text-[15px] font-semibold text-stone-950">{t("settings.app.title")}</h2>
         <div className="space-y-2 rounded-xl border border-stone-200 bg-stone-50/70 p-3">
           <div>
-            <h3 className="text-[13px] font-semibold text-stone-800">{t("settings.agentVisibility.title")}</h3>
-            <p className="mt-1 text-[11px] font-medium text-stone-500">{t("settings.agentVisibility.subtitle")}</p>
+            <h3 className="text-[13px] font-semibold text-stone-800">{t("settings.modalityVisibility.title")}</h3>
+            <p className="mt-1 text-[11px] font-medium text-stone-500">{t("settings.modalityVisibility.subtitle")}</p>
           </div>
           <div className="grid gap-2 sm:grid-cols-2">
-            {agentPlatforms.map((platform) => (
+            {accountModalities.map((modality) => (
               <label
                 className="flex items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 text-[12px] font-semibold text-stone-700"
-                key={platform}
+                key={modality}
               >
                 <input
-                  aria-label={t("settings.agentVisibility.show", { agent: t(agentLabelKeys[platform]) })}
-                  checked={effectiveAgentVisibility[platform]}
+                  aria-label={t("settings.modalityVisibility.show", { modality: t(modalityLabelKeys[modality]) })}
+                  checked={effectiveModalityVisibility[modality]}
                   className="accent-blue-600"
-                  onChange={(event) => handleAgentVisibilityChange(platform, event.target.checked)}
+                  onChange={(event) => handleModalityVisibilityChange(modality, event.target.checked)}
                   type="checkbox"
                 />
-                <span>{t("settings.agentVisibility.show", { agent: t(agentLabelKeys[platform]) })}</span>
+                <span>{t("settings.modalityVisibility.show", { modality: t(modalityLabelKeys[modality]) })}</span>
               </label>
             ))}
           </div>

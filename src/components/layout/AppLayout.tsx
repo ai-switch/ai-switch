@@ -15,22 +15,18 @@ import {
 import { AiSwitchLogo } from "../brand/AiSwitchLogo";
 import { AgentIcon, type AgentIconPlatform } from "../brand/AgentIcon";
 import {
-  createDefaultAgentVisibility,
-  readAgentVisibility,
-  writeAgentVisibility,
-  type AgentPlatform,
-  type AgentVisibility,
-} from "../../lib/agentVisibility";
+  accountModalities,
+  createDefaultModalityVisibility,
+  modalityForScreen,
+  modalityLabelKeys,
+  modalityScreenById,
+  readModalityVisibility,
+  writeModalityVisibility,
+  type AccountModality,
+  type ModalityVisibility,
+} from "../../lib/accountModalities";
 import { supportedLanguages, useI18n, type Language } from "../../lib/i18n";
 import { useDragResize } from "../../lib/useDragResize";
-
-export {
-  agentPlatforms,
-  agentScreenByPlatform,
-  platformByAgentScreen,
-  type AgentPlatform,
-  type AgentVisibility,
-} from "../../lib/agentVisibility";
 
 export const settingsFeatureScreens = [
   "Sessions",
@@ -74,38 +70,19 @@ type AppLayoutProps = {
   onLanguageChange?: (language: Language) => void;
   languageSaving?: boolean;
   sidebarCollapsed: boolean;
-  agentVisibility?: AgentVisibility;
-  onAgentVisibilityChange?: (visibility: AgentVisibility) => void;
+  modalityVisibility?: ModalityVisibility;
+  onModalityVisibilityChange?: (visibility: ModalityVisibility) => void;
   saasEnabled?: boolean;
   imageGenerationEnabled?: boolean;
 };
 
-type AgentNavItem = {
-  icon: AgentIconPlatform;
-  screen: string;
-  platform: AgentPlatform;
-  labelKey:
-    | "nav.agent.codex"
-    | "nav.agent.claude"
-    | "nav.agent.grok"
-    | "nav.agent.gemini"
-    | "nav.agent.opencode"
-    | "nav.agent.openclaw"
-    | "nav.agent.hermes";
+const modalityIcons: Record<AccountModality, AgentIconPlatform> = {
+  general: "codex",
+  image: "image",
+  video: "video",
+  audio: "audio",
+  vector: "codex",
 };
-
-const agentItems: AgentNavItem[] = [
-  { icon: "codex", screen: "Codex", platform: "codex", labelKey: "nav.agent.codex" },
-  { icon: "claude", screen: "Claude", platform: "claude", labelKey: "nav.agent.claude" },
-  { icon: "grok", screen: "Grok", platform: "grok", labelKey: "nav.agent.grok" },
-  { icon: "gemini", screen: "Gemini", platform: "gemini", labelKey: "nav.agent.gemini" },
-  { icon: "opencode", screen: "OpenCode", platform: "opencode", labelKey: "nav.agent.opencode" },
-  { icon: "openclaw", screen: "OpenClaw", platform: "openclaw", labelKey: "nav.agent.openclaw" },
-  { icon: "hermes", screen: "Hermes", platform: "hermes", labelKey: "nav.agent.hermes" },
-  // 多模态渠道（生图 / 视频 / TTS）不在这里 —— 它们收进了 codex 页的模态分段器
-  // （`screens/CodexChannelsScreen`）。导航第一层只留池身份，否则「池身份」和
-  // 「模态」两种东西会挤在同一层，每加一个模态就多一个入口。
-];
 
 function isSettingsArea(screen: string) {
   return screen === "Settings" || (settingsFeatureScreens as readonly string[]).includes(screen);
@@ -193,8 +170,8 @@ export function AppLayout({
   onLanguageChange,
   languageSaving = false,
   sidebarCollapsed,
-  agentVisibility,
-  onAgentVisibilityChange,
+  modalityVisibility,
+  onModalityVisibilityChange,
   saasEnabled = false,
   imageGenerationEnabled = false,
 }: AppLayoutProps) {
@@ -205,12 +182,12 @@ export function AppLayout({
     () => typeof window !== "undefined" && window.innerWidth < SIDEBAR_DRAWER_BREAKPOINT,
   );
   const [sidebarDrawerOpen, setSidebarDrawerOpen] = useState(false);
-  const [localAgentVisibility, setLocalAgentVisibility] = useState(readAgentVisibility);
-  const [agentVisibilityOpen, setAgentVisibilityOpen] = useState(false);
+  const [localModalityVisibility, setLocalModalityVisibility] = useState(readModalityVisibility);
+  const [modalityVisibilityOpen, setModalityVisibilityOpen] = useState(false);
   const settingsActive = isSettingsArea(activeScreen);
-  const accountWorkspaceActive = agentItems.some((item) => item.screen === activeScreen);
-  const effectiveAgentVisibility = agentVisibility ?? localAgentVisibility;
-  const visibleAgentItems = agentItems.filter((item) => effectiveAgentVisibility[item.platform]);
+  const accountWorkspaceActive = modalityForScreen(activeScreen) !== undefined;
+  const effectiveModalityVisibility = modalityVisibility ?? localModalityVisibility;
+  const visibleModalities = accountModalities.filter((modality) => effectiveModalityVisibility[modality]);
   const sidebarDrawerVisible = narrowLayout && sidebarDrawerOpen;
   const sidebarContentCollapsed = narrowLayout ? !sidebarDrawerOpen : sidebarCollapsed;
   const desktopGridClass = sidebarCollapsed
@@ -284,29 +261,27 @@ export function AppLayout({
     onNavigate(nextScreen);
   };
 
-  const handleAgentVisibilityChange = (platform: AgentPlatform, visible: boolean) => {
-    const nextVisibility = { ...effectiveAgentVisibility, [platform]: visible };
-    if (onAgentVisibilityChange) {
-      onAgentVisibilityChange(nextVisibility);
+  const handleModalityVisibilityChange = (modality: AccountModality, visible: boolean) => {
+    const nextVisibility = { ...effectiveModalityVisibility, [modality]: visible };
+    if (onModalityVisibilityChange) {
+      onModalityVisibilityChange(nextVisibility);
     } else {
-      setLocalAgentVisibility(nextVisibility);
+      setLocalModalityVisibility(nextVisibility);
     }
   };
 
-  const restoreAgentVisibility = () => {
-    const nextVisibility = Object.fromEntries(
-      agentItems.map((item) => [item.platform, true]),
-    ) as AgentVisibility;
-    if (onAgentVisibilityChange) {
-      onAgentVisibilityChange(nextVisibility);
+  const restoreModalityVisibility = () => {
+    const nextVisibility = createDefaultModalityVisibility();
+    if (onModalityVisibilityChange) {
+      onModalityVisibilityChange(nextVisibility);
     } else {
-      setLocalAgentVisibility(nextVisibility);
+      setLocalModalityVisibility(nextVisibility);
     }
   };
 
   useEffect(() => {
-    writeAgentVisibility(effectiveAgentVisibility);
-  }, [effectiveAgentVisibility]);
+    writeModalityVisibility(effectiveModalityVisibility);
+  }, [effectiveModalityVisibility]);
 
   const handleOpenVibe = () => {
     setSidebarDrawerOpen(false);
@@ -421,54 +396,54 @@ export function AppLayout({
               <section>
                 <div className={`flex items-center justify-between px-2 pb-1 ${sidebarContentCollapsed ? "hidden" : ""}`}>
                   <p className={`text-[11px] font-semibold uppercase tracking-wide text-stone-400 ${sidebarContentCollapsed ? "hidden" : ""}`}>
-                    {t("layout.agents")}
+                    {t("layout.modalities")}
                   </p>
                   <div className="relative">
                     <button
-                      aria-expanded={agentVisibilityOpen}
-                      aria-label={t("layout.agentVisibility")}
+                      aria-expanded={modalityVisibilityOpen}
+                      aria-label={t("layout.modalityVisibility")}
                       className="inline-flex items-center gap-0.5 rounded p-0.5 text-stone-400 hover:bg-white/70 hover:text-stone-700"
-                      onClick={() => setAgentVisibilityOpen((current) => !current)}
-                      title={t("layout.agentVisibility")}
+                      onClick={() => setModalityVisibilityOpen((current) => !current)}
+                      title={t("layout.modalityVisibility")}
                       type="button"
                     >
                       <Settings2 aria-hidden="true" className="h-3.5 w-3.5" />
-                      <ChevronDown aria-hidden="true" className={`h-3 w-3 motion-control ${agentVisibilityOpen ? "rotate-180" : ""}`} />
+                      <ChevronDown aria-hidden="true" className={`h-3 w-3 motion-control ${modalityVisibilityOpen ? "rotate-180" : ""}`} />
                     </button>
-                    {agentVisibilityOpen ? (
+                    {modalityVisibilityOpen ? (
                       <div className="absolute right-0 top-full z-50 mt-1 w-48 rounded-lg border border-stone-200 bg-white p-2 shadow-lg">
-                        {agentItems.map((item) => (
-                          <label className="flex items-center gap-2 px-2 py-1.5 text-[12px] text-stone-700" key={item.platform}>
+                        {accountModalities.map((modality) => (
+                          <label className="flex items-center gap-2 px-2 py-1.5 text-[12px] text-stone-700" key={modality}>
                             <input
-                              aria-label={t("settings.agentVisibility.show", { agent: t(item.labelKey) })}
-                              checked={effectiveAgentVisibility[item.platform]}
+                              aria-label={t("settings.modalityVisibility.show", { modality: t(modalityLabelKeys[modality]) })}
+                              checked={effectiveModalityVisibility[modality]}
                               className="accent-blue-600"
-                              onChange={(event) => handleAgentVisibilityChange(item.platform, event.target.checked)}
+                              onChange={(event) => handleModalityVisibilityChange(modality, event.target.checked)}
                               type="checkbox"
                             />
-                            {t(item.labelKey)}
+                            {t(modalityLabelKeys[modality])}
                           </label>
                         ))}
                         <button
                           className="mt-1 w-full border-t border-stone-100 px-2 pt-2 text-left text-[11px] font-semibold text-blue-700 hover:text-blue-900"
-                          onClick={restoreAgentVisibility}
+                          onClick={restoreModalityVisibility}
                           type="button"
                         >
-                          {t("layout.restoreAgentVisibility")}
+                          {t("layout.restoreModalityVisibility")}
                         </button>
                       </div>
                     ) : null}
                   </div>
                 </div>
                 <div className="space-y-1">
-                  {visibleAgentItems.map((item) => (
+                  {visibleModalities.map((modality) => (
                     <NavButton
-                      active={activeScreen === item.screen}
+                      active={activeScreen === modalityScreenById[modality]}
                       collapsed={sidebarContentCollapsed}
-                      icon={item.icon}
-                      key={item.screen}
-                      label={t(item.labelKey)}
-                      onClick={() => handleNavigate(item.screen)}
+                      icon={modalityIcons[modality]}
+                      key={modality}
+                      label={t(modalityLabelKeys[modality])}
+                      onClick={() => handleNavigate(modalityScreenById[modality])}
                       variant="primary"
                     />
                   ))}

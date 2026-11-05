@@ -559,6 +559,23 @@ describe("UsageOverviewPanel", () => {
     );
   });
 
+  it("discovers model prices through the unified pool key only", async () => {
+    vi.mocked(getRouteProxyStatus).mockResolvedValue({ running: true, bind_host: "127.0.0.1", base_url: "http://127.0.0.1:19527" });
+    vi.mocked(getRouteProxyKey).mockClear();
+    vi.mocked(getRouteProxyKey).mockResolvedValue("sk-unified");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ data: [{ id: "unified-model" }] }), { status: 200 }));
+    try {
+      const { ModelPricingDialog } = await import("../src/components/accounts/ModelPricingDialog");
+      render(<QueryClientProvider client={createQueryClient()}><ModelPricingDialog open onClose={vi.fn()} /></QueryClientProvider>);
+      expect(await screen.findByRole("spinbutton", { name: "unified-model input_per_mtok" })).toBeInTheDocument();
+      expect(getRouteProxyKey).toHaveBeenCalledTimes(1);
+      expect(getRouteProxyKey).toHaveBeenCalledWith("codex");
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("saves complete model prices and derives omitted cache prices", async () => {
     const user = userEvent.setup();
     const { ModelPricingDialog } = await import("../src/components/accounts/ModelPricingDialog");

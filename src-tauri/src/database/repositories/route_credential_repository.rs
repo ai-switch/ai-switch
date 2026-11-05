@@ -61,7 +61,7 @@ struct QuotaColumns {
 }
 
 const PAGE_SELECT: &str = "SELECT
-    rc.id, rc.platform, rc.kind, rc.display_name, rc.email, rc.status, rc.sort_order,
+    rc.id, rc.platform, rc.kind, rc.provider, rc.display_name, rc.email, rc.status, rc.sort_order,
     rc.route_priority, rc.max_concurrency,
     rc.batch_id, b.name AS batch_name, rc.secret_payload_json, rc.config_json, rc.preview_json,
     rc.subscription_type, rc.primary_remain, rc.weekly_remain, rc.reset_primary, rc.reset_weekly,
@@ -107,7 +107,7 @@ const PAGE_SELECT: &str = "SELECT
   AND ue.metric_type = 'request'";
 
 const SINGLE_SELECT: &str = "SELECT
-    rc.id, rc.platform, rc.kind, rc.display_name, rc.email, rc.status, rc.sort_order,
+    rc.id, rc.platform, rc.kind, rc.provider, rc.display_name, rc.email, rc.status, rc.sort_order,
     rc.route_priority, rc.max_concurrency,
     rc.batch_id, b.name AS batch_name, rc.secret_payload_json, rc.config_json, rc.preview_json,
     rc.subscription_type, rc.primary_remain, rc.weekly_remain, rc.reset_primary, rc.reset_weekly,
@@ -155,12 +155,21 @@ fn push_capability_predicate(builder: &mut QueryBuilder<Sqlite>, capability: Opt
         return;
     };
     builder.push(
-        " AND EXISTS (SELECT 1 FROM json_each(json_extract(rc.config_json, '$.model_mappings')) mapping \
+        " AND rc.kind = 'api' AND EXISTS (SELECT 1 FROM json_each(json_extract(rc.config_json, '$.model_mappings')) mapping \
              WHERE EXISTS (SELECT 1 FROM json_each(json_extract(mapping.value, '$.capabilities')) declared \
                WHERE lower(declared.value) = ",
     );
     builder.push_bind(capability.to_ascii_lowercase());
     builder.push("))");
+}
+
+fn push_source_predicate(builder: &mut QueryBuilder<Sqlite>, kind: Option<&str>, provider: Option<&str>) {
+    if let Some(kind) = kind.map(str::trim).filter(|value| !value.is_empty()) {
+        builder.push(" AND rc.kind = ").push_bind(kind.to_ascii_lowercase());
+    }
+    if let Some(provider) = provider.map(str::trim).filter(|value| !value.is_empty()) {
+        builder.push(" AND rc.provider = ").push_bind(provider.to_ascii_lowercase());
+    }
 }
 
 fn push_pool_scope_predicate(
@@ -225,6 +234,7 @@ async fn boundary_id(
     push_pool_scope_predicate(&mut query, request.pool_scope, request.group_id.as_deref());
     push_filter_predicate(&mut query, &request.filters);
     push_capability_predicate(&mut query, request.capability.as_deref());
+    push_source_predicate(&mut query, request.kind.as_deref(), request.provider.as_deref());
     query
         .push(" ORDER BY rc.sort_order ASC, rc.created_at DESC LIMIT 1 OFFSET ")
         .push_bind(offset);
@@ -369,6 +379,7 @@ async fn create_with_connection(
     route_priority: i64,
     max_concurrency: i64,
     external_source: Option<ExternalSourceRef<'_>>,
+    explicit_provider: Option<&str>,
 ) -> Result<RouteCredential, AppError> {
     // 统一账号池（G-P8 P4a）：凭据一律落在唯一池 `codex`；调用方传入的 platform
     // 是「智能体对接身份」，不再决定存储归属——但仍是 provider 的来源：
@@ -391,6 +402,7 @@ async fn create_with_connection(
             }
         }
     };
+    let provider = explicit_provider.unwrap_or(provider);
     let platform = super::route_pool_repository::UNIFIED_POOL_PLATFORM;
     let now = Utc::now().to_rfc3339();
     let id = Uuid::new_v4().to_string();
@@ -512,6 +524,7 @@ async fn create_with_connection(
             rc.id,
             rc.platform,
             rc.kind,
+            rc.provider,
             rc.display_name,
             rc.email,
             rc.status,
@@ -583,6 +596,7 @@ impl RouteCredentialRepository {
             DEFAULT_ROUTE_CREDENTIAL_PRIORITY,
             DEFAULT_ROUTE_CREDENTIAL_MAX_CONCURRENCY,
             None,
+            None,
         )
         .await
     }
@@ -601,6 +615,7 @@ impl RouteCredentialRepository {
         route_priority: i64,
         max_concurrency: i64,
         external_source: Option<ExternalSourceRef<'_>>,
+        explicit_provider: Option<&str>,
     ) -> Result<RouteCredential, AppError> {
         let mut tx = pool.begin().await.map_err(|err| AppError::Database {
             code: "database.route_credential_create_tx",
@@ -622,6 +637,7 @@ impl RouteCredentialRepository {
             route_priority,
             max_concurrency,
             external_source,
+            explicit_provider,
         )
         .await?;
 
@@ -663,6 +679,41 @@ impl RouteCredentialRepository {
         .await
     }
 
+    /// 与 `create_tx` 相同，但允许调用方显式指定账号来源（`provider` 列）；
+    /// 省略时仍按平台/协议推导。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_tx_with_explicit_provider(
+        tx: &mut Transaction<'_, Sqlite>,
+        platform: &str,
+        kind: &str,
+        display_name: &str,
+        email: Option<String>,
+        status: &str,
+        batch_id: Option<String>,
+        secret_payload_json: &str,
+        config_json: &str,
+        preview_json: &str,
+        explicit_provider: Option<&str>,
+    ) -> Result<RouteCredential, AppError> {
+        create_with_connection(
+            &mut **tx,
+            platform,
+            kind,
+            display_name,
+            email,
+            status,
+            batch_id,
+            secret_payload_json,
+            config_json,
+            preview_json,
+            DEFAULT_ROUTE_CREDENTIAL_PRIORITY,
+            DEFAULT_ROUTE_CREDENTIAL_MAX_CONCURRENCY,
+            None,
+            explicit_provider,
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn create_tx_with_external_source(
         tx: &mut Transaction<'_, Sqlite>,
@@ -691,6 +742,7 @@ impl RouteCredentialRepository {
             DEFAULT_ROUTE_CREDENTIAL_PRIORITY,
             DEFAULT_ROUTE_CREDENTIAL_MAX_CONCURRENCY,
             external_source,
+            None,
         )
         .await
     }
@@ -870,6 +922,7 @@ impl RouteCredentialRepository {
                 rc.id,
                 rc.platform,
                 rc.kind,
+                rc.provider,
                 rc.display_name,
                 rc.email,
                 rc.status,
@@ -947,6 +1000,7 @@ impl RouteCredentialRepository {
                 rc.id,
                 rc.platform,
                 rc.kind,
+                rc.provider,
                 rc.display_name,
                 rc.email,
                 rc.status,
@@ -1008,6 +1062,7 @@ impl RouteCredentialRepository {
                 rc.id,
                 rc.platform,
                 rc.kind,
+                rc.provider,
                 rc.display_name,
                 rc.email,
                 rc.status,
@@ -1116,6 +1171,7 @@ impl RouteCredentialRepository {
         );
         push_filter_predicate(&mut count_query, &request.filters);
         push_capability_predicate(&mut count_query, request.capability.as_deref());
+        push_source_predicate(&mut count_query, request.kind.as_deref(), request.provider.as_deref());
         let total: i64 = count_query
             .build_query_scalar()
             .fetch_one(pool)
@@ -1146,6 +1202,7 @@ impl RouteCredentialRepository {
         );
         push_filter_predicate(&mut item_query, &request.filters);
         push_capability_predicate(&mut item_query, request.capability.as_deref());
+        push_source_predicate(&mut item_query, request.kind.as_deref(), request.provider.as_deref());
         item_query
             .push(" GROUP BY rc.id ORDER BY rc.sort_order ASC, rc.created_at DESC LIMIT ")
             .push_bind(page_size)
@@ -1245,30 +1302,15 @@ impl RouteCredentialRepository {
             )
         })?;
         let all_ids: Vec<String> = rows.iter().map(|(id, _, _, _)| id.clone()).collect();
-        let pool_matches = |in_pool: i64, archived: i64| {
-            if input.group_id.is_some() {
-                true
-            } else {
-                match input.pool_scope {
-                    RouteCredentialPoolScope::InPool => archived == 0 && in_pool != 0,
-                    RouteCredentialPoolScope::OutOfPool => archived == 0 && in_pool == 0,
-                    RouteCredentialPoolScope::Archived => archived != 0,
-                }
-            }
-        };
-        let matches = |batch_id: &Option<String>, in_pool: i64, archived: i64| {
-            (input.filters.is_empty()
-                || input.filters.iter().any(|filter| {
-                    (filter == "__single__" && batch_id.is_none())
-                        || batch_id.as_deref() == Some(filter.as_str())
-                }))
-                && pool_matches(in_pool, archived)
-        };
-        let filtered_ids: Vec<String> = rows
-            .iter()
-            .filter(|(_, batch_id, in_pool, archived)| matches(batch_id, *in_pool, *archived))
-            .map(|(id, _, _, _)| id.clone())
-            .collect();
+        let mut filtered_query = QueryBuilder::<Sqlite>::new("SELECT rc.id FROM route_credentials rc WHERE rc.platform = ");
+        filtered_query.push_bind(&input.platform);
+        push_pool_scope_predicate(&mut filtered_query, input.pool_scope, input.group_id.as_deref());
+        push_filter_predicate(&mut filtered_query, &input.filters);
+        push_capability_predicate(&mut filtered_query, input.capability.as_deref());
+        push_source_predicate(&mut filtered_query, input.kind.as_deref(), input.provider.as_deref());
+        filtered_query.push(" ORDER BY rc.sort_order ASC, rc.created_at DESC, rc.id ASC");
+        let filtered_ids: Vec<String> = filtered_query.build_query_scalar().fetch_all(&mut *tx).await
+            .map_err(|error| database_error("database.route_credential_reorder_filter", "Could not load filtered account order", error))?;
         let Some(moved_index) = filtered_ids
             .iter()
             .position(|id| id == &input.moved_account_id)
@@ -1329,11 +1371,10 @@ impl RouteCredentialRepository {
         };
         remaining.insert(insert_at, input.moved_account_id.clone());
         let mut reordered = all_ids.clone();
+        let filtered_set: HashSet<&str> = filtered_ids.iter().map(String::as_str).collect();
         let mut filtered_cursor = 0;
         for id in &mut reordered {
-            let (_, batch_id, in_pool, archived) =
-                rows.iter().find(|(row_id, _, _, _)| row_id == id).unwrap();
-            if matches(batch_id, *in_pool, *archived) {
+            if filtered_set.contains(id.as_str()) {
                 *id = remaining[filtered_cursor].clone();
                 filtered_cursor += 1;
             }
@@ -1375,6 +1416,8 @@ impl RouteCredentialRepository {
                 pool_scope: input.pool_scope,
                 group_id: input.group_id,
                 capability: input.capability,
+                provider: input.provider,
+                kind: input.kind,
             },
         )
         .await
@@ -1400,7 +1443,7 @@ impl RouteCredentialRepository {
                      ELSE semantic_failure_streak_fingerprint
                  END,
                  max_concurrency = ?, secret_payload_json = ?,
-                 config_json = ?, preview_json = ?,
+                 config_json = ?, preview_json = ?, provider = COALESCE(?, provider),
                  subscription_type = ?, primary_remain = ?, weekly_remain = ?,
                  reset_primary = ?, reset_weekly = ?,
                  quota_remaining = ?, quota_limit = ?,
@@ -1417,6 +1460,7 @@ impl RouteCredentialRepository {
         .bind(&input.secret_payload_json)
         .bind(&input.config_json)
         .bind(&input.preview_json)
+        .bind(&input.provider)
         .bind(quota.subscription_type)
         .bind(quota.primary_remain)
         .bind(quota.weekly_remain)
@@ -2529,7 +2573,66 @@ mod tests {
             pool_scope,
             group_id: None,
             capability: None,
+            provider: None,
+            kind: None,
         }
+    }
+
+    #[tokio::test]
+    async fn provider_survives_creation_get_lists_and_serialization() {
+        let pool = crate::database::create_memory_pool().await.unwrap();
+        crate::database::run_migrations(&pool).await.unwrap();
+        let created = create_api_credential_with_config(&pool, "codex", "Router", r#"{"base_url":"https://openrouter.ai/api/v1","interface_format":"openai"}"#).await;
+        assert_eq!(serde_json::to_value(&created).unwrap()["provider"], "openrouter");
+        let fetched = RouteCredentialRepository::get(&pool, &created.id).await.unwrap();
+        assert_eq!(serde_json::to_value(&fetched).unwrap()["provider"], "openrouter");
+        let page = RouteCredentialRepository::page(&pool, page_request("codex", 1, RouteCredentialPoolScope::OutOfPool)).await.unwrap();
+        assert_eq!(serde_json::to_value(&page.items[0]).unwrap()["provider"], "openrouter");
+        let listed = RouteCredentialRepository::list_by_platform(&pool, "codex").await.unwrap();
+        assert_eq!(serde_json::to_value(&listed[0]).unwrap()["provider"], "openrouter");
+        let selected = RouteCredentialRepository::list_by_ids(&pool, &[created.id.clone()], &RouteCredentialSelectionContext { platform: "codex".to_string(), group_id: None, pool_scope: RouteCredentialPoolScope::OutOfPool }).await.unwrap();
+        assert_eq!(serde_json::to_value(&selected[0]).unwrap()["provider"], "openrouter");
+    }
+
+    #[tokio::test]
+    async fn media_page_excludes_official_subscriptions_from_items_and_count() {
+        let pool = crate::database::create_memory_pool().await.unwrap();
+        crate::database::run_migrations(&pool).await.unwrap();
+        let config = r#"{"base_url":"https://example.com","interface_format":"openai","model_mappings":[{"from":"gpt-image-2","to":"gpt-image-2","capabilities":["image.generate"]}]}"#;
+        let api = create_api_credential_with_config(&pool, "codex", "Image API", config).await;
+        RouteCredentialRepository::create(&pool, "codex", "official", "Subscription", None, "ok", None, "{}", config, "{}").await.unwrap();
+        let mut request = page_request("codex", 1, RouteCredentialPoolScope::OutOfPool);
+        request.capability = Some("image.generate".to_string());
+        let page = RouteCredentialRepository::page(&pool, request).await.unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec![api.id.as_str()]);
+    }
+
+    #[tokio::test]
+    async fn provider_and_kind_filters_keep_pages_and_reorder_in_the_same_source() {
+        let pool = crate::database::create_memory_pool().await.unwrap();
+        crate::database::run_migrations(&pool).await.unwrap();
+        let first = create_api_credential_with_config(&pool, "codex", "First relay", r#"{"base_url":"https://openrouter.ai/api/v1","interface_format":"openai"}"#).await;
+        let other = create_api_credential(&pool, "codex", "Custom relay").await;
+        let second = create_api_credential_with_config(&pool, "codex", "Second relay", r#"{"base_url":"https://openrouter.ai/api/v1","interface_format":"openai"}"#).await;
+        RouteCredentialRepository::create(&pool, "claude", "official", "Subscription", None, "ok", None, "{}", "{}", "{}").await.unwrap();
+        let request: RouteCredentialPageRequest = serde_json::from_value(serde_json::json!({
+            "platform": "codex", "page": 1, "page_size": 20, "filters": [], "pool_scope": "out_of_pool",
+            "provider": "openrouter", "kind": "api"
+        })).unwrap();
+        let page = RouteCredentialRepository::page(&pool, request).await.unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec![first.id.as_str(), second.id.as_str()]);
+        let reorder: ReorderRouteCredentialInput = serde_json::from_value(serde_json::json!({
+            "platform": "codex", "moved_account_id": second.id, "previous_account_id": null,
+            "next_account_id": first.id, "filters": [], "pool_scope": "out_of_pool", "page_size": 20,
+            "provider": "openrouter", "kind": "api"
+        })).unwrap();
+        let changed = RouteCredentialRepository::reorder(&pool, reorder).await.unwrap();
+        assert_eq!(changed.total, 2);
+        assert_eq!(changed.items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec![second.id.as_str(), first.id.as_str()]);
+        let unchanged = RouteCredentialRepository::get(&pool, &other.id).await.unwrap();
+        assert_eq!(unchanged.sort_order, other.sort_order, "filtered reordering must not move other providers");
     }
 
     #[tokio::test]
@@ -2575,6 +2678,8 @@ mod tests {
                 pool_scope: RouteCredentialPoolScope::InPool,
                 group_id: Some(alternate_group),
                 capability: None,
+            provider: None,
+            kind: None,
             },
         )
         .await
@@ -2624,6 +2729,8 @@ mod tests {
                 pool_scope: RouteCredentialPoolScope::OutOfPool,
                 group_id: None,
                 capability: Some("image.generate".to_string()),
+                provider: None,
+                kind: None,
             },
         )
         .await
@@ -2666,6 +2773,8 @@ mod tests {
                 pool_scope: RouteCredentialPoolScope::OutOfPool,
                 group_id: None,
                 capability: None,
+            provider: None,
+            kind: None,
             },
         )
         .await
@@ -2920,6 +3029,7 @@ mod tests {
             &pool,
             &imported.id,
             &UpdateRouteCredentialInput {
+                provider: None,
                 display_name: "goRouter".to_string(),
                 email: None,
                 status: "error".to_string(),
@@ -3796,6 +3906,8 @@ mod tests {
                 pool_scope: RouteCredentialPoolScope::InPool,
                 page_size: 20,
                 capability: None,
+            provider: None,
+            kind: None,
             },
         )
         .await
@@ -3854,6 +3966,8 @@ mod tests {
                 pool_scope: RouteCredentialPoolScope::OutOfPool,
                 page_size: 20,
                 capability: None,
+            provider: None,
+            kind: None,
             },
         )
         .await
@@ -3896,6 +4010,8 @@ mod tests {
                 pool_scope: RouteCredentialPoolScope::OutOfPool,
                 page_size: 20,
                 capability: None,
+            provider: None,
+            kind: None,
             },
         )
         .await
@@ -4479,6 +4595,7 @@ mod tests {
             &pool,
             &created.id,
             &UpdateRouteCredentialInput {
+                provider: None,
                 display_name: "Updated semantic API".to_string(),
                 email: Some("updated@example.com".to_string()),
                 status: "ok".to_string(),

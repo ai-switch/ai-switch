@@ -260,6 +260,7 @@ export type RouteCredential = {
   id: string;
   platform: string;
   kind: RouteCredentialKind;
+  provider?: string;
   display_name: string;
   email?: string | null;
   status: AccountStatus;
@@ -354,6 +355,7 @@ export type RelayBalanceRefreshOutcome = {
 
 export type CreateApiRouteCredentialInput = {
   platform: string;
+  provider?: string | null;
   display_name: string;
   api_key: string;
   base_url: string;
@@ -383,6 +385,7 @@ export type CopyRouteCredentialInput = {
 };
 
 export type UpdateRouteCredentialInput = {
+  provider?: string | null;
   display_name: string;
   email?: string | null;
   status: AccountStatus;
@@ -599,6 +602,8 @@ export type RouteCredentialPage = {
 
 export type RouteCredentialPageRequest = {
   platform: string;
+  provider?: string | null;
+  kind?: RouteCredentialKind | null;
   page: number;
   page_size: number;
   filters: string[];
@@ -610,6 +615,8 @@ export type RouteCredentialPageRequest = {
 };
 
 export type ReorderRouteCredentialInput = {
+  provider?: string | null;
+  kind?: RouteCredentialKind | null;
   group_id?: string | null;
   platform: string;
   moved_account_id: string;

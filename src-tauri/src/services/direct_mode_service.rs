@@ -283,7 +283,7 @@ impl DirectModeService {
         if let Some(saved) = sync.as_ref() {
             let original = read_backup(baseline_auth.as_deref()).await?;
             if let Some(updated) =
-                refreshed_baseline(&credential.platform, original.as_deref(), saved)?
+                refreshed_baseline(client, original.as_deref(), saved)?
             {
                 let target = backup_dir.join("auth.baseline-refreshed");
                 ConfigWriter::write_private_backup(&target, &updated).await?;

@@ -3,7 +3,6 @@ import { Check, Loader2, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { getModelPriceConfigs, getRouteProxyKey, getRouteProxyStatus, saveModelPriceConfigs } from "../../lib/api/client";
 import { fetchRouteProxyModels } from "../../lib/routeProxyModels";
-import { agentPlatforms } from "../layout/AppLayout";
 import { mergeModelPriceRows, parsePriceValue, type ModelPriceConfig, type ModelPriceRow } from "../../lib/modelPricing";
 
 type Props = { open: boolean; onClose: () => void };
@@ -23,11 +22,8 @@ export function ModelPricingDialog({ open, onClose }: Props) {
     queryFn: async () => {
       const status = proxyQuery.data;
       if (!status?.base_url) return [];
-      const results = await Promise.allSettled(agentPlatforms.map(async (platform) => {
-        const key = await getRouteProxyKey(platform);
-        return fetchRouteProxyModels(status.base_url!, key, platform);
-      }));
-      return results.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+      const key = await getRouteProxyKey("codex");
+      return fetchRouteProxyModels(status.base_url, key, "codex");
     },
   });
   const saveMutation = useMutation({

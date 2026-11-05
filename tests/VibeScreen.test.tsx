@@ -371,6 +371,26 @@ describe("VibeScreen", () => {
     expect(createTerminalSession).not.toHaveBeenCalled();
   });
 
+  it("routes account modalities from the sidebar without keeping platform tabs", async () => {
+    window.localStorage.setItem("ai-switch.agent-visibility", JSON.stringify({ codex: false }));
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "General" })).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByRole("tablist", { name: "Channel type" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Video" }));
+    expect(screen.getByRole("button", { name: "Video" })).toHaveAttribute("aria-current", "page");
+    await userEvent.click(screen.getByRole("button", { name: "Audio" }));
+    expect(screen.getByRole("button", { name: "Audio" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "Video" })).not.toHaveAttribute("aria-current");
+    await userEvent.click(screen.getByRole("button", { name: "Vectors" }));
+    expect(await screen.findByText(/embedding.*not available/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Vectors" })).toHaveAttribute("aria-current", "page");
+    await userEvent.click(screen.getByRole("button", { name: "Modality display options" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Show Vectors" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "General" })).toHaveAttribute("aria-current", "page"));
+    expect(screen.queryByRole("button", { name: "Vectors" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Agent display options" })).not.toBeInTheDocument();
+  });
+
   it("opens Vibe from the app navigation", async () => {
     render(<App />);
 

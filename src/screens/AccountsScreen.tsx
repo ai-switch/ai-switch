@@ -223,6 +223,10 @@ import {
 import { getTransport, isDesktop, isTauriRuntime } from "../lib/transport";
 import { fetchRouteProxyModels } from "../lib/routeProxyModels";
 import { AUDIO_CAPABILITY, AUDIO_DIALECTS } from "../lib/audioPlatforms";
+import {
+  accountProvider, accountProviderLabel, apiAccountProviders, officialAccountProviders,
+  officialProviderPlatform, type ApiAccountProvider, type OfficialAccountProvider,
+} from "../lib/accountProviders";
 import { VIDEO_CAPABILITY, VIDEO_DIALECTS } from "../lib/videoPlatforms";
 import { openExternal } from "../lib/openExternal";
 import { copySensitiveText } from "../lib/routeCredentialTransfer";
@@ -3386,6 +3390,7 @@ export function AccountsScreen({
 }: AccountsScreenProps) {
   const queryClient = useQueryClient();
   const activePlatform = platform;
+  const mediaView = Boolean(capabilityFilter);
   // Native file pickers come from the Tauri dialog plugin; in a browser they
   // reject, so the entry points that use them have to be disabled rather than
   // failing silently.
@@ -3398,7 +3403,7 @@ export function AccountsScreen({
   const officialQuotaRule = activeCapability?.operations.official_quota;
   const modelTestRule = activeCapability?.operations.model_test;
   const configWriteEnabled = capabilityReady && operationEnabled(configWriteRule);
-  const officialImportEnabled = capabilityReady && operationEnabled(officialImportRule);
+  const officialImportEnabled = !mediaView && capabilityReady && operationEnabled(officialImportRule);
   const officialQuotaEnabled = capabilityReady && operationEnabled(officialQuotaRule);
   const modelTestEnabled = capabilityReady && operationEnabled(modelTestRule);
   const configWriteReason = capabilityReason(configWriteRule);
@@ -3446,6 +3451,9 @@ export function AccountsScreen({
   const [selectedAccountIds, setSelectedAccountIds] = useState<Set<string>>(() => new Set());
   const [batchStatus, setBatchStatus] = useState<AccountStatus | "">("");
   const [accountFilters, setAccountFilters] = useState<string[]>([]);
+  const [accountKindFilter, setAccountKindFilter] = useState<"official" | "api" | "">("");
+  const [accountProviderFilter, setAccountProviderFilter] = useState("");
+  const effectiveKindFilter = mediaView ? "api" : accountKindFilter || null;
   const [accountPage, setAccountPage] = useState(1);
   const [accountPageSize, setAccountPageSize] = useState(20);
   // Keyboard reordering keeps its own "picked up" row; the pointer drag tracks its
@@ -3526,6 +3534,11 @@ export function AccountsScreen({
   // Base URL, mappings and the rest in place for the next round.
   const [resetFormAfterCreate, setResetFormAfterCreate] = useState(true);
   const [officialText, setOfficialText] = useState(() => defaultOfficialJson(activePlatform));
+  const [officialProvider, setOfficialProvider] = useState<OfficialAccountProvider>(() =>
+    (officialAccountProviders.find((item) => item.platform === activePlatform)?.value ?? "openai"),
+  );
+  const [apiProvider, setApiProvider] = useState<ApiAccountProvider | null>(null);
+  const [editApiProvider, setEditApiProvider] = useState("custom");
   const [officialBatchName, setOfficialBatchName] = useState("");
   const [codexOAuthOpen, setCodexOAuthOpen] = useState(false);
   const [codexOAuthError, setCodexOAuthError] = useState<string | null>(null);
@@ -3932,6 +3945,8 @@ export function AccountsScreen({
       accountPageSize,
       accountFilters,
       capabilityFilter ?? null,
+      effectiveKindFilter,
+      accountProviderFilter,
     ],
     queryFn: async () => {
       if (typeof listRouteCredentialPage === "function") {
@@ -3943,6 +3958,8 @@ export function AccountsScreen({
           pool_scope: accountScope,
           group_id: accountGroupId,
           capability: capabilityFilter ?? null,
+          kind: effectiveKindFilter,
+          provider: accountProviderFilter || null,
         });
         if (page && Array.isArray(page.items)) {
           return page;
@@ -3960,11 +3977,15 @@ export function AccountsScreen({
       // 能力过滤在服务端做（分页与总数都在 SQL 里算）；这里只是没有分页 command
       // 时的等价回退，与后端 `push_capability_predicate` 同义。
       const capable = capabilityFilter
-        ? scoped.filter((item) => declaresCapability(item.config_json, capabilityFilter))
+        ? scoped.filter((item) => item.kind === "api" && declaresCapability(item.config_json, capabilityFilter))
         : scoped;
+      const sourceMatched = capable.filter((item) =>
+        (!effectiveKindFilter || item.kind === effectiveKindFilter)
+        && (!accountProviderFilter || accountProvider(item) === accountProviderFilter),
+      );
       const filtered = accountFilters.length
-        ? capable.filter((item) => accountFilters.includes(credentialBatchFilterKey(item)))
-        : capable;
+        ? sourceMatched.filter((item) => accountFilters.includes(credentialBatchFilterKey(item)))
+        : sourceMatched;
       const start = (accountPage - 1) * accountPageSize;
       return {
         items: filtered.slice(start, start + accountPageSize),
@@ -4259,6 +4280,8 @@ export function AccountsScreen({
   const resetCreateForm = useCallback(() => {
     const nextInterfaceFormat = defaultInterfaceFormat(activePlatform, capabilityFilter);
     setOfficialText(defaultOfficialJson(activePlatform));
+    setOfficialProvider(officialAccountProviders.find((item) => item.platform === activePlatform)?.value ?? "openai");
+    setApiProvider(null);
     setOfficialBatchName("");
     setCodexOAuthOpen(false);
     setCodexOAuthError(null);
@@ -4333,6 +4356,7 @@ export function AccountsScreen({
     setEditProxyError(null);
     if (editingCredential.kind === "api") {
       const interfaceFormat = interfaceFormatFromConfig(config);
+      setEditApiProvider(accountProvider(editingCredential));
       setEditApiKey(stringFromRecord(secret, "api_key"));
       setEditApiBaseUrl(stringFromRecord(config, "base_url"));
       setEditApiInterfaceFormat(interfaceFormat);
@@ -4784,7 +4808,7 @@ export function AccountsScreen({
         }
         if (officialFilePaths.length > 0) {
           return importOfficialRouteCredentialsFromFiles({
-            platform: activePlatform,
+            platform: officialProviderPlatform(officialProvider),
             file_paths: officialFilePaths,
             batch_name: batchName,
           });
@@ -4793,7 +4817,7 @@ export function AccountsScreen({
           throw new Error("请粘贴账号 JSON，或选择 JSON 文件导入。");
         }
         return importOfficialRouteCredentialsFromText({
-          platform: activePlatform,
+          platform: officialProviderPlatform(officialProvider),
           text: officialText,
           batch_name: batchName,
         });
@@ -4854,6 +4878,7 @@ export function AccountsScreen({
       for (const [index, key] of apiKeys.entries()) {
         const input = {
           platform: activePlatform,
+          ...(apiProvider ? { provider: apiProvider } : {}),
           display_name: apiKeys.length > 1 ? `${apiName.trim()} ${index + 1}` : apiName.trim(),
           api_key: key,
           base_url: apiBaseUrl,
@@ -5649,6 +5674,7 @@ export function AccountsScreen({
           ? apiPreviewJsonFromPayloads(activePlatform, nextSecretJson, nextConfigJson)
           : editPreviewJson.trim() || "{}";
       const updated = await updateRouteCredential(editingCredential.id, {
+        ...(editingCredential.kind === "api" ? { provider: editApiProvider } : {}),
         display_name: editName.trim(),
         email: editingCredential.kind === "api" ? null : editEmail.trim() || null,
         status: editStatus,
@@ -6084,6 +6110,8 @@ export function AccountsScreen({
       pool_scope: accountScope,
       page_size: accountPageSize,
       capability: capabilityFilter ?? null,
+      kind: effectiveKindFilter,
+      provider: accountProviderFilter || null,
     });
   };
 
@@ -7260,6 +7288,32 @@ export function AccountsScreen({
                     )}
                 </MotionMenu>
               </div>
+              {!mediaView && (
+                <select
+                  aria-label="账号类型筛选"
+                  className="h-8 shrink-0 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-semibold text-stone-700 motion-control"
+                  onChange={(event) => { setAccountKindFilter(event.target.value as "official" | "api" | ""); setAccountPage(1); }}
+                  value={accountKindFilter}
+                >
+                  <option value="">全部类型</option>
+                  <option value="official">官方订阅</option>
+                  <option value="api">API</option>
+                </select>
+              )}
+              <select
+                aria-label="账号来源筛选"
+                className="h-8 shrink-0 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-semibold text-stone-700 motion-control"
+                onChange={(event) => { setAccountProviderFilter(event.target.value); setAccountPage(1); }}
+                value={accountProviderFilter}
+              >
+                <option value="">全部来源</option>
+                {apiAccountProviders.map((item) => (
+                  <option key={`api-${item.value}`} value={item.value}>{item.label}</option>
+                ))}
+                {officialAccountProviders.map((item) => (
+                  <option key={`official-${item.value}`} value={item.value}>{item.label}</option>
+                ))}
+              </select>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -8068,6 +8122,12 @@ export function AccountsScreen({
                             {credential.kind === "api" ? "API" : "Token"}
                           </span>
                         ) : null}
+                        <span
+                          className="rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-semibold text-violet-800"
+                          title={`账号来源：${accountProviderLabel(accountProvider(credential))}`}
+                        >
+                          {accountProviderLabel(accountProvider(credential))}
+                        </span>
                         {credential.archived_at && (
                           <span className="rounded-full bg-stone-200 px-2 py-0.5 text-[11px] font-semibold text-stone-700">
                             已归档
@@ -9433,8 +9493,7 @@ export function AccountsScreen({
             <div className="mt-4 grid gap-1 rounded-xl bg-stone-100 p-1 sm:grid-cols-3">
               {[
                 ["api", "API 账号"],
-                ["official", "批量导入"],
-                ["external", "导入其他客户端"],
+                ...(!mediaView ? [["official", "批量导入"], ["external", "导入其他客户端"]] : []),
               ].map(([mode, label]) => (
                 <button
                   className={`rounded-lg px-3 py-1.5 text-[13px] font-semibold motion-control ${
@@ -9535,6 +9594,22 @@ export function AccountsScreen({
                         onChange={(event) => setApiName(event.target.value)}
                         value={apiName}
                       />
+                    </label>
+                    <label className={labelClass}>
+                      API 账号来源
+                      <select
+                        aria-label="API 账号来源"
+                        className={fieldClass}
+                        onChange={(event) => setApiProvider((event.target.value || null) as ApiAccountProvider | null)}
+                        value={apiProvider ?? ""}
+                      >
+                        <option value="">自动识别</option>
+                        {apiAccountProviders.map((item) => (
+                          <option key={item.value} value={item.value}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
                     </label>
                     <label className={labelClass}>
                       API Key
@@ -9758,6 +9833,25 @@ export function AccountsScreen({
 
             {createMode === "official" && (
               <div className="mt-4 grid gap-3">
+                <label className={labelClass}>
+                  官方订阅来源
+                  <select
+                    aria-label="官方订阅来源"
+                    className={fieldClass}
+                    onChange={(event) => {
+                      setOfficialProvider(event.target.value as OfficialAccountProvider);
+                      setOfficialText(defaultOfficialJson(officialProviderPlatform(event.target.value as OfficialAccountProvider)));
+                      setOfficialFilePaths([]);
+                    }}
+                    value={officialProvider}
+                  >
+                    {officialAccountProviders.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <p className="text-[13px] leading-5 text-stone-600">
                   粘贴 OAuth CPA、API Key CPA、session JSON、auth.json、Sub2API JSON、accessToken 或 refresh_token。
                 </p>
@@ -10528,7 +10622,22 @@ export function AccountsScreen({
                     {editApiKeyOcrError && <span className="text-[12px] font-semibold text-red-700">{editApiKeyOcrError}</span>}
                   </label>
                   <label className={labelClass}>
-                    Base URL
+                    API 账号来源
+                    <select
+                      aria-label="编辑 API 账号来源"
+                      className={fieldClass}
+                      onChange={(event) => setEditApiProvider(event.target.value)}
+                      value={editApiProvider}
+                    >
+                      {[...apiAccountProviders, ...(apiAccountProviders.some((item) => item.value === editApiProvider) ? [] : [{ value: editApiProvider, label: editApiProvider }])].map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className={labelClass}>
+                    编辑 Base URL
                     <input
                       aria-label="编辑 Base URL"
                       className={fieldClass}

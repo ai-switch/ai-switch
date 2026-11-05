@@ -138,11 +138,52 @@ impl RouteCredentialFailurePolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountProvider {
+    Custom,
+    OpenRouter,
+    PackyCode,
+    AgentRouter,
+    OpenAi,
+    Claude,
+    Gemini,
+    Grok,
+}
+
+impl AccountProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Custom => "custom",
+            Self::OpenRouter => "openrouter",
+            Self::PackyCode => "packycode",
+            Self::AgentRouter => "agentrouter",
+            Self::OpenAi => "openai",
+            Self::Claude => "claude",
+            Self::Gemini => "gemini",
+            Self::Grok => "grok",
+        }
+    }
+
+    pub fn parse_api(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "custom" => Some(Self::Custom),
+            "openrouter" => Some(Self::OpenRouter),
+            "packycode" => Some(Self::PackyCode),
+            "agentrouter" => Some(Self::AgentRouter),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, PartialEq)]
 pub struct RouteCredential {
     pub id: String,
     pub platform: String,
     pub kind: String,
+    /// 账号来源，与统一池身份和上游线协议分别存储。
+    #[serde(default)]
+    #[sqlx(default)]
+    pub provider: String,
     pub display_name: String,
     pub email: Option<String>,
     pub status: String,
@@ -223,6 +264,8 @@ pub struct RecoveryCandidate {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateApiRouteCredentialInput {
     pub platform: String,
+    #[serde(default)]
+    pub provider: Option<String>,
     pub display_name: String,
     pub api_key: String,
     pub base_url: String,
@@ -314,6 +357,8 @@ pub fn is_masked_secret_payload(raw: &str) -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpdateRouteCredentialInput {
+    #[serde(default)]
+    pub provider: Option<String>,
     pub display_name: String,
     pub email: Option<String>,
     pub status: String,
@@ -367,6 +412,10 @@ impl Default for RouteCredentialPoolScope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RouteCredentialPageRequest {
     pub platform: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
     pub page: i64,
     pub page_size: i64,
     #[serde(default)]
@@ -420,6 +469,10 @@ pub struct RouteCredentialPage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReorderRouteCredentialInput {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
     pub platform: String,

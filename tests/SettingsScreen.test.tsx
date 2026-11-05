@@ -30,7 +30,7 @@ import {
 import { I18nProvider } from "../src/lib/i18n";
 import { createQueryClient } from "../src/lib/query/queryClient";
 import { SettingsScreen } from "../src/screens/SettingsScreen";
-import { createDefaultAgentVisibility } from "../src/lib/agentVisibility";
+import { createDefaultModalityVisibility } from "../src/lib/accountModalities";
 import { settingsFixture } from "../src/test/fixtures";
 
 vi.mock("../src/lib/api/client", () => ({
@@ -219,36 +219,26 @@ describe("SettingsScreen", () => {
     vi.mocked(openRouteProxyHttpsCertificateDirectory).mockResolvedValue();
   });
 
-  it("lets users change which agents appear in navigation", async () => {
+  it("lets users change which account modalities appear in navigation", async () => {
     vi.mocked(getSettings).mockResolvedValue(settingsFixture);
-    const onAgentVisibilityChange = vi.fn();
+    const onModalityVisibilityChange = vi.fn();
 
     render(
       <QueryClientProvider client={createQueryClient()}>
         <I18nProvider initialLanguage="zh-CN">
           <SettingsScreen
-            agentVisibility={{
-              ...createDefaultAgentVisibility(),
-              codex: true,
-              claude: true,
-              grok: true,
-              gemini: true,
-              opencode: true,
-              openclaw: true,
-              hermes: true,
-            }}
-            onAgentVisibilityChange={onAgentVisibilityChange}
+            modalityVisibility={createDefaultModalityVisibility()}
+            onModalityVisibilityChange={onModalityVisibilityChange}
           />
         </I18nProvider>
       </QueryClientProvider>,
     );
 
-    const claudeToggle = await screen.findByRole("checkbox", { name: "显示 Claude" });
-    expect(claudeToggle).toBeChecked();
-
-    await userEvent.click(claudeToggle);
-
-    expect(onAgentVisibilityChange).toHaveBeenCalledWith("claude", false);
+    const videoToggle = await screen.findByRole("checkbox", { name: "显示 视频" });
+    expect(videoToggle).toBeChecked();
+    expect(screen.queryByRole("checkbox", { name: "显示 Claude" })).not.toBeInTheDocument();
+    await userEvent.click(videoToggle);
+    expect(onModalityVisibilityChange).toHaveBeenCalledWith("video", false);
   });
 
   it("loads settings and saves a selected theme value", async () => {

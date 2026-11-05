@@ -48,9 +48,9 @@ describe("CodexChannelsScreen", () => {
     // P4b：向量是导航预留位（功能未做），先占住分段位。
     expect(tabs.map((tab) => tab.textContent)).toEqual([
       "通用",
-      "生图",
+      "图片",
       "视频",
-      "TTS",
+      "音频",
       "向量",
     ]);
     expect(screen.getByRole("tab", { name: "通用" })).toHaveAttribute("aria-selected", "true");
@@ -63,7 +63,7 @@ describe("CodexChannelsScreen", () => {
   it("swaps the body by filtering the same account screen on capability", async () => {
     renderScreen();
 
-    await userEvent.click(screen.getByRole("tab", { name: "生图" }));
+    await userEvent.click(screen.getByRole("tab", { name: "图片" }));
     expect(screen.getByText("image-segment")).toBeInTheDocument();
     expect(screen.getByText("accounts:codex:image.generate")).toBeInTheDocument();
     expect(screen.queryByText("accounts:codex")).not.toBeInTheDocument();
@@ -72,7 +72,7 @@ describe("CodexChannelsScreen", () => {
     expect(screen.getByText("accounts:codex:video.generate")).toBeInTheDocument();
     expect(screen.queryByText("image-segment")).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("tab", { name: "TTS" }));
+    await userEvent.click(screen.getByRole("tab", { name: "音频" }));
     expect(screen.getByText("accounts:codex:audio.generate")).toBeInTheDocument();
     expect(screen.queryByText("accounts:codex:video.generate")).not.toBeInTheDocument();
   });
@@ -101,7 +101,7 @@ describe("CodexChannelsScreen", () => {
     expect(screen.getByText("accounts:codex:video.generate")).toBeInTheDocument();
 
     // 手动切换后存的是新段，不受 initialSegment 覆盖。
-    await userEvent.click(screen.getByRole("tab", { name: "TTS" }));
+    await userEvent.click(screen.getByRole("tab", { name: "音频" }));
     expect(window.localStorage.getItem(CODEX_SEGMENT_STORAGE_KEY)).toBe("audio");
   });
 
@@ -113,6 +113,23 @@ describe("CodexChannelsScreen", () => {
       </I18nProvider>,
     );
     expect(screen.getByRole("tab", { name: "向量" })).toBeInTheDocument();
+    expect(screen.getByText(/尚未开放/)).toBeInTheDocument();
+    expect(screen.queryByText(/accounts:codex/)).not.toBeInTheDocument();
+  });
+
+  it("follows controlled sidebar modality changes without keeping a stale segment", () => {
+    const view = (modality: "video" | "audio" | "vector") => (
+      <I18nProvider initialLanguage="zh-CN">
+        <CodexChannelsScreen imageGenerationEnabled modality={modality} hideSegmentTabs />
+      </I18nProvider>
+    );
+    const { rerender } = render(view("video"));
+    expect(screen.getByText("accounts:codex:video.generate")).toBeInTheDocument();
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+    rerender(view("audio"));
+    expect(screen.getByText("accounts:codex:audio.generate")).toBeInTheDocument();
+    expect(screen.queryByText("accounts:codex:video.generate")).not.toBeInTheDocument();
+    rerender(view("vector"));
     expect(screen.getByText(/尚未开放/)).toBeInTheDocument();
     expect(screen.queryByText(/accounts:codex/)).not.toBeInTheDocument();
   });
