@@ -27,11 +27,36 @@ use crate::services::route_model_capability::{
 };
 use crate::services::settings_service::SettingsService;
 use directories::BaseDirs;
+use serde::Serialize;
 use serde_json::{Map, Value};
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
+
+/// One `/model` slot as the write path would render it right now.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ClaudeSlotPlanSlot {
+    /// The pool alias a client requests (e.g. `claude-sonnet-alias`).
+    pub alias: String,
+    /// The `ANTHROPIC_DEFAULT_*_MODEL` env key this slot lands in.
+    pub model_env_key: String,
+    /// Alias plus the `[1M]` suffix when every pool account supports it;
+    /// `None` when no in-pool account maps this alias (the keys get cleared).
+    pub model: Option<String>,
+    /// Display name shown in Claude Code's `/model` menu, when the pool agrees.
+    pub display_name: Option<String>,
+}
+
+/// Read-only preview of the Claude env plan for the client-setup page: the same
+/// resolver as the write path, so the UI can show the slot mapping without
+/// duplicating its rules.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ClaudeSlotPlan {
+    pub slots: Vec<ClaudeSlotPlanSlot>,
+    pub subagent_model: Option<String>,
+    pub fallback_model: Option<String>,
+}
 
 pub struct RouteConfigService;
 
@@ -707,6 +732,31 @@ impl RouteConfigService {
             client_config: Self::parse_claude_client_config(
                 settings.claude_client_config_json.as_deref(),
             ),
+        })
+    }
+
+    /// Read-only view of what the next Claude config write would put into the
+    /// `/model` slots and the subagent/fallback env keys. Reuses the write
+    /// path's resolver so the client-setup page can explain the mapping without
+    /// a second copy of its rules.
+    pub async fn claude_slot_plan(
+        paths: &AppPaths,
+        pool: &SqlitePool,
+    ) -> Result<ClaudeSlotPlan, AppError> {
+        let plan = Self::resolve_claude_env_plan(paths, pool, PlatformId::Claude).await?;
+        Ok(ClaudeSlotPlan {
+            slots: CLAUDE_MODEL_SLOTS
+                .iter()
+                .zip(plan.slots)
+                .map(|(slot, write)| ClaudeSlotPlanSlot {
+                    alias: slot.alias.to_string(),
+                    model_env_key: slot.model_env_key.to_string(),
+                    model: write.model,
+                    display_name: write.display_name,
+                })
+                .collect(),
+            subagent_model: plan.subagent_model,
+            fallback_model: plan.fallback_model,
         })
     }
 
@@ -2037,6 +2087,54 @@ command = "npx"
         let json = write_claude_config_with_pool(home.path(), &paths, &pool, &runtime).await;
 
         assert!(json["env"].get("CLAUDE_CODE_SUBAGENT_MODEL").is_none());
+    }
+
+    #[tokio::test]
+    async fn claude_slot_plan_previews_the_write_path_resolution() {
+        let (_app_dir, paths, pool, _runtime) = config_write_context().await;
+        seed_claude_pool_member(
+            &pool,
+            "api",
+            r#"[
+                {"from":"claude-sonnet-alias","to":"provider-sonnet","label":"Sonnet","supports_1m":true},
+                {"from":"claude-opus-alias","to":"provider-opus"},
+                {"from":"claude-subagent","to":"provider-haiku"}
+            ]"#,
+        )
+        .await;
+
+        let plan = RouteConfigService::claude_slot_plan(&paths, &pool)
+            .await
+            .expect("slot plan");
+
+        assert_eq!(plan.slots.len(), CLAUDE_MODEL_SLOTS.len());
+        let sonnet = &plan.slots[0];
+        assert_eq!(sonnet.alias, "claude-sonnet-alias");
+        assert_eq!(sonnet.model_env_key, "ANTHROPIC_DEFAULT_SONNET_MODEL");
+        // 全部命中账号都声明 1M → 写入值带后缀；显示名池内一致 → 保留。
+        assert_eq!(sonnet.model.as_deref(), Some("claude-sonnet-alias[1M]"));
+        assert_eq!(sonnet.display_name.as_deref(), Some("Sonnet"));
+        // 没声明 1M → 裸别名；无显示名。
+        assert_eq!(plan.slots[1].model.as_deref(), Some("claude-opus-alias"));
+        assert_eq!(plan.slots[1].display_name, None);
+        // 未配置的槽位解析为清空。
+        assert_eq!(plan.slots[2].model, None);
+        assert_eq!(plan.slots[3].model, None);
+        assert_eq!(plan.subagent_model.as_deref(), Some("claude-subagent"));
+        assert_eq!(plan.fallback_model, None);
+    }
+
+    #[tokio::test]
+    async fn claude_slot_plan_is_empty_without_pool_accounts() {
+        let (_app_dir, paths, pool, _runtime) = config_write_context().await;
+
+        let plan = RouteConfigService::claude_slot_plan(&paths, &pool)
+            .await
+            .expect("slot plan");
+
+        assert!(plan.slots.iter().all(|slot| slot.model.is_none()));
+        assert_eq!(plan.subagent_model, None);
+        assert_eq!(plan.fallback_model, None);
     }
 
     fn slot_mapping(alias: &str, to: &str, label: Option<&str>, one_m: bool) -> ModelMapping {

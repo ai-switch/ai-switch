@@ -5,6 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import {
   ArrowRight,
+  Bot,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -21,10 +22,12 @@ import {
   List,
   MessageSquareText,
   MoreVertical,
+  Package,
   Play,
   Plug,
   Plus,
   RefreshCw,
+  Route as RouteIcon,
   ScanText,
   ScrollText,
   Send,
@@ -59,9 +62,9 @@ import {
 import { CodexOAuthDialog } from "../components/accounts/CodexOAuthDialog";
 import { CodexBaselineModelsDialog } from "../components/accounts/CodexBaselineModelsDialog";
 import { DirectModeDialog, hasAcceptedDirectModeNotice, rememberDirectModeNotice } from "../components/accounts/DirectModeDialog";
+import { AgentIcon } from "../components/brand/AgentIcon";
 import type { DirectModeStatus } from "../lib/api/types";
-import { declaresCapability, poolImageModels as poolImageModelsOf } from "../lib/imageCapability";
-import { ConfigWriteTargetsDialog } from "../components/accounts/ConfigWriteTargetsDialog";
+import { declaresCapability } from "../lib/imageCapability";
 import { FormTabs, type FormTab } from "../components/accounts/FormTabs";
 import { RouteCredentialExportDialog } from "../components/accounts/RouteCredentialExportDialog";
 import { CopyRouteCredentialDialog } from "../components/accounts/CopyRouteCredentialDialog";
@@ -224,7 +227,7 @@ import { getTransport, isDesktop, isTauriRuntime } from "../lib/transport";
 import { fetchRouteProxyModels } from "../lib/routeProxyModels";
 import { AUDIO_CAPABILITY, AUDIO_DIALECTS } from "../lib/audioPlatforms";
 import {
-  accountProvider, accountProviderLabel, apiAccountProviders, officialAccountProviders,
+  accountProvider, accountProviderLabel, accountSourceFilters, apiAccountProviders, officialAccountProviders,
   officialProviderPlatform, type ApiAccountProvider, type OfficialAccountProvider,
 } from "../lib/accountProviders";
 import { VIDEO_CAPABILITY, VIDEO_DIALECTS } from "../lib/videoPlatforms";
@@ -394,82 +397,18 @@ function formatApiError(error: unknown, fallback: string): string {
   return fallback;
 }
 
-/**
- * Chinese copy for config-write failures whose backend message does not convey
- * the consequence. Keyed by error code so the wording stays with the reason.
- */
-/**
- * Codes that describe a *single target's* failure inside a grouped write.
- *
- * A grouped write reports one `filesystem.route_config_write` for the whole
- * batch and parks the real reason in `details.cause_code` / `targets[].error_code`,
- * so a message keyed only on the outer code is always the generic fallback.
- */
-const configWriteErrorMessages: Record<string, string> = {
-  // A failed parse makes a client fall back to its defaults and end up with an
-  // empty provider list, so "we did not touch it" is the load-bearing part.
-  "validation.route_config_existing_invalid":
-    "现有配置文件无法解析，已拒绝覆盖以免丢失你的 provider 配置。请先修复该文件再重试。",
-  "config.concurrent_modification":
-    "配置文件在写入期间被其他程序修改，未做改动。请重试。",
-  "config.pool_models_empty": "算力池中没有可用模型，请先向池中加入账号。",
-  "config.client_unavailable": "所选客户端不支持当前平台。",
-  // Keeping the Codex login hands authentication to `auth.json`; without a
-  // ChatGPT login there is nothing to hand it to and the client would fail every
-  // request. The write is refused instead, so say how to fix it.
-  "config.codex_login_missing":
-    "已开启「保持 Codex 登录态」，但未找到 Codex 登录文件。请先在 Codex 中登录后再写入。",
-  "config.codex_login_not_chatgpt":
-    "已开启「保持 Codex 登录态」，但当前 Codex 只有 API Key 登录、没有 ChatGPT 登录态。请先执行 codex login 登录，或关闭该开关。",
-  "config.codex_login_unreadable":
-    "Codex 登录文件无法读取，已拒绝写入以免配置无法鉴权。请检查该文件后重试。",
+// 来源筛选 chip 的图标：官方厂商用品牌 SVG，中转/自定义用线性图标。
+const sourceFilterIcons: Record<string, ReactNode> = {
+  all: <LayoutGrid aria-hidden="true" className="h-3.5 w-3.5" />,
+  openai: <AgentIcon className="h-3.5 w-3.5" platform="codex" />,
+  claude: <AgentIcon className="h-3.5 w-3.5" platform="claude" />,
+  gemini: <AgentIcon className="h-3.5 w-3.5" platform="gemini" />,
+  grok: <AgentIcon className="h-3.5 w-3.5" platform="grok" />,
+  custom: <SlidersHorizontal aria-hidden="true" className="h-3.5 w-3.5" />,
+  openrouter: <RouteIcon aria-hidden="true" className="h-3.5 w-3.5" />,
+  packycode: <Package aria-hidden="true" className="h-3.5 w-3.5" />,
+  agentrouter: <Bot aria-hidden="true" className="h-3.5 w-3.5" />,
 };
-
-/**
- * Best-effort read of the failure code, including the code a grouped write
- * nested inside its `details` payload.
- */
-function configWriteErrorCode(error: unknown): string {
-  if (!error || typeof error !== "object") return "";
-  const outer = (error as { code?: unknown }).code;
-  const code = typeof outer === "string" ? outer : "";
-  // A direct code is already the most specific thing we have.
-  if (code && configWriteErrorMessages[code]) return code;
-
-  const details = (error as { details?: unknown }).details;
-  let parsed: unknown = details;
-  if (typeof details === "string") {
-    try {
-      parsed = JSON.parse(details) as unknown;
-    } catch {
-      parsed = null;
-    }
-  }
-  if (parsed && typeof parsed === "object") {
-    const record = parsed as { cause_code?: unknown; targets?: unknown };
-    if (typeof record.cause_code === "string" && configWriteErrorMessages[record.cause_code]) {
-      return record.cause_code;
-    }
-    if (Array.isArray(record.targets)) {
-      for (const target of record.targets) {
-        const targetCode =
-          target && typeof target === "object"
-            ? (target as { error_code?: unknown }).error_code
-            : null;
-        if (typeof targetCode === "string" && configWriteErrorMessages[targetCode]) {
-          return targetCode;
-        }
-      }
-    }
-  }
-  return code;
-}
-
-/** Prefers a code-specific Chinese message over the backend's raw text. */
-function formatConfigWriteError(error: unknown): string {
-  const code = configWriteErrorCode(error);
-  return configWriteErrorMessages[code] ?? formatApiError(error, "配置写入失败。");
-}
 
 function accountStatusLabel(status: string): string {
   switch (status) {
@@ -707,6 +646,10 @@ type AccountsScreenProps = {
   onOpenSessions?: (platform: PlatformKey) => void;
   sidebarCollapsed?: boolean;
   onPoolScopeFocusConsumed?: (nonce: number) => void;
+  /** 工具栏「写入配置」：跳到客户端接入页（可带直连恢复预选的客户端）。 */
+  onOpenClientSetup?: (platform: string, clientKey?: string) => void;
+  onProviderFilterFocusConsumed?: (nonce: number) => void;
+  providerFilterFocus?: { provider: string; nonce: number } | null;
   poolScopeFocus?: {
     platform: string;
     scope: "in_pool" | "out_of_pool";
@@ -3385,6 +3328,9 @@ export function AccountsScreen({
   platform = "codex",
   sidebarCollapsed = false,
   onPoolScopeFocusConsumed,
+  onOpenClientSetup,
+  onProviderFilterFocusConsumed,
+  providerFilterFocus = null,
   poolScopeFocus = null,
   capabilityFilter,
 }: AccountsScreenProps) {
@@ -3412,7 +3358,6 @@ export function AccountsScreen({
   const modelTestReason = capabilityReason(modelTestRule);
   const directModeSupported = desktop && (activePlatform === "codex" || activePlatform === "claude");
   const [pendingDirectCredential, setPendingDirectCredential] = useState<RouteCredential | null>(null);
-  const [directRestoreClient, setDirectRestoreClient] = useState<string | null>(null);
   const [directModeMessage, setDirectModeMessage] = useState<string | null>(null);
   const [directModeError, setDirectModeError] = useState<string | null>(null);
   const directModesQuery = useQuery({
@@ -3684,15 +3629,9 @@ export function AccountsScreen({
   const [modelTestOutcome, setModelTestOutcome] = useState<RoutePoolModelTestOutcome | null>(null);
   const [modelTestAutoCloseIn, setModelTestAutoCloseIn] = useState<number | null>(null);
   const [modelTestAutoClosePaused, setModelTestAutoClosePaused] = useState(false);
-  const [configWriteOutcomes, setConfigWriteOutcomes] = useState<ConfigWriteOutcome[]>([]);
-  const [configWriteError, setConfigWriteError] = useState<string | null>(null);
-  const [configWriteDialogOpen, setConfigWriteDialogOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<
     { kind: "single"; id: string; name: string } | { kind: "batch"; count: number } | null
   >(null);
-  const [clientConfigOpen, setClientConfigOpen] = useState(false);
-  const [clientConfigDraft, setClientConfigDraft] = useState("");
-  const [clientConfigError, setClientConfigError] = useState<string | null>(null);
   const [routePoolFeedback, setRoutePoolFeedback] = useState<RoutePoolFeedback>(null);
   const [quickEditPriorityCredential, setQuickEditPriorityCredential] = useState<RouteCredential | null>(null);
   const [quickEditPriorityValue, setQuickEditPriorityValue] = useState("3");
@@ -3808,7 +3747,6 @@ export function AccountsScreen({
     setModelTestMenuOpen(false);
     setModelTestMenuCopied(null);
     setCopiedCredentialId(null);
-    setConfigWriteError(null);
     setBatchStatus("");
     // Source ids are platform-scoped in the preview, so a leftover selection
     // would submit ids that belong to the platform the user just left.
@@ -4027,10 +3965,6 @@ export function AccountsScreen({
   // `/v1/images/generations`，与文本共用同一个池和同一张 key。所以「这个池能不能
   // 出图」只能从账号的 `model_mappings` 里读出来 —— 接入信息靠它决定要不要摊出
   // 图片端点。
-  const poolImageModels = useMemo(
-    () => poolImageModelsOf(allCredentials ?? []),
-    [allCredentials],
-  );
   useEffect(() => {
     if (!allCredentials) {
       return;
@@ -4416,22 +4350,6 @@ export function AccountsScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingCredential?.id]);
 
-  useEffect(() => {
-    if (configWriteOutcomes.length === 0) {
-      return;
-    }
-    // Anything the user still has to act on stays on screen. Only a clean run
-    // is safe to tidy away by itself.
-    if (configWriteOutcomes.some((outcome) => outcome.status !== "succeeded")) {
-      return;
-    }
-    const timeout = window.setTimeout(() => {
-      setConfigWriteOutcomes([]);
-    }, 3000);
-
-    return () => window.clearTimeout(timeout);
-  }, [configWriteOutcomes]);
-
   const accountPageData = credentialsQuery.data;
   const credentials = accountPageData?.items ?? [];
   const cooldownNow = useCooldownCountdown(credentials);
@@ -4593,6 +4511,22 @@ export function AccountsScreen({
     void invalidateAccountData();
     onPoolScopeFocusConsumed?.(poolScopeFocus.nonce);
   }, [activePlatform, onPoolScopeFocusConsumed, poolScopeFocus]);
+
+  // 来自客户端接入页「去调整映射」：预置来源筛选，一次生效。
+  const consumedProviderFilterNonceRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!providerFilterFocus || consumedProviderFilterNonceRef.current === providerFilterFocus.nonce) {
+      return;
+    }
+    consumedProviderFilterNonceRef.current = providerFilterFocus.nonce;
+    const entry = accountSourceFilters.find((item) => item.provider === providerFilterFocus.provider);
+    if (entry) {
+      setAccountKindFilter(entry.kind ?? "");
+      setAccountProviderFilter(entry.provider ?? "");
+      setAccountPage(1);
+    }
+    onProviderFilterFocusConsumed?.(providerFilterFocus.nonce);
+  }, [onProviderFilterFocusConsumed, providerFilterFocus]);
 
   const mergeCredentialsIntoCache = (imported: RouteCredential[]) => {
     if (!imported.length) {
@@ -5286,152 +5220,13 @@ export function AccountsScreen({
     mutationFn: stopRouteProxy,
     onSuccess: async (status) => {
       queryClient.setQueryData(["route-proxy-status"], status);
-      setConfigWriteOutcomes([]);
       await refreshSharedServiceStatus();
     },
   });
   // Pool-wide client behavior switches. Claude Code reads these from its own
   // settings file, which the whole pool shares, so they cannot be per-account.
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getSettings });
-  // Kept enabled while outcomes are on screen: the result panel outlives the
-  // dialog and needs these display names to label its rows.
-  const configWriteClientsQuery = useQuery({
-    queryKey: ["config-write-clients", activePlatform],
-    queryFn: () => listConfigWriteClients(activePlatform),
-    enabled: configWriteDialogOpen || configWriteOutcomes.length > 0,
-  });
-  // The dialog also hands out the pool endpoint for clients it cannot write, and
-  // the key is per platform. Only read while the dialog is open: reading creates
-  // the key when it does not exist yet.
-  const routeProxyKeyQuery = useQuery({
-    queryKey: ["route-proxy-key", activePlatform],
-    queryFn: () => getRouteProxyKey(activePlatform),
-    enabled: configWriteDialogOpen,
-  });
-  const clientByTargetKey = useMemo(() => {
-    const map = new Map<string, ConfigWriteClientStatus>();
-    for (const client of configWriteClientsQuery.data ?? []) {
-      map.set(client.target_key, client);
-    }
-    return map;
-  }, [configWriteClientsQuery.data]);
   /** `null` until the user picks, so the dialog defaults to the native client. */
-  const storedClientSelection = useMemo(() => {
-    const raw = settingsQuery.data?.config_write_clients_json;
-    if (!raw) {
-      return null;
-    }
-    try {
-      const parsed = JSON.parse(raw) as Record<string, string[]>;
-      const stored = parsed[activePlatform];
-      return Array.isArray(stored) && stored.length > 0 ? stored : null;
-    } catch {
-      // A corrupt preference must not block writing.
-      return null;
-    }
-  }, [settingsQuery.data?.config_write_clients_json, activePlatform]);
-  const writeConfigsMutation = useMutation({
-    mutationFn: async ({
-      clientKeys,
-      deepSeekHarnessConfigPath,
-    }: {
-      clientKeys: string[];
-      deepSeekHarnessConfigPath: string | null;
-    }) => {
-      if (!configWriteEnabled) {
-        throw new Error(configWriteReason);
-      }
-      let settings = settingsQuery.data;
-      if (
-        deepSeekHarnessConfigPath !== (settings?.deepseek_harness_config_path ?? null) &&
-        (settings || deepSeekHarnessConfigPath !== null)
-      ) {
-        if (!settings) {
-          throw new Error("设置尚未加载，无法保存 DSH 配置路径。");
-        }
-        const pathUpdated = await saveSettings({
-          ...settings,
-          deepseek_harness_config_path: deepSeekHarnessConfigPath,
-        });
-        queryClient.setQueryData(["settings"], pathUpdated);
-        settings = pathUpdated;
-      }
-      const outcomes = await writeRouteProxyConfigs(
-        routeProxyQuery.data?.base_url ?? null,
-        activePlatform,
-        clientKeys,
-      );
-      // Remember the choice so the next write does not need re-picking, and so
-      // the staleness nudge covers exactly the clients that were written.
-      if (settings) {
-        let existing: Record<string, string[]> = {};
-        try {
-          existing = settings.config_write_clients_json
-            ? (JSON.parse(settings.config_write_clients_json) as Record<string, string[]>)
-            : {};
-        } catch {
-          // A corrupt preference must not block writing.
-          existing = {};
-        }
-        const updated = await saveSettings({
-          ...settings,
-          config_write_clients_json: JSON.stringify({
-            ...existing,
-            [activePlatform]: clientKeys,
-          }),
-        });
-        queryClient.setQueryData(["settings"], updated);
-      }
-      return outcomes;
-    },
-    onMutate: () => {
-      setConfigWriteError(null);
-      setDirectModeMessage(null);
-      setDirectModeError(null);
-    },
-    onSuccess: (outcomes) => {
-      setConfigWriteOutcomes(outcomes);
-      setConfigWriteDialogOpen(false);
-      setDirectRestoreClient(null);
-      // A group resolves as long as one client succeeded, so a partial failure
-      // arrives here rather than in `onError`. Without this the only trace is
-      // the result panel, which clears itself a few seconds later.
-      const failed = outcomes.filter((outcome) => outcome.status !== "succeeded");
-      if (failed.length > 0) {
-        const names = failed.map((outcome) => {
-          const label =
-            clientByTargetKey.get(outcome.target_key)?.display_name ?? outcome.target_key;
-          return outcome.error_code ? `${label}（${outcome.error_code}）` : label;
-        });
-        setConfigWriteError(`以下客户端没有写入成功：${names.join("、")}`);
-      }
-      void queryClient.invalidateQueries({ queryKey: ["client-direct-modes"] });
-      void queryClient.invalidateQueries({ queryKey: ["route-config-stale"] });
-      void queryClient.invalidateQueries({
-        queryKey: ["config-write-clients", activePlatform],
-      });
-    },
-    onError: (error) => {
-      setConfigWriteError(formatConfigWriteError(error));
-      // 配置可能已写成、但保存勾选偏好失败；模式以文件和后端状态为准。
-      void queryClient.invalidateQueries({ queryKey: ["client-direct-modes"] });
-    },
-  });
-  // The pool's own `/v1/models` changes the moment this is saved, so it is its own
-  // mutation rather than a parameter of the write: a user whose clients discover
-  // models over HTTP never clicks 写入 at all.
-  const setModelModeMutation = useMutation({
-    mutationFn: (mode: RoutePoolModelMode) =>
-      setRoutePoolModelMode({ platform: activePlatform, mode }),
-    onSuccess: (state) => {
-      queryClient.setQueryData(["route-pool", activePlatform, selectedGroupId], state);
-      // The rendered client config now differs from disk, which is exactly what
-      // the staleness hint is for.
-      void queryClient.invalidateQueries({ queryKey: ["route-config-stale"] });
-    },
-    onError: (error) => setConfigWriteError(formatApiError(error, "切换模型清单模式失败。")),
-  });
-
   const saveBaselineModelsMutation = useMutation({
     mutationFn: (models: string[]) =>
       setRoutePoolBaselineModels({ platform: "codex", models }),
@@ -5456,62 +5251,17 @@ export function AccountsScreen({
       // account list version changes rather than hand-listing every mutation.
       allCredentialsQuery.dataUpdatedAt,
       settingsQuery.data?.claude_client_config_json ?? null,
-      storedClientSelection,
-      // The written model ids follow the mode, so switching it makes the file stale.
-      routePoolQuery.data?.model_mode ?? null,
     ],
     queryFn: () =>
       routeConfigWriteIsStale(
         routeProxyQuery.data?.base_url ?? null,
         activePlatform,
-        storedClientSelection,
+        null,
       ),
     enabled: routeServiceReady && configWriteEnabled,
     staleTime: 0,
   });
   const configWriteStale = configWriteStaleQuery.data === true;
-  const saveClientConfigMutation = useMutation({
-    mutationFn: async (configJson: string | null) => {
-      const settings = settingsQuery.data;
-      if (!settings) {
-        throw new Error("设置尚未加载完成。");
-      }
-      return saveSettings({ ...settings, claude_client_config_json: configJson });
-    },
-    onSuccess: (settings) => {
-      queryClient.setQueryData(["settings"], settings);
-      setClientConfigOpen(false);
-    },
-    onError: (error) => setClientConfigError(formatApiError(error, "保存全局配置失败。")),
-  });
-  const openClientConfigDialog = () => {
-    setClientConfigDraft(settingsQuery.data?.claude_client_config_json ?? "");
-    setClientConfigError(null);
-    setClientConfigOpen(true);
-  };
-  const submitClientConfig = () => {
-    const trimmed = clientConfigDraft.trim();
-    if (!trimmed) {
-      setClientConfigError(null);
-      saveClientConfigMutation.mutate(null);
-      return;
-    }
-    // Validate here rather than at write time: a malformed value is ignored by
-    // the writer, which would look like the setting silently doing nothing.
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch {
-      setClientConfigError("不是合法的 JSON。");
-      return;
-    }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      setClientConfigError("需要一个 JSON 对象，例如 {\"includeCoAuthoredBy\": false}。");
-      return;
-    }
-    setClientConfigError(null);
-    saveClientConfigMutation.mutate(trimmed);
-  };
   const updateMutation = useMutation({
     mutationFn: async () => {
       if (!editingCredential) {
@@ -6803,17 +6553,14 @@ export function AccountsScreen({
                     ? "border-amber-400 text-amber-700"
                     : "border-stone-300 text-stone-700"
                 }`}
-                // Platforms without a native config write still open the dialog:
-                // it is where the endpoint parameters for hand-configured clients
-                // live, and the write itself stays gated inside it.
-                disabled={!routeServiceReady || writeConfigsMutation.isPending || directModeMutation.isPending}
-                onClick={() => { setDirectRestoreClient(null); setConfigWriteDialogOpen(true); }}
+                disabled={!routeServiceReady || directModeMutation.isPending}
+                onClick={() => onOpenClientSetup?.(activePlatform)}
                 title={
                   !configWriteEnabled
-                    ? configWriteReason + "可在弹窗里复制端点参数手动配置。"
+                    ? configWriteReason + "可在客户端接入页复制端点参数手动配置。"
                     : configWriteStale
                       ? "配置已变更，需重新写入才会生效"
-                      : "对接客户端：把当前算力池写入客户端配置"
+                      : "客户端接入：把当前算力池写入客户端配置"
                 }
                 type="button"
               >
@@ -6829,18 +6576,6 @@ export function AccountsScreen({
                 <span className="shrink-0 text-[11px] font-semibold text-amber-700">
                   配置已变更，需重新写入
                 </span>
-              ) : null}
-              {activePlatform === "claude" ? (
-                <button
-                  aria-label="编辑全局客户端配置"
-                  className="grid h-6 w-6 place-items-center border border-stone-300 bg-white text-stone-700 motion-control hover:bg-stone-200 disabled:opacity-50"
-                  disabled={!settingsQuery.data}
-                  onClick={openClientConfigDialog}
-                  title="全局客户端配置（整池共用，写入配置时合并进 settings.json）"
-                  type="button"
-                >
-                  <SlidersHorizontal aria-hidden="true" className="h-3.5 w-3.5" />
-                </button>
               ) : null}
               <div className="relative flex shrink-0" ref={modelTestMenuRef}>
                 <button
@@ -6977,68 +6712,10 @@ export function AccountsScreen({
           data-testid="account-workspace-scroll-region"
           ref={accountScrollRef}
         >
-        {configWriteOutcomes.length > 0 && (
-          <div className="mx-4 mb-3 space-y-1 rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-[12px] text-stone-600">
-            <div className="flex items-start justify-between gap-3">
-              <p className="font-semibold text-stone-950">配置写入结果</p>
-              <DismissButton
-                ariaLabel="关闭配置写入结果"
-                onClick={() => setConfigWriteOutcomes([])}
-              />
-            </div>
-            {configWriteOutcomes.map((outcome) => (
-              <div
-                className="rounded-lg border border-stone-200 bg-white px-2.5 py-2"
-                key={`${outcome.operation_id}:${outcome.target_key}:${outcome.snapshot_id ?? "none"}`}
-              >
-                <p>
-                  {clientByTargetKey.get(outcome.target_key)?.display_name ?? outcome.target_key} ·{" "}
-                  {outcome.platform}: {outcome.path || "未解析路径"} ({outcome.status})
-                </p>
-                <p className="mt-1 font-mono text-[11px] text-stone-500">
-                  operation {outcome.operation_id} · snapshot {outcome.snapshot_id ?? "none"}
-                </p>
-                <p className="mt-1 font-mono text-[11px] text-stone-500">
-                  before {outcome.before_hash ?? "none"} · after {outcome.after_hash ?? "none"}
-                </p>
-                {outcome.error_code ? (
-                  <p className="mt-1 font-mono text-[11px] text-red-600">{outcome.error_code}</p>
-                ) : null}
-              </div>
-            ))}
-            {/* The dialog is gone by now and the user likely switched windows, so
-                the restart requirement has to be repeated here. */}
-            {configWriteOutcomes.some(
-              (outcome) => clientByTargetKey.get(outcome.target_key)?.restart_required,
-            ) ? (
-              <p className="text-[11px] text-stone-500">
-                写入后需重启{" "}
-                {Array.from(
-                  new Set(
-                    configWriteOutcomes
-                      .map((outcome) => clientByTargetKey.get(outcome.target_key))
-                      .filter((client) => client?.restart_required)
-                      .map((client) => client?.display_name ?? ""),
-                  ),
-                ).join("、")}{" "}
-                才生效（它不监听配置文件变化）。
-              </p>
-            ) : null}
-          </div>
-        )}
         {/* The dialog stays open on failure and shows this same sentence, so
             rendering it here too would duplicate it on screen. */}
         {directModeMessage ? <p role="status" className="mx-4 mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-950">{directModeMessage}</p> : null}
         {directModeError && !pendingDirectCredential ? <p role="alert" className="mx-4 mb-3 rounded-xl bg-red-50 px-3 py-2 text-[12px] text-red-700">{directModeError}</p> : null}
-        {configWriteError && !configWriteDialogOpen ? (
-          <div className="mx-4 mb-3 flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-[12px] font-semibold text-red-700">
-            <p role="alert">{configWriteError}</p>
-            <DismissButton
-              ariaLabel="关闭配置写入错误"
-              onClick={() => setConfigWriteError(null)}
-            />
-          </div>
-        ) : null}
         {modelTestMutation.isPending ? (
           <div
             aria-label="真实生成测试进行中"
@@ -7289,31 +6966,56 @@ export function AccountsScreen({
                 </MotionMenu>
               </div>
               {!mediaView && (
-                <select
-                  aria-label="账号类型筛选"
-                  className="h-8 shrink-0 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-semibold text-stone-700 motion-control"
-                  onChange={(event) => { setAccountKindFilter(event.target.value as "official" | "api" | ""); setAccountPage(1); }}
-                  value={accountKindFilter}
+                <div
+                  aria-label="账号来源筛选"
+                  className="flex h-8 min-w-0 shrink-0 items-center gap-0.5 overflow-x-auto rounded-lg border border-stone-300 bg-white p-0.5 shadow-sm"
+                  role="group"
                 >
-                  <option value="">全部类型</option>
-                  <option value="official">官方订阅</option>
-                  <option value="api">API</option>
+                  {accountSourceFilters.map((item) => {
+                    const active = item.kind === null
+                      ? !accountKindFilter && !accountProviderFilter
+                      : effectiveKindFilter === item.kind && accountProviderFilter === item.provider;
+                    return (
+                      <button
+                        aria-label={`账号来源筛选 ${item.label}`}
+                        aria-pressed={active}
+                        className={`inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[12px] font-semibold motion-control ${
+                          active ? "bg-stone-900 text-white" : "text-stone-600 hover:bg-stone-100"
+                        }`}
+                        key={item.key}
+                        onClick={() => {
+                          if (!active && item.kind !== null) {
+                            setAccountKindFilter(item.kind);
+                            setAccountProviderFilter(item.provider);
+                          } else {
+                            setAccountKindFilter("");
+                            setAccountProviderFilter("");
+                          }
+                          setAccountPage(1);
+                        }}
+                        title={item.label}
+                        type="button"
+                      >
+                        {sourceFilterIcons[item.key]}
+                        {item.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {mediaView && (
+                <select
+                  aria-label="账号来源筛选"
+                  className="h-8 shrink-0 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-semibold text-stone-700 motion-control"
+                  onChange={(event) => { setAccountProviderFilter(event.target.value); setAccountPage(1); }}
+                  value={accountProviderFilter}
+                >
+                  <option value="">全部来源</option>
+                  {apiAccountProviders.map((item) => (
+                    <option key={`api-${item.value}`} value={item.value}>{item.label}</option>
+                  ))}
                 </select>
               )}
-              <select
-                aria-label="账号来源筛选"
-                className="h-8 shrink-0 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-semibold text-stone-700 motion-control"
-                onChange={(event) => { setAccountProviderFilter(event.target.value); setAccountPage(1); }}
-                value={accountProviderFilter}
-              >
-                <option value="">全部来源</option>
-                {apiAccountProviders.map((item) => (
-                  <option key={`api-${item.value}`} value={item.value}>{item.label}</option>
-                ))}
-                {officialAccountProviders.map((item) => (
-                  <option key={`official-${item.value}`} value={item.value}>{item.label}</option>
-                ))}
-              </select>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -7839,9 +7541,9 @@ export function AccountsScreen({
                       ariaLabel: active ? `${credential.display_name} 直连中，恢复算力池` : `启用 ${credential.display_name} 的直连模式`,
                       menuLabel: active ? "直连中 · 恢复算力池" : "启用直连模式",
                       title: !configWriteEnabled ? configWriteReason : active ? "当前账号直连中；点击选择客户端并恢复算力池" : "仅将对应的 Codex / Claude 原生客户端切换到此账号直连",
-                      disabled: !configWriteEnabled || directModeMutation.isPending || writeConfigsMutation.isPending || directModesQuery.isPending || directModesQuery.isError,
+                      disabled: !configWriteEnabled || directModeMutation.isPending || directModesQuery.isPending || directModesQuery.isError,
                       onClick: () => {
-                        if (active) { setDirectRestoreClient(directStatus.client_key); setConfigWriteError(null); setConfigWriteDialogOpen(true); }
+                        if (active) { onOpenClientSetup?.(activePlatform, directStatus.client_key); }
                         else requestDirectMode(credential);
                       },
                       inlineToneClass: active ? "border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100" : "border-stone-200 text-stone-700 hover:bg-stone-50",
@@ -8769,79 +8471,6 @@ export function AccountsScreen({
         </div>
       )}
 
-      {clientConfigOpen && (
-        <div className="motion-overlay fixed inset-0 z-50 grid place-items-center bg-stone-950/35 p-4 backdrop-blur-sm"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              setClientConfigOpen(false);
-            }
-          }}
-        >
-          <div
-            aria-label="全局客户端配置弹窗"
-            className="w-full max-w-lg rounded-2xl border border-stone-200 bg-white p-4 shadow-2xl"
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-stone-400">
-                  {platformLabels[activePlatform]}
-                </p>
-                <h3 className="mt-0.5 text-lg font-semibold text-stone-950">全局客户端配置</h3>
-                <p className="mt-1 text-[12px] leading-5 text-stone-500">
-                  Claude Code 的行为开关（includeCoAuthoredBy、permissions 等）由它自己读取 settings.json，
-                  整个算力池共用一份，所以只能全局配置、不能按账号区分。写入配置时合并进 settings.json 根级。
-                </p>
-              </div>
-              <button
-                aria-label="关闭全局客户端配置弹窗"
-                className="rounded-xl border border-stone-200 p-1.5 text-stone-500 motion-control hover:bg-stone-50"
-                onClick={() => setClientConfigOpen(false)}
-                type="button"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <label className="mt-4 grid gap-1.5">
-              <span className="text-[12px] font-semibold text-stone-600">配置片段（JSON 对象）</span>
-              <textarea
-                aria-label="全局客户端配置 JSON"
-                className="min-h-40 rounded-xl border border-stone-200 bg-white px-3 py-2 font-mono text-[12px] text-stone-900 outline-none motion-control focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-                onChange={(event) => setClientConfigDraft(event.target.value)}
-                placeholder={'{\n  "includeCoAuthoredBy": false\n}'}
-                spellCheck={false}
-                value={clientConfigDraft}
-              />
-            </label>
-            <p className="mt-1.5 text-[11px] leading-5 text-stone-500">
-              这里配置的键会覆盖 settings.json 中同名的手改值；从这里删掉某个键，下次写入会把它从
-              settings.json 中移除。未在此出现过的键不会被改动。留空表示不管理任何键。
-            </p>
-            {clientConfigError ? (
-              <p className="mt-2 text-[12px] font-semibold text-red-700">{clientConfigError}</p>
-            ) : null}
-
-            <div className="mt-4 flex justify-end gap-2">
-              <button
-                className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-[13px] font-semibold text-stone-700 motion-control hover:bg-stone-50"
-                onClick={() => setClientConfigOpen(false)}
-                type="button"
-              >
-                取消
-              </button>
-              <button
-                className="rounded-xl border border-blue-700 bg-blue-600 px-3 py-2 text-[13px] font-semibold text-white motion-control hover:bg-blue-700 disabled:opacity-50"
-                disabled={saveClientConfigMutation.isPending}
-                onClick={submitClientConfig}
-                type="button"
-              >
-                {saveClientConfigMutation.isPending ? "保存中..." : "保存"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {modelTestDialogOpen && (
         <div className="motion-overlay fixed inset-0 z-50 grid place-items-center bg-stone-950/35 p-4 backdrop-blur-sm"
           onMouseDown={(event) => {
@@ -9246,43 +8875,6 @@ export function AccountsScreen({
           onConfirm={() => directModeMutation.mutate(pendingDirectCredential.id)}
         />
       ) : null}
-      {configWriteDialogOpen ? (
-        <ConfigWriteTargetsDialog
-          capabilityDisabledReason={configWriteEnabled ? undefined : configWriteReason}
-          clients={configWriteClientsQuery.data ?? []}
-          error={configWriteError}
-          httpsError={routeProxyQuery.data?.https_error ?? null}
-          initialSelection={directRestoreClient ? [directRestoreClient] : storedClientSelection}
-          directClientKeys={(directModesQuery.data ?? []).filter((item) => item.platform === activePlatform).map((item) => item.client_key)}
-          loading={writeConfigsMutation.isPending}
-          modelMode={routePoolQuery.data?.model_mode ?? "aggregate"}
-          modelModeSaving={setModelModeMutation.isPending}
-          deepSeekHarnessConfigPath={
-            settingsQuery.data?.deepseek_harness_config_path ?? null
-          }
-          onClose={() => {
-            if (!writeConfigsMutation.isPending) {
-              setConfigWriteDialogOpen(false);
-              setDirectRestoreClient(null);
-            }
-          }}
-          onModelModeChange={(mode) => setModelModeMutation.mutate(mode)}
-          onSubmit={(clientKeys, deepSeekHarnessConfigPath) =>
-            writeConfigsMutation.mutate({ clientKeys, deepSeekHarnessConfigPath })
-          }
-          platform={activePlatform}
-          platformLabel={platformLabels[activePlatform]}
-          poolApiKey={routeProxyKeyQuery.data ?? null}
-          imageModels={poolImageModels}
-          poolBaseUrl={
-            routeServiceReady ? routeProxyQuery.data?.base_url ?? null : null
-          }
-          poolHttpsBaseUrl={
-            routeServiceReady ? routeProxyQuery.data?.https_base_url ?? null : null
-          }
-        />
-      ) : null}
-
       {exportRequest ? (
         <RouteCredentialExportDialog
           open

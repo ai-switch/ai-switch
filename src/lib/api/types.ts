@@ -1174,6 +1174,25 @@ export type ConfigWriteClientStatus = {
   error_code?: string | null;
 };
 
+/** One Claude `/model` slot as the next config write would render it. */
+export type ClaudeSlotPlanSlot = {
+  /** The pool alias a client requests (e.g. `claude-sonnet-alias`). */
+  alias: string;
+  /** The `ANTHROPIC_DEFAULT_*_MODEL` env key this slot lands in. */
+  model_env_key: string;
+  /** Alias plus the `[1M]` suffix when every pool account supports it; null clears the keys. */
+  model: string | null;
+  /** Display name shown in Claude Code's `/model` menu, when the pool agrees. */
+  display_name: string | null;
+};
+
+/** Read-only preview of the Claude slot plan, resolved by the write path itself. */
+export type ClaudeSlotPlan = {
+  slots: ClaudeSlotPlanSlot[];
+  subagent_model: string | null;
+  fallback_model: string | null;
+};
+
 export type AppSettings = {
   language: string;
   theme: string;

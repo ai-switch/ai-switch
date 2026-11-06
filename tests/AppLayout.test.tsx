@@ -144,11 +144,13 @@ describe("AppLayout", () => {
     await userEvent.click(screen.getByRole("button", { name: "统计" }));
     await userEvent.click(screen.getByRole("button", { name: /MCP/ }));
     await userEvent.click(screen.getByRole("button", { name: /技能/ }));
+    await userEvent.click(screen.getByRole("button", { name: /客户端接入/ }));
     await userEvent.click(screen.getByRole("button", { name: /关于/ }));
 
     expect(onNavigate).toHaveBeenCalledWith("Stats");
     expect(onNavigate).toHaveBeenCalledWith("MCP");
     expect(onNavigate).toHaveBeenCalledWith("Skills");
+    expect(onNavigate).toHaveBeenCalledWith("ClientSetup");
     expect(onNavigate).toHaveBeenCalledWith("About");
   });
 

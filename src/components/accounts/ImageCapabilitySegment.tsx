@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { ExternalLink } from "lucide-react";
-import { EndpointRow } from "./ConfigWriteTargetsDialog";
+import { EndpointRow } from "./EndpointRow";
 import { getRouteProxyKey, getRouteProxyStatus } from "../../lib/api/client";
 import { useI18n } from "../../lib/i18n";
 import { imageGenerationEndpoint } from "../../lib/routeProxyEndpoint";

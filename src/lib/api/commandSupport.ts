@@ -9,6 +9,9 @@ export const desktopOnlyCommands = [
   "open_session_terminal",
   "save_route_credential_export",
   "save_route_proxy_diagnostics_export",
+  // Reads local settings + pool mappings through the desktop paths; the write it
+  // previews (`write_route_proxy_configs`) is desktop-only as well.
+  "get_claude_slot_plan",
 ] as const;
 
 export function isDesktopOnlyCommand(command: string) {

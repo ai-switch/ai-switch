@@ -12,6 +12,7 @@ import type {
   CodexLoginState,
   ConfigWriteClientStatus,
   ConfigWriteOutcome,
+  ClaudeSlotPlan,
   DirectModeStatus,
   CopyRouteCredentialInput,
   CreateRoutePoolGroupInput,
@@ -433,6 +434,12 @@ export function routeConfigWriteIsStale(
     platform,
     clientKeys: clientKeys ?? null,
   });
+}
+
+/// Read-only preview of what the next Claude config write would put into the
+/// `/model` slots; resolved by the same code as the write itself.
+export function getClaudeSlotPlan(): Promise<ClaudeSlotPlan> {
+  return invoke("get_claude_slot_plan");
 }
 
 /// Clients this platform can write config for, with each one's current file

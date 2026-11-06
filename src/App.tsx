@@ -38,6 +38,7 @@ import { SkillsScreen } from "./screens/SkillsScreen";
 import { MotionPage, MotionProvider, type MotionDirection } from "./components/motion/MotionPrimitives";
 import { SaasAdmin } from "./saas";
 import { ImageGenerationScreen } from "./imagegen/ImageGenerationScreen";
+import { ClientSetupScreen, type ClientSetupFocus } from "./screens/ClientSetupScreen";
 import { CodexChannelsScreen } from "./screens/CodexChannelsScreen";
 import { adminCall } from "./saas/api";
 import { getSettings } from "./lib/api/client";
@@ -57,6 +58,7 @@ const implementedScreens = new Set([
   "SaaS",
   "ImageGen",
   "Sessions",
+  "ClientSetup",
   "Updates",
   "Log",
   "MCP",
@@ -99,6 +101,10 @@ export function App() {
   const [sessionPlatform, setSessionPlatform] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [poolScopeFocus, setPoolScopeFocus] = useState<PoolScopeFocus | null>(null);
+  // 客户端接入页的深链（侧边栏 / 账号页工具栏 / 直连恢复），一次生效。
+  const [clientSetupFocus, setClientSetupFocus] = useState<ClientSetupFocus | null>(null);
+  // 「去调整映射」：跳到通用账号页并预置来源筛选，一次生效。
+  const [accountProviderFocus, setAccountProviderFocus] = useState<{ provider: string; nonce: number } | null>(null);
   const [modalityVisibility, setModalityVisibility] = useState<ModalityVisibility>(readModalityVisibility);
   // Vibe keeps live terminals; once it has been opened we keep it mounted and only
   // hide it so switching back and forth never drops running sessions or scrollback.
@@ -167,6 +173,25 @@ export function App() {
     setScreen("Sessions");
   };
 
+  const openClientSetup = useCallback((focus: ClientSetupFocus) => {
+    setNavigationDirection("forward");
+    screenRef.current = "ClientSetup";
+    setClientSetupFocus(focus);
+    setScreen("ClientSetup");
+  }, []);
+  const handleClientSetupFocusConsumed = useCallback(() => {
+    setClientSetupFocus(null);
+  }, []);
+  const openAccountsWithProvider = useCallback((provider: string) => {
+    setNavigationDirection("forward");
+    screenRef.current = modalityScreenById.general;
+    setAccountProviderFocus({ provider, nonce: Date.now() });
+    setScreen(modalityScreenById.general);
+  }, []);
+  const handleProviderFilterFocusConsumed = useCallback((nonce: number) => {
+    setAccountProviderFocus((current) => (current?.nonce === nonce ? null : current));
+  }, []);
+
   const handleDeepLinkImported = useCallback(
     (_platform: string, options?: { joinedPool?: boolean }) => {
       setNavigationDirection("forward");
@@ -233,10 +258,19 @@ export function App() {
                         onOpenImageStudio={() => navigate("ImageGen")}
                         onOpenSessions={openSessions}
                         onPoolScopeFocusConsumed={handlePoolScopeFocusConsumed}
+                        onProviderFilterFocusConsumed={handleProviderFilterFocusConsumed}
                         poolScopeFocus={poolScopeFocus}
+                        providerFilterFocus={accountProviderFocus}
                         sidebarCollapsed={sidebarCollapsed}
                       />
                     )}
+                {screen === "ClientSetup" && (
+                  <ClientSetupScreen
+                    focus={clientSetupFocus}
+                    onOpenAccounts={openAccountsWithProvider}
+                    onFocusConsumed={handleClientSetupFocusConsumed}
+                  />
+                )}
                 {screen === "Dashboard" && <DashboardScreen />}
                 {screen === "Batches" && <BatchesScreen />}
                 {screen === "Providers" && <ProvidersScreen />}

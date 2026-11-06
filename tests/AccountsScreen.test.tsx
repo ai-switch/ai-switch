@@ -391,10 +391,16 @@ function renderScreen(
   sidebarCollapsed = false,
   queryClient = createQueryClient(),
   capabilityFilter?: string,
+  onOpenClientSetup: (platform: string, clientKey?: string) => void = vi.fn(),
 ) {
   const result = render(
     <QueryClientProvider client={queryClient}>
-      <AccountsScreen capabilityFilter={capabilityFilter} platform={platform} sidebarCollapsed={sidebarCollapsed} />
+      <AccountsScreen
+        capabilityFilter={capabilityFilter}
+        onOpenClientSetup={onOpenClientSetup}
+        platform={platform}
+        sidebarCollapsed={sidebarCollapsed}
+      />
     </QueryClientProvider>,
   );
   if (initialView !== "in_pool") {
@@ -517,7 +523,8 @@ describe("AccountsScreen", () => {
       vi.mocked(getClientDirectModes).mockResolvedValue([status]);
       return status;
     });
-    renderScreen();
+    const onOpenClientSetup = vi.fn();
+    renderScreen("codex", "out_of_pool", false, createQueryClient(), undefined, onOpenClientSetup);
     await userEvent.click(await screen.findByRole("button", { name: "启用 Team Account 的直连模式" }));
     await userEvent.click(screen.getByRole("button", { name: "确认启用直连" }));
     await waitFor(() => expect(enableClientDirectMode).toHaveBeenCalledWith("cred-official-1"));
@@ -525,13 +532,8 @@ describe("AccountsScreen", () => {
     expect(localStorage.getItem("ai-switch:direct-mode-notice:v1")).toBe("accepted");
     expect(screen.getByRole("status")).toHaveTextContent(/重启/);
     await userEvent.click(screen.getByRole("button", { name: "Team Account 直连中，恢复算力池" }));
-    vi.mocked(getClientDirectModes).mockResolvedValue([]);
-    const restoreDialog = screen.getByRole("dialog");
-    await userEvent.click(screen.getByRole("button", { name: "写入" }));
-    // 等偏好保存与 onSuccess 全部完成，不能让异步保存泄漏到下一条测试的 spy。
-    await waitFor(() => expect(restoreDialog).not.toBeInTheDocument());
-    await waitFor(() => expect(writeRouteProxyConfigs).toHaveBeenCalled());
-    expect(screen.queryByText(/已为 Codex 启用直连模式/)).not.toBeInTheDocument();
+    // 恢复算力池现在跳到客户端接入页并预选该客户端，写入发生在那里。
+    expect(onOpenClientSetup).toHaveBeenCalledWith("codex", "codex");
   });
 
   it("直连失败不记确认状态也不显示直连中", async () => {
@@ -543,15 +545,6 @@ describe("AccountsScreen", () => {
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(/scopes/);
     expect(localStorage.getItem("ai-switch:direct-mode-notice:v1")).toBeNull();
     expect(screen.queryByRole("button", { name: /直连中，恢复算力池/ })).not.toBeInTheDocument();
-  });
-
-  it("直连恢复入口默认只勾选当前原生客户端", async () => {
-    vi.mocked(getClientDirectModes).mockResolvedValue([{client_key:"codex",credential_id:"cred-official-1",platform:"codex",credential_kind:"official",status:"active",updated_at:"2026-10-06T00:00:00Z",restart_required:true}]);
-    vi.mocked(getSettings).mockResolvedValue({...settingsFixture,config_write_clients_json:JSON.stringify({codex:["zcode"]})});
-    renderScreen();
-    await userEvent.click(await screen.findByRole("button", { name: "Team Account 直连中，恢复算力池" }));
-    expect(await screen.findByRole("checkbox", { name: /Codex CLI/ })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: /ZCode/ })).not.toBeChecked();
   });
 
   it("已确认说明的用户再次启用直连不重复弹窗", async () => {
@@ -2783,20 +2776,16 @@ describe("AccountsScreen", () => {
       base_url: "http://127.0.0.1:43111",
     });
 
-    renderScreen("hermes");
+    const onOpenClientSetup = vi.fn();
+    renderScreen("hermes", "out_of_pool", false, createQueryClient(), undefined, onOpenClientSetup);
 
     // Still "partial": no official vendor account to import, route, or bill.
     expect(await screen.findByLabelText("Hermes 部分支持")).toBeInTheDocument();
     const writeConfig = screen.getByLabelText("写入路由配置文件");
     expect(writeConfig).toBeEnabled();
+    // 写入交互整体搬到了客户端接入页；这里只负责把入口递过去。
     await userEvent.click(writeConfig);
-    expect(await screen.findByRole("checkbox", { name: /Hermes Agent/ })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "写入" })).toBeEnabled();
-    // The endpoint the manual tab hands out has to match what the writer puts in
-    // the file, `/v1` included.
-    await userEvent.click(screen.getByRole("tab", { name: "其他 Agent" }));
-    expect(screen.getByLabelText("Base URL")).toHaveValue("http://127.0.0.1:43111/v1");
-    await userEvent.click(screen.getByLabelText("关闭接入算力池"));
+    expect(onOpenClientSetup).toHaveBeenCalledWith("hermes");
     await userEvent.click(screen.getByLabelText("打开刷新菜单"));
     expect(screen.getByLabelText("刷新官方账号额度")).toBeDisabled();
     await waitFor(() => expect(refreshRouteCredentialsQuota).not.toHaveBeenCalled());
@@ -3605,9 +3594,10 @@ describe("AccountsScreen", () => {
     renderScreen();
     expect(await screen.findByTitle("账号来源：Claude")).toBeInTheDocument();
     expect(screen.getByTitle("账号来源：OpenRouter")).toBeInTheDocument();
-    await userEvent.selectOptions(screen.getByLabelText("账号类型筛选"), "api");
-    await userEvent.selectOptions(screen.getByLabelText("账号来源筛选"), "openrouter");
+    // 来源筛选是图标 chip 行：点 OpenRouter 即同时限定 API 类型与该来源。
+    await userEvent.click(screen.getByRole("button", { name: "账号来源筛选 OpenRouter", pressed: false }));
     await waitFor(() => expect(listRouteCredentialPage).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "api", provider: "openrouter" })));
+    expect(screen.getByRole("button", { name: "账号来源筛选 OpenRouter", pressed: true })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "编辑 Subscription source" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "编辑 Relay source" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "编辑 Relay source" }));
@@ -3616,6 +3606,12 @@ describe("AccountsScreen", () => {
     await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
     await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
     expect(vi.mocked(updateRouteCredential).mock.calls[0][1].provider).toBe("custom");
+    // 再点已激活 chip 回到全部，官方 chip 同时带类型与来源。
+    await userEvent.click(screen.getByRole("button", { name: "账号来源筛选 OpenRouter", pressed: true }));
+    await waitFor(() => expect(listRouteCredentialPage).toHaveBeenLastCalledWith(expect.objectContaining({ kind: null, provider: null })));
+    await userEvent.click(screen.getByRole("button", { name: "账号来源筛选 Claude", pressed: false }));
+    await waitFor(() => expect(listRouteCredentialPage).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "official", provider: "claude" })));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "编辑 Relay source" })).not.toBeInTheDocument());
   });
 
   it("media create screens do not offer official subscription imports", async () => {
@@ -6778,7 +6774,7 @@ describe("AccountsScreen", () => {
     });
   });
 
-  it("hands out the pool endpoint from the config write dialog instead of the menu", async () => {
+  it("keeps pool endpoint parameters out of the test menu and hands the write entry over", async () => {
     vi.mocked(getRouteProxyStatus).mockResolvedValue({
       running: true,
       route_access_enabled: true,
@@ -6790,7 +6786,8 @@ describe("AccountsScreen", () => {
       https_error: null,
     });
     poolStateByPlatform.set("codex", ["cred-official-1"]);
-    renderScreen("codex", "out_of_pool");
+    const onOpenClientSetup = vi.fn();
+    renderScreen("codex", "out_of_pool", false, createQueryClient(), undefined, onOpenClientSetup);
 
     // The endpoint now belongs with the client write, not the test menu.
     await waitFor(() => expect(screen.getByLabelText("真实生成测试算力池路由")).toBeEnabled());
@@ -6799,45 +6796,20 @@ describe("AccountsScreen", () => {
     expect(screen.queryByLabelText("复制 sk")).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByLabelText("写入路由配置文件"));
-    await screen.findByText("接入算力池");
-    // The parameters live on their own tab so they are not buried below the fold.
-    await userEvent.click(screen.getByRole("tab", { name: "其他 Agent" }));
-
-    // Codex appends /responses to the base URL, so the copied address carries /v1.
-    await userEvent.click(screen.getByLabelText("复制 Base URL"));
-    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith("http://127.0.0.1:43111/v1");
-
-    // HTTPS lives on its own port, so it shows up as a second address rather than
-    // replacing the first.
-    expect(screen.getByLabelText("HTTPS Base URL")).toHaveValue("https://127.0.0.1:43112/v1");
-
-    // The key is per platform, so the dialog reads the active tab's own key.
-    await waitFor(() =>
-      expect(screen.getByLabelText("API Key")).toHaveValue("sk-ai-switch-codex-key"),
-    );
-    await userEvent.click(screen.getByLabelText("复制 API Key"));
-    expect(getRouteProxyKey).toHaveBeenCalledWith("codex");
-    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith("sk-ai-switch-codex-key");
-
-    // 这个池里没有账号声明 image.generate，所以不摊图片端点 —— 给一个调不通的
-    // 地址比不给更糟。
-    expect(screen.queryByLabelText("图片端点")).not.toBeInTheDocument();
+    expect(onOpenClientSetup).toHaveBeenCalledWith("codex");
   });
 
-  /// 生图**没有自己的平台**：它是这个池里账号的一个能力，端点是
-  /// `/v1/images/generations`，与文本共用同一个 Base URL 和同一张 key。
-  ///
-  /// 所以接入信息必须把它摊出来：界面上没有别的地方能知道这个端点存在
-  /// （「生图」那个导航入口还被插件开关挡着，而且它是工作台不是渠道管理）。
-  it("hands out the image endpoint when the pool declares image models", async () => {
+  /// 生图**没有自己的平台**：它是这个池里账号的一个能力，端点参数现在由
+  /// 客户端接入页摊出（见 ClientSetupScreen 测试）；账号页只负责递入口。
+  it("hands the write entry over for the image endpoint pool", async () => {
     vi.mocked(getRouteProxyStatus).mockResolvedValue({
       running: true,
       route_access_enabled: true,
       bind_host: "127.0.0.1",
       port: 43111,
       base_url: "http://127.0.0.1:43111",
-      https_port: 43112,
-      https_base_url: "https://127.0.0.1:43112",
+      https_port: null,
+      https_base_url: null,
       https_error: null,
     });
     poolStateByPlatform.set("codex", ["cred-image-1"]);
@@ -6860,25 +6832,12 @@ describe("AccountsScreen", () => {
         }),
       },
     ]);
-    // 用 in_pool：出图账号在池里，测试按钮才可用（空池时它是禁用的）。
-    renderScreen("codex", "in_pool");
+    const onOpenClientSetup = vi.fn();
+    renderScreen("codex", "in_pool", false, createQueryClient(), undefined, onOpenClientSetup);
 
     await waitFor(() => expect(screen.getByLabelText("真实生成测试算力池路由")).toBeEnabled());
     await userEvent.click(screen.getByLabelText("写入路由配置文件"));
-    await screen.findByText("接入算力池");
-    await userEvent.click(screen.getByRole("tab", { name: "其他 Agent" }));
-
-    // codex 的 Base URL 已经带 /v1，所以图片端点接在它后面
-    expect(screen.getByLabelText("图片端点")).toHaveValue(
-      "http://127.0.0.1:43111/v1/images/generations",
-    );
-    await userEvent.click(screen.getByLabelText("复制 图片端点"));
-    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(
-      "http://127.0.0.1:43111/v1/images/generations",
-    );
-    // 声明了 image.generate 的模型名要列出来，否则用户不知道能用哪个
-    // （`gpt-image-1` 在账号的映射标签里也出现一次，所以要限定到这段说明上）
-    expect(screen.getByText(/可用的生图模型/)).toHaveTextContent("gpt-image-1");
+    expect(onOpenClientSetup).toHaveBeenCalledWith("codex");
   });
 
   it("tests the credential pool route with a user-specified model", async () => {
@@ -7085,61 +7044,6 @@ describe("AccountsScreen", () => {
         "pool:codex": { model: "gpt-5", platform: "codex" },
       }),
     );
-  });
-
-  it("saves the pool-wide client config and rejects non-objects", async () => {
-    renderScreen("claude", "in_pool");
-
-    await userEvent.click(await screen.findByLabelText("编辑全局客户端配置"));
-    const input = await screen.findByLabelText("全局客户端配置 JSON");
-
-    // A JSON array parses but is not a settings object — reject before saving,
-    // because the writer silently ignores a malformed value.
-    fireEvent.change(input, { target: { value: "[1,2]" } });
-    await userEvent.click(screen.getByRole("button", { name: "保存" }));
-    expect(await screen.findByText(/需要一个 JSON 对象/)).toBeInTheDocument();
-    expect(vi.mocked(saveSettings)).not.toHaveBeenCalled();
-
-    fireEvent.change(input, { target: { value: '{"includeCoAuthoredBy": false}' } });
-    await userEvent.click(screen.getByRole("button", { name: "保存" }));
-
-    await waitFor(() =>
-      expect(vi.mocked(saveSettings)).toHaveBeenCalledWith(
-        expect.objectContaining({
-          claude_client_config_json: '{"includeCoAuthoredBy": false}',
-        }),
-      ),
-    );
-  });
-
-  it("clears the pool-wide client config when emptied", async () => {
-    vi.mocked(getSettings).mockResolvedValue({
-      ...settingsFixture,
-      claude_client_config_json: '{"includeCoAuthoredBy":false}',
-    });
-    renderScreen("claude", "in_pool");
-
-    await userEvent.click(await screen.findByLabelText("编辑全局客户端配置"));
-    const input = await screen.findByLabelText("全局客户端配置 JSON");
-    expect(input).toHaveValue('{"includeCoAuthoredBy":false}');
-
-    await userEvent.clear(input);
-    await userEvent.click(screen.getByRole("button", { name: "保存" }));
-
-    // null, not "" — the writer treats absent and empty the same, but null is
-    // the honest representation of "manage nothing".
-    await waitFor(() =>
-      expect(vi.mocked(saveSettings)).toHaveBeenCalledWith(
-        expect.objectContaining({ claude_client_config_json: null }),
-      ),
-    );
-  });
-
-  it("offers the global client config for Claude only", async () => {
-    renderScreen("codex", "in_pool");
-
-    await screen.findByLabelText("写入路由配置文件");
-    expect(screen.queryByLabelText("编辑全局客户端配置")).not.toBeInTheDocument();
   });
 
   it("prunes cached models for accounts that no longer exist", async () => {
@@ -7417,8 +7321,6 @@ describe("AccountsScreen", () => {
   });
 
   it("nudges to re-write config when pending edits would change the file", async () => {
-    // Config is only written on demand, so a mapping or global-client-config
-    // edit sits unapplied until the user writes again.
     vi.mocked(routeConfigWriteIsStale).mockResolvedValue(true);
     renderScreen();
 
@@ -7431,288 +7333,6 @@ describe("AccountsScreen", () => {
       "title",
       "配置已变更，需重新写入才会生效",
     );
-
-    // Writing clears the nudge.
-    vi.mocked(routeConfigWriteIsStale).mockResolvedValue(false);
-    await userEvent.click(screen.getByLabelText("写入路由配置文件"));
-    // The button now only opens the dialog; the write happens on confirm.
-    await screen.findByText("接入算力池");
-    await userEvent.click(screen.getByRole("button", { name: "写入" }));
-    await waitFor(() =>
-      expect(screen.queryByText("配置已变更，需重新写入")).not.toBeInTheDocument(),
-    );
-  });
-
-  it("clears route config write results after a short delay", async () => {
-    renderScreen();
-
-    await screen.findByText("算力池路由：已关闭");
-    await userEvent.click(screen.getByLabelText("启用算力池路由接入"));
-    expect(await screen.findByText("算力池路由：http://127.0.0.1:43111")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByLabelText("写入路由配置文件"));
-    await screen.findByText("接入算力池");
-
-    vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("button", { name: "写入" }));
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(screen.getByText("配置写入结果")).toBeInTheDocument();
-    expect(screen.getByText(/operation operation-1/)).toBeInTheDocument();
-    expect(screen.getByText(/snapshot snapshot-1/)).toBeInTheDocument();
-    expect(screen.getByText(/before before-hash/)).toBeInTheDocument();
-    expect(screen.queryByText(/sk-ai-switch-test/)).not.toBeInTheDocument();
-
-    act(() => {
-      vi.advanceTimersByTime(2999);
-    });
-    expect(screen.getByText("配置写入结果")).toBeInTheDocument();
-
-    act(() => {
-      vi.advanceTimersByTime(1);
-    });
-    expect(screen.queryByText("配置写入结果")).not.toBeInTheDocument();
-  });
-
-  it("dismisses the route config write results on demand", async () => {
-    renderScreen();
-
-    await screen.findByText("算力池路由：已关闭");
-    await userEvent.click(screen.getByLabelText("启用算力池路由接入"));
-    expect(await screen.findByText("算力池路由：http://127.0.0.1:43111")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByLabelText("写入路由配置文件"));
-    await screen.findByText("接入算力池");
-    await userEvent.click(screen.getByRole("button", { name: "写入" }));
-    expect(await screen.findByText("配置写入结果")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByLabelText("关闭配置写入结果"));
-
-    await waitFor(() =>
-      expect(screen.queryByText("配置写入结果")).not.toBeInTheDocument(),
-    );
-  });
-
-  it("opens the client dialog instead of writing immediately", async () => {
-    renderScreen();
-
-    await screen.findByText("算力池路由：已关闭");
-    await userEvent.click(screen.getByLabelText("启用算力池路由接入"));
-    expect(await screen.findByText("算力池路由：http://127.0.0.1:43111")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByLabelText("写入路由配置文件"));
-
-    expect(await screen.findByText("接入算力池")).toBeInTheDocument();
-    // The dialog is the confirmation step, so nothing is written yet.
-    expect(writeRouteProxyConfigs).not.toHaveBeenCalled();
-  });
-
-  it("writes the selected clients and persists the choice", async () => {
-    renderScreen();
-
-    await screen.findByText("算力池路由：已关闭");
-    await userEvent.click(screen.getByLabelText("启用算力池路由接入"));
-    expect(await screen.findByText("算力池路由：http://127.0.0.1:43111")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByLabelText("写入路由配置文件"));
-    await screen.findByText("接入算力池");
-    await userEvent.click(await screen.findByRole("checkbox", { name: /ZCode/ }));
-    await userEvent.click(screen.getByRole("button", { name: "写入" }));
-
-    await waitFor(() =>
-      expect(writeRouteProxyConfigs).toHaveBeenCalledWith("http://127.0.0.1:43111", "codex", [
-        "codex",
-        "zcode",
-      ]),
-    );
-    // The choice is remembered so the next write does not need re-picking.
-    await waitFor(() =>
-      expect(saveSettings).toHaveBeenCalledWith(
-        expect.objectContaining({
-          config_write_clients_json: JSON.stringify({ codex: ["codex", "zcode"] }),
-        }),
-      ),
-    );
-  });
-
-  it("switches the model list mode from the write dialog", async () => {
-    vi.mocked(setRoutePoolModelMode).mockImplementation(async ({ platform, mode }) => ({
-      platform,
-      groups: [],
-      group_id: null,
-      active_group_id: null,
-      account_ids: [...(poolStateByPlatform.get(platform) ?? [])],
-      model_mode: mode,
-      baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
-      default_baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
-      stats: statsFixture({}),
-    }));
-    renderScreen();
-
-    await screen.findByText("算力池路由：已关闭");
-    await userEvent.click(screen.getByLabelText("启用算力池路由接入"));
-    expect(await screen.findByText("算力池路由：http://127.0.0.1:43111")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByLabelText("写入路由配置文件"));
-    await screen.findByText("接入算力池");
-    await userEvent.click(screen.getByRole("radio", { name: "精确模式" }));
-
-    // Saved on toggle: the pool's own /v1/models changes at once, and a user whose
-    // clients discover models over HTTP never clicks 写入 at all.
-    await waitFor(() =>
-      expect(setRoutePoolModelMode).toHaveBeenCalledWith({
-        platform: "codex",
-        mode: "precise",
-      }),
-    );
-    await waitFor(() =>
-      expect(screen.getByRole("radio", { name: "精确模式" })).toHaveAttribute(
-        "aria-checked",
-        "true",
-      ),
-    );
-  });
-
-  it("labels write results by client name rather than target key", async () => {
-    vi.mocked(writeRouteProxyConfigs).mockResolvedValue([
-      {
-        operation_id: "operation-1",
-        snapshot_id: "snapshot-1",
-        target_app_id: "target-zcode",
-        target_key: "zcode_codex",
-        platform: "codex",
-        path: "/home/u/.zcode/v2/config.json",
-        status: "succeeded",
-        before_hash: null,
-        after_hash: "after-hash",
-        error_code: null,
-      },
-    ]);
-    renderScreen();
-
-    await screen.findByText("算力池路由：已关闭");
-    await userEvent.click(screen.getByLabelText("启用算力池路由接入"));
-    expect(await screen.findByText("算力池路由：http://127.0.0.1:43111")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByLabelText("写入路由配置文件"));
-    await screen.findByText("接入算力池");
-    await userEvent.click(screen.getByRole("button", { name: "写入" }));
-
-    expect(await screen.findByText("配置写入结果")).toBeInTheDocument();
-    // `zcode_codex` is an internal key and means nothing to the user.
-    expect(screen.queryByText(/zcode_codex/)).not.toBeInTheDocument();
-    expect(screen.getByText(/ZCode · codex/)).toBeInTheDocument();
-    // The user very likely switched windows already, so repeat the notice here.
-    expect(screen.getByText(/需重启 ZCode/)).toBeInTheDocument();
-    // Same guarantee the existing outcome test makes: no credential in the panel.
-    expect(screen.queryByText(/sk-ai-switch/)).not.toBeInTheDocument();
-  });
-
-  it("flags a client that failed while another one succeeded", async () => {
-    // The backend resolves a group as long as one client got written, so a
-    // partial failure never reaches onError. Without a banner the only trace is
-    // the result panel, which used to clear itself after three seconds.
-    vi.mocked(writeRouteProxyConfigs).mockResolvedValue([
-      {
-        operation_id: "operation-1",
-        snapshot_id: "snapshot-1",
-        target_app_id: "target-codex",
-        target_key: "codex",
-        platform: "codex",
-        path: "/home/u/.codex/config.toml",
-        status: "succeeded",
-        before_hash: null,
-        after_hash: "after-hash",
-        error_code: null,
-      },
-      {
-        operation_id: "operation-2",
-        snapshot_id: null,
-        target_app_id: "target-zcode",
-        target_key: "zcode_codex",
-        platform: "codex",
-        path: "/home/u/.zcode/v2/config.json",
-        status: "failed",
-        before_hash: null,
-        after_hash: null,
-        error_code: "config.pool_models_empty",
-      },
-    ]);
-    renderScreen();
-
-    await screen.findByText("算力池路由：已关闭");
-    await userEvent.click(screen.getByLabelText("启用算力池路由接入"));
-    expect(await screen.findByText("算力池路由：http://127.0.0.1:43111")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByLabelText("写入路由配置文件"));
-    await screen.findByText("接入算力池");
-    await userEvent.click(screen.getByRole("button", { name: "写入" }));
-
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("没有写入成功");
-    // Named by client, with the code to look up, not by internal target key.
-    expect(alert).toHaveTextContent("ZCode");
-    expect(alert).toHaveTextContent("config.pool_models_empty");
-  });
-
-  it("explains that a corrupt ZCode config was refused rather than overwritten", async () => {
-    vi.mocked(writeRouteProxyConfigs).mockRejectedValue({
-      code: "validation.route_config_existing_invalid",
-      message: "Existing CLI configuration is invalid; refusing to overwrite it",
-      details: "/home/u/.zcode/v2/config.json (JSON): syntax is invalid",
-      recoverable: true,
-    });
-    renderScreen();
-
-    await screen.findByText("算力池路由：已关闭");
-    await userEvent.click(screen.getByLabelText("启用算力池路由接入"));
-    expect(await screen.findByText("算力池路由：http://127.0.0.1:43111")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByLabelText("写入路由配置文件"));
-    await screen.findByText("接入算力池");
-    await userEvent.click(screen.getByRole("button", { name: "写入" }));
-
-    // The stakes are specific here: a bad parse makes ZCode fall back and lose
-    // every provider, so the message has to say we did not touch the file.
-    expect(
-      await screen.findByText(/现有配置文件无法解析，已拒绝覆盖以免丢失你的 provider 配置/),
-    ).toBeInTheDocument();
-  });
-
-  it("surfaces the code a grouped write nested instead of the generic failure", async () => {
-    // A grouped write reports one wrapper code for the whole batch and parks the
-    // real reason in `details.cause_code`. Reading only the outer code would show
-    // "配置写入失败。" and hide the actionable part.
-    vi.mocked(writeRouteProxyConfigs).mockRejectedValue({
-      code: "filesystem.route_config_write",
-      message: "Could not complete grouped configuration writes",
-      details: JSON.stringify({
-        operation_id: "operation-1",
-        cause_code: "config.codex_login_not_chatgpt",
-        targets: [
-          {
-            target_key: "codex",
-            status: "failed",
-            error_code: "config.codex_login_not_chatgpt",
-          },
-        ],
-      }),
-      recoverable: true,
-    });
-    renderScreen();
-
-    await screen.findByText("算力池路由：已关闭");
-    await userEvent.click(screen.getByLabelText("启用算力池路由接入"));
-    expect(await screen.findByText("算力池路由：http://127.0.0.1:43111")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByLabelText("写入路由配置文件"));
-    await screen.findByText("接入算力池");
-    await userEvent.click(screen.getByRole("button", { name: "写入" }));
-
-    expect(
-      await screen.findByText(/当前 Codex 只有 API Key 登录、没有 ChatGPT 登录态/),
-    ).toBeInTheDocument();
   });
 
   it("lets the browser disable route access without stopping the process-owned listener", async () => {

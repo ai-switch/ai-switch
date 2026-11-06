@@ -8,6 +8,7 @@ import {
   Menu,
   PlugZap,
   Settings2,
+  Cable,
   Sparkles,
   TerminalSquare,
   type LucideIcon,
@@ -496,6 +497,13 @@ export function AppLayout({
                   icon={Sparkles}
                   label={t("nav.skills")}
                   onClick={() => handleNavigate("Skills")}
+                />
+                <NavButton
+                  active={activeScreen === "ClientSetup"}
+                  collapsed={sidebarContentCollapsed}
+                  icon={Cable}
+                  label={t("nav.clients")}
+                  onClick={() => handleNavigate("ClientSetup")}
                 />
                 <NavButton
                   active={settingsActive}

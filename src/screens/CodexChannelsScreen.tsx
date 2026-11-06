@@ -67,6 +67,8 @@ export function CodexChannelsScreen({
   onOpenSessions,
   sidebarCollapsed,
   onPoolScopeFocusConsumed,
+  onProviderFilterFocusConsumed,
+  providerFilterFocus,
   poolScopeFocus,
   imageGenerationEnabled,
   onOpenImageStudio,
@@ -77,6 +79,8 @@ export function CodexChannelsScreen({
   onOpenSessions?: (platform: PlatformId) => void;
   sidebarCollapsed?: boolean;
   onPoolScopeFocusConsumed?: (nonce: number) => void;
+  onProviderFilterFocusConsumed?: (nonce: number) => void;
+  providerFilterFocus?: { provider: string; nonce: number } | null;
   poolScopeFocus?: {
     platform: string;
     scope: "in_pool" | "out_of_pool";
@@ -131,8 +135,10 @@ export function CodexChannelsScreen({
         <AccountsScreen
           onOpenSessions={onOpenSessions}
           onPoolScopeFocusConsumed={onPoolScopeFocusConsumed}
+          onProviderFilterFocusConsumed={onProviderFilterFocusConsumed}
           platform="codex"
           poolScopeFocus={poolScopeFocus}
+          providerFilterFocus={providerFilterFocus}
           sidebarCollapsed={sidebarCollapsed}
         />
       ) : null}

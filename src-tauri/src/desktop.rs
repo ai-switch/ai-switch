@@ -41,8 +41,8 @@ use commands::route_pool_commands::{
     update_route_pool_group,
 };
 use commands::route_proxy_commands::{
-    get_route_proxy_key, get_route_proxy_status, route_config_write_is_stale, start_route_proxy,
-    stop_route_proxy, write_route_proxy_configs,
+    get_claude_slot_plan, get_route_proxy_key, get_route_proxy_status, route_config_write_is_stale,
+    start_route_proxy, stop_route_proxy, write_route_proxy_configs,
 };
 use commands::route_proxy_diagnostics_commands::save_route_proxy_diagnostics_export;
 use commands::route_proxy_https_commands::{
@@ -623,6 +623,7 @@ pub fn run() {
             stop_route_proxy,
             get_route_proxy_status,
             get_route_proxy_key,
+            get_claude_slot_plan,
             write_route_proxy_configs,
             get_client_direct_modes,
             enable_client_direct_mode,

@@ -1,7 +1,7 @@
 use crate::app_state::AppState;
 use crate::error::ApiError;
 use crate::models::config_snapshot::ConfigWriteOutcome;
-use crate::services::route_config_service::RouteConfigService;
+use crate::services::route_config_service::{ClaudeSlotPlan, RouteConfigService};
 use crate::services::route_proxy_https_service::RouteProxyHttpsService;
 use crate::services::route_proxy_service::{RouteProxyService, RouteProxyStatus};
 use tauri::State;
@@ -106,4 +106,15 @@ pub async fn route_config_write_is_stale(
         client_keys.as_deref(),
     )
     .await)
+}
+
+/// Read-only preview of what the next Claude config write would put into the
+/// `/model` slots; no file is touched.
+#[tauri::command]
+pub async fn get_claude_slot_plan(
+    state: State<'_, AppState>,
+) -> Result<ClaudeSlotPlan, ApiError> {
+    RouteConfigService::claude_slot_plan(&state.paths, &state.pool)
+        .await
+        .map_err(ApiError::from)
 }
