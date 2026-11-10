@@ -15,7 +15,9 @@ export type AgentIconPlatform =
   | "audio"
   /// 生图能力。生图**没有自己的平台**（它是文本池账号的一个能力），但 codex 页的
   /// 模态分段器要一个图标，所以这里给的是「图片」这个模态的通用图标。
-  | "image";
+  | "image"
+  /// 向量（embedding）渠道。模态通用图标，不是某个厂商的品牌图标。
+  | "vector";
 
 type AgentIconProps = {
   platform: AgentIconPlatform;
@@ -230,6 +232,25 @@ function ImageAgentSvg({ size = "100%" }: AgentSvgProps) {
   );
 }
 
+/// 向量（embedding）的模态图标：一条方向线串起三个向量点。
+function VectorAgentSvg({ size = "100%" }: AgentSvgProps) {
+  return (
+    <svg
+      fill="none"
+      height={size}
+      style={baseAgentSvgStyle}
+      viewBox="0 0 24 24"
+      width={size}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path d="M5 19L19 5" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" />
+      <circle cx="5" cy="19" fill="currentColor" r="1.9" />
+      <circle cx="12" cy="12" fill="currentColor" r="1.9" />
+      <circle cx="19" cy="5" fill="currentColor" r="1.9" />
+    </svg>
+  );
+}
+
 function HermesAgentSvg({ size = "100%" }: AgentSvgProps) {
   return (
     <svg
@@ -262,7 +283,8 @@ export function AgentIcon({ platform, className }: AgentIconProps) {
     platform === "openclaw" ? <OpenClawAgentSvg /> :
     platform === "video" ? <VideoAgentSvg /> :
     platform === "audio" ? <AudioAgentSvg /> :
-    platform === "image" ? <ImageAgentSvg /> : <HermesAgentSvg />;
+    platform === "image" ? <ImageAgentSvg /> :
+    platform === "vector" ? <VectorAgentSvg /> : <HermesAgentSvg />;
 
   return <span aria-hidden="true" className={iconClassName}>{icon}</span>;
 }

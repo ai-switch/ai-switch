@@ -101,7 +101,7 @@ export function App() {
   const [sessionPlatform, setSessionPlatform] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [poolScopeFocus, setPoolScopeFocus] = useState<PoolScopeFocus | null>(null);
-  // 客户端接入页的深链（侧边栏 / 账号页工具栏 / 直连恢复），一次生效。
+  // 客户端接入页的深链（账号页工具栏 / 直连恢复），一次生效。
   const [clientSetupFocus, setClientSetupFocus] = useState<ClientSetupFocus | null>(null);
   // 「去调整映射」：跳到通用账号页并预置来源筛选，一次生效。
   const [accountProviderFocus, setAccountProviderFocus] = useState<{ provider: string; nonce: number } | null>(null);

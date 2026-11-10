@@ -39,7 +39,7 @@ const SEGMENT_ICONS: Record<CodexSegment, AgentIconPlatform> = {
   image: "image",
   video: "video",
   audio: "audio",
-  vector: "codex",
+  vector: "vector",
 };
 
 /// 记住上次选的段：常切的人不用每次重新点，也不至于每次进 codex 都被弹到别的段。
