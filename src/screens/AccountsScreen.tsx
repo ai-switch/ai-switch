@@ -7358,8 +7358,9 @@ export function AccountsScreen({
               cardLayout
                 ? // min(...) rather than a bare 272px: below one card's width the
                   // track has to shrink with the container instead of overflowing it.
-                  "grid grid-cols-[repeat(auto-fill,minmax(min(272px,100%),1fr))] gap-2 px-1"
-                : undefined
+                  "grid flex-1 grid-cols-[repeat(auto-fill,minmax(min(272px,100%),1fr))] gap-2 px-1"
+                : // flex-1: 列表不满一屏时也撑到分页底边，和空状态的行为保持一致。
+                  "flex-1"
             }
             data-account-layout={accountLayout}
             data-testid="account-list"
