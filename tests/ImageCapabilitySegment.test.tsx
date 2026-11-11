@@ -59,14 +59,10 @@ describe("ImageCapabilitySegment", () => {
     expect(screen.queryByText("支持生图的账号")).not.toBeInTheDocument();
   });
 
-  it("points at the plugin setting when Image Studio is off", async () => {
-    const view = renderScreen(false);
-    expect(await screen.findByText(/生图插件未启用/)).toBeInTheDocument();
+  it.each([false, true])("does not offer the Image Studio jump when plugin availability is %s", async (enabled) => {
+    const view = renderScreen(enabled);
+    await screen.findByLabelText("图片端点");
     expect(within(view.container).queryByText("打开生图工作台")).not.toBeInTheDocument();
-  });
-
-  it("offers the Image Studio entry point when the plugin is on", async () => {
-    renderScreen(true);
-    expect(await screen.findByText("打开生图工作台")).toBeInTheDocument();
+    expect(within(view.container).queryByText(/生图插件未启用/)).not.toBeInTheDocument();
   });
 });

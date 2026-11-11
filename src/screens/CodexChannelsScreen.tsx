@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { AgentIcon, type AgentIconPlatform } from "../components/brand/AgentIcon";
-import { ImageCapabilitySegment } from "../components/accounts/ImageCapabilitySegment";
+import type { AccountModality } from "../lib/accountModalities";
 import type { PlatformId } from "../lib/api/types";
 import { useI18n, type TranslationKey } from "../lib/i18n";
 import { AUDIO_CAPABILITY } from "../lib/audioPlatforms";
@@ -23,7 +23,15 @@ import { AccountsScreen } from "./AccountsScreen";
 export const CODEX_SEGMENT_STORAGE_KEY = "ai-switch.codex-channel-segment";
 
 const SEGMENTS = ["general", "image", "video", "audio", "vector"] as const;
-export type CodexSegment = (typeof SEGMENTS)[number];
+export type CodexSegment = AccountModality;
+
+const SEGMENT_CAPABILITIES: Record<CodexSegment, string | undefined> = {
+  general: undefined,
+  image: "image.generate",
+  video: VIDEO_CAPABILITY,
+  audio: AUDIO_CAPABILITY,
+  vector: undefined,
+};
 
 const SEGMENT_LABEL_KEYS: Record<CodexSegment, TranslationKey> = {
   general: "codex.segment.general",
@@ -65,18 +73,18 @@ function storeSegment(segment: CodexSegment) {
 
 export function CodexChannelsScreen({
   onOpenSessions,
+  onOpenClientSetup,
   sidebarCollapsed,
   onPoolScopeFocusConsumed,
   onProviderFilterFocusConsumed,
   providerFilterFocus,
   poolScopeFocus,
-  imageGenerationEnabled,
-  onOpenImageStudio,
   initialSegment,
   modality,
   hideSegmentTabs = false,
 }: {
   onOpenSessions?: (platform: PlatformId) => void;
+  onOpenClientSetup?: (platform: string, clientKey?: string) => void;
   sidebarCollapsed?: boolean;
   onPoolScopeFocusConsumed?: (nonce: number) => void;
   onProviderFilterFocusConsumed?: (nonce: number) => void;
@@ -86,8 +94,6 @@ export function CodexChannelsScreen({
     scope: "in_pool" | "out_of_pool";
     nonce: number;
   } | null;
-  imageGenerationEnabled: boolean;
-  onOpenImageStudio?: () => void;
   /// 外部指定的初始分段（P4b：左侧模态导航直达对应段）。只影响**本次挂载**，
   /// 选中后仍按既有规则记住上次选择。
   initialSegment?: CodexSegment;
@@ -131,55 +137,19 @@ export function CodexChannelsScreen({
         ))}
       </div>}
 
-      {segment === "general" ? (
-        <AccountsScreen
-          onOpenSessions={onOpenSessions}
-          onPoolScopeFocusConsumed={onPoolScopeFocusConsumed}
-          onProviderFilterFocusConsumed={onProviderFilterFocusConsumed}
-          platform="codex"
-          poolScopeFocus={poolScopeFocus}
-          providerFilterFocus={providerFilterFocus}
-          sidebarCollapsed={sidebarCollapsed}
-        />
-      ) : null}
-
-      {segment === "image" ? (
-        <div className="space-y-3">
-          <ImageCapabilitySegment
-            imageGenerationEnabled={imageGenerationEnabled}
-            onOpenImageStudio={onOpenImageStudio}
-          />
-          {/* 生图账号就是 codex 池里**声明了 `image.generate` 的账号**，所以这里
-              直接复用账号管理屏、只把列表按能力筛过 —— 与「通用」段是同一套增删改查，
-              区别只在 `capabilityFilter`。 */}
-          <AccountsScreen capabilityFilter="image.generate" platform="codex" />
-        </div>
-      ) : null}
-
-      {segment === "video" ? (
-        <div className="space-y-3">
-          {/* 视频账号住在 codex 池里，靠 `video.generate` 被识别 —— 所以这一段和
-              「通用」段是同一套账号管理，只是列表按能力筛过。 */}
-          <AccountsScreen capabilityFilter={VIDEO_CAPABILITY} platform="codex" />
-        </div>
-      ) : null}
-
-      {segment === "audio" ? (
-        <div className="space-y-3">
-          {/* 同视频：音频账号的 `interface_format` 是 `openai`（与文本同名），所以
-              识别它的唯一依据就是 `audio.generate` 这个能力声明。 */}
-          <AccountsScreen capabilityFilter={AUDIO_CAPABILITY} platform="codex" />
-        </div>
-      ) : null}
-
-      {segment === "vector" ? (
-        <div className="space-y-3">
-          {/* 向量（embedding）模态预留位：功能未做，入口先占住导航位。 */}
-          <p className="rounded-xl border border-stone-200 bg-white px-4 py-6 text-center text-[13px] font-medium text-stone-500">
-            {t("codex.segment.vectorPending")}
-          </p>
-        </div>
-      ) : null}
+      <AccountsScreen
+        key={segment}
+        modality={segment}
+        capabilityFilter={SEGMENT_CAPABILITIES[segment]}
+        onOpenSessions={onOpenSessions}
+        onOpenClientSetup={onOpenClientSetup}
+        onPoolScopeFocusConsumed={segment === "general" ? onPoolScopeFocusConsumed : undefined}
+        onProviderFilterFocusConsumed={segment === "general" ? onProviderFilterFocusConsumed : undefined}
+        platform="codex"
+        poolScopeFocus={segment === "general" ? poolScopeFocus : undefined}
+        providerFilterFocus={segment === "general" ? providerFilterFocus : undefined}
+        sidebarCollapsed={sidebarCollapsed}
+      />
     </div>
   );
 }

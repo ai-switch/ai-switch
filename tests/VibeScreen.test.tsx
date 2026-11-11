@@ -55,8 +55,15 @@ vi.mock("../src/components/terminal/XtermPane", () => ({
   ),
 }));
 
+// The modality screens are one shared shell: even the vector segment mounts
+// this screen, so the mock has to reproduce its explicit "not available"
+// notice instead of an account list.
 vi.mock("../src/screens/AccountsScreen", () => ({
-  AccountsScreen: () => <div>Agent accounts placeholder</div>,
+  AccountsScreen: ({ modality }: { modality?: string }) => (
+    modality === "vector"
+      ? <div>Vector (embedding) channels are not available yet.</div>
+      : <div>Agent accounts placeholder</div>
+  ),
 }));
 
 vi.mock("../src/lib/api/client", () => ({

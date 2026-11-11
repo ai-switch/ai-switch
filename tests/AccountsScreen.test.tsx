@@ -66,6 +66,8 @@ import { openExternal } from "../src/lib/openExternal";
 import { createQueryClient } from "../src/lib/query/queryClient";
 import { settingsFixture } from "../src/test/fixtures";
 import { AccountsScreen, routeProxyPollInterval } from "../src/screens/AccountsScreen";
+import { CodexChannelsScreen } from "../src/screens/CodexChannelsScreen";
+import { I18nProvider } from "../src/lib/i18n";
 import { isDesktop } from "../src/lib/transport";
 import { fetchRouteProxyModels } from "../src/lib/routeProxyModels";
 import type {
@@ -954,6 +956,201 @@ describe("AccountsScreen", () => {
     ]);
   });
 
+  it("shows the native account-load diagnosis and retries without reporting an empty list", async () => {
+    const queryClient = createQueryClient();
+    queryClient.setDefaultOptions({ queries: { retry: false } });
+    vi.mocked(listRouteCredentialPage).mockRejectedValue({
+      code: "NATIVE_COMMAND_RETIRED",
+      message: "账号命令未注册",
+      details: "list_route_credential_page is unavailable in the loaded native module",
+      recoverable: true,
+    });
+    renderScreen("codex", "in_pool", false, queryClient);
+
+    const alert = await screen.findByRole("alert", { name: "账号加载失败" });
+    expect(alert).toHaveTextContent("账号命令未注册");
+    expect(alert).toHaveTextContent("NATIVE_COMMAND_RETIRED");
+    await userEvent.click(within(alert).getByText("诊断详情"));
+    expect(alert).toHaveTextContent("list_route_credential_page is unavailable");
+    expect(screen.queryByTestId("account-empty-state")).not.toBeInTheDocument();
+
+    vi.mocked(listRouteCredentialPage).mockResolvedValue({
+      items: [credentialsFixture[1]], total: 1, page: 1, page_count: 1, page_size: 20,
+      previous_page_account_id: null, next_page_account_id: null,
+      filter_options: [], official_account_count: 0,
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "重试加载账号" })).toBeEnabled());
+    const retry = screen.getByRole("button", { name: "重试加载账号" });
+    await userEvent.click(retry);
+    expect(await screen.findByText("API Account")).toBeInTheDocument();
+    expect(screen.queryByRole("alert", { name: "账号加载失败" })).not.toBeInTheDocument();
+  });
+
+  it("shows a failed AI-service start with the port diagnosis and retries the operation", async () => {
+    vi.mocked(startRouteProxy).mockRejectedValueOnce({
+      code: "ROUTE_PROXY_BIND_FAILED",
+      message: "AI 服务启动失败",
+      details: "127.0.0.1:43111: Address already in use (os error 10048)",
+      recoverable: true,
+    });
+    renderScreen();
+    await userEvent.click(screen.getByLabelText("启用算力池路由接入"));
+    const alert = await screen.findByRole("alert", { name: "启动算力池失败" });
+    expect(alert).toHaveTextContent("AI 服务启动失败");
+    expect(alert).toHaveTextContent("ROUTE_PROXY_BIND_FAILED");
+    await userEvent.click(within(alert).getByText("诊断详情"));
+    expect(alert).toHaveTextContent("Address already in use (os error 10048)");
+    expect(screen.queryByLabelText("关闭算力池路由接入")).not.toBeInTheDocument();
+    await userEvent.click(within(alert).getByRole("button", { name: "重试启动算力池" }));
+    expect(await screen.findByLabelText("关闭算力池路由接入")).toBeInTheDocument();
+    expect(screen.queryByRole("alert", { name: "启动算力池失败" })).not.toBeInTheDocument();
+  });
+
+  it("shows a failed AI-service stop and keeps the actual running state until a retry succeeds", async () => {
+    vi.mocked(getRouteProxyStatus).mockResolvedValue({
+      running: true, route_access_enabled: true, bind_host: "127.0.0.1",
+      port: 43111, base_url: "http://127.0.0.1:43111",
+    });
+    vi.mocked(stopRouteProxy).mockRejectedValueOnce(new Error("停止服务失败：native worker disconnected"));
+    renderScreen();
+    await userEvent.click(await screen.findByLabelText("关闭算力池路由接入"));
+    const alert = await screen.findByRole("alert", { name: "停止算力池失败" });
+    expect(alert).toHaveTextContent("native worker disconnected");
+    expect(screen.getByLabelText("关闭算力池路由接入")).toBeInTheDocument();
+    await userEvent.click(within(alert).getByRole("button", { name: "重试停止算力池" }));
+    expect(await screen.findByLabelText("启用算力池路由接入")).toBeInTheDocument();
+    expect(screen.queryByRole("alert", { name: "停止算力池失败" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { segment: "image" as const, title: "图片接入信息", capability: "image.generate", endpoints: [
+      ["图片端点", "http://127.0.0.1:43111/v1/images/generations"],
+      ["图片编辑端点", "http://127.0.0.1:43111/v1/images/edits"],
+    ] },
+    { segment: "video" as const, title: "视频接入信息", capability: "video.generate", endpoints: [
+      ["视频生成端点", "http://127.0.0.1:43111/v1/video/generations"],
+      ["视频任务端点", "http://127.0.0.1:43111/v1/videos"],
+    ] },
+    { segment: "audio" as const, title: "音频接入信息", capability: "audio.generate", endpoints: [
+      ["语音生成端点", "http://127.0.0.1:43111/v1/audio/speech"],
+      ["音频转录端点", "http://127.0.0.1:43111/v1/audio/transcriptions"],
+      ["音频翻译端点", "http://127.0.0.1:43111/v1/audio/translations"],
+    ] },
+  ])("keeps $segment endpoint access and accounts in one shell without text-only actions", async ({ segment, title, capability, endpoints }) => {
+    vi.mocked(getRouteProxyStatus).mockResolvedValue({
+      running: true, route_access_enabled: true, bind_host: "127.0.0.1",
+      port: 43111, base_url: "http://127.0.0.1:43111/v1/",
+    });
+    vi.mocked(routeConfigWriteIsStale).mockResolvedValue(true);
+    const account = {
+      ...credentialsFixture[1],
+      config_json: JSON.stringify({ base_url: "https://api.example.com/v1", interface_format: "openai", model_mappings: [
+        { from: "media-model", to: "media-model", capabilities: [capability] },
+      ] }),
+    };
+    vi.mocked(listRouteCredentials).mockResolvedValue([account]);
+    poolStateByPlatform.set("codex", [account.id]);
+    render(<QueryClientProvider client={createQueryClient()}><I18nProvider initialLanguage="zh-CN">
+      <CodexChannelsScreen modality={segment} hideSegmentTabs />
+    </I18nProvider></QueryClientProvider>);
+
+    const panel = await screen.findByRole("region", { name: title });
+    for (const [label, endpoint] of endpoints) {
+      await waitFor(() => expect(within(panel).getByLabelText(label)).toHaveValue(endpoint));
+    }
+    const key = within(panel).getByLabelText("渠道密钥");
+    await waitFor(() => expect(key).toHaveValue("sk-ai-switch-codex-key"));
+    expect(key).toHaveAttribute("type", "password");
+    await userEvent.click(within(panel).getByLabelText("显示 渠道密钥"));
+    expect(key).toHaveAttribute("type", "text");
+    await userEvent.click(within(panel).getByLabelText("复制 渠道密钥"));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("sk-ai-switch-codex-key");
+    expect(await screen.findByRole("button", { name: "编辑 API Account" })).toBeInTheDocument();
+    expect(listRouteCredentialPage).toHaveBeenLastCalledWith(expect.objectContaining({ capability, kind: "api" }));
+
+    const workspace = screen.getByTestId("account-workspace");
+    expect(panel.parentElement).toBe(workspace);
+    expect(screen.getByTestId("account-workspace-toolbar").nextElementSibling).toBe(panel);
+    expect(panel.nextElementSibling).toBe(screen.getByTestId("account-workspace-scroll-region"));
+    expect(workspace.lastElementChild).toBe(screen.getByTestId("account-workspace-status-bar"));
+    expect(within(screen.getByTestId("account-workspace-scroll-region")).queryByRole("region", { name: title })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "打开生图工作台" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("写入路由配置文件")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "配置 Codex 基线模型" })).not.toBeInTheDocument();
+    expect(screen.queryByText("配置已变更，需重新写入")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("真实生成测试算力池路由")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("测试 API Account")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("启用 API Account 的直连模式")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText("打开算力池测试菜单"));
+    expect(screen.queryAllByRole("menuitem", { name: /curl/i })).toHaveLength(0);
+    expect(screen.getByRole("menuitem", { name: "查看模型列表" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "实时日志" })).toBeInTheDocument();
+    expect(routeConfigWriteIsStale).not.toHaveBeenCalled();
+    expect(routePoolTestModel).not.toHaveBeenCalled();
+  });
+
+  it("shows stopped media endpoints at the default port without claiming they are ready", async () => {
+    render(<QueryClientProvider client={createQueryClient()}><I18nProvider initialLanguage="zh-CN">
+      <AccountsScreen platform="codex" capabilityFilter="image.generate" />
+    </I18nProvider></QueryClientProvider>);
+    const panel = await screen.findByRole("region", { name: "图片接入信息" });
+    expect(within(panel).getByLabelText("图片端点")).toHaveValue("http://127.0.0.1:43111/v1/images/generations");
+    await waitFor(() => expect(within(panel).getByRole("status")).toHaveTextContent(/未启动/));
+    expect(within(panel).getByRole("status")).toHaveTextContent(/默认地址/);
+  });
+
+  it("keeps vector access explicitly unavailable without an embeddings endpoint or account list", async () => {
+    render(<QueryClientProvider client={createQueryClient()}><I18nProvider initialLanguage="zh-CN">
+      <CodexChannelsScreen modality="vector" hideSegmentTabs />
+    </I18nProvider></QueryClientProvider>);
+    const panel = await screen.findByRole("region", { name: "向量接入信息" });
+    expect(within(panel).getByText(/尚未开放/)).toBeInTheDocument();
+    await waitFor(() => expect(within(panel).getByLabelText("渠道密钥")).toHaveValue("sk-ai-switch-codex-key"));
+    expect(screen.queryByLabelText(/向量.*端点/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("account-list")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("写入路由配置文件")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("配置 Codex 基线模型")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("真实生成测试算力池路由")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText("打开算力池测试菜单"));
+    expect(screen.queryAllByRole("menuitem", { name: /curl/i })).toHaveLength(0);
+    expect(listRouteCredentialPage).not.toHaveBeenCalled();
+    expect(routePoolTestModel).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "general", capability: undefined },
+    { name: "image", capability: "image.generate" },
+    { name: "video", capability: "video.generate" },
+    { name: "audio", capability: "audio.generate" },
+  ])("separates pool actions and rightmost list actions in the $name toolbar", async ({ capability }) => {
+    renderScreen("codex", "in_pool", false, createQueryClient(), capability);
+    const pool = screen.getByTestId("pool-status-strip");
+    const poolActions = within(pool).getByRole("group", { name: "算力池操作" });
+    const listActions = within(pool).getByRole("group", { name: "账号列表操作" });
+    expect(poolActions.parentElement).toBe(pool);
+    expect(listActions.parentElement).toBe(pool);
+    expect(pool.lastElementChild).toBe(listActions);
+    expect(within(poolActions).getByRole("button", { name: "启用算力池路由接入" })).toBeInTheDocument();
+    expect(within(poolActions).getByRole("button", { name: "打开算力池测试菜单" })).toBeInTheDocument();
+    expect(within(poolActions).queryByRole("button", { name: "新增账号" })).not.toBeInTheDocument();
+    expect(within(listActions).getByRole("button", { name: "列表模式" })).toBeInTheDocument();
+    expect(within(listActions).getByRole("button", { name: "新增账号" })).toBeInTheDocument();
+    expect(within(listActions).getByRole("button", { name: "刷新账号列表" })).toBeInTheDocument();
+    expect(within(screen.getByTestId("account-workspace-scroll-region")).queryByRole("button", { name: "新增账号" })).not.toBeInTheDocument();
+    expect(within(poolActions).queryByRole("button", { name: "配置 Codex 基线模型" }) !== null).toBe(!capability);
+
+    await userEvent.click(within(listActions).getByRole("button", { name: "卡片模式" }));
+    expect(within(listActions).getByRole("button", { name: "卡片模式" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("account-list")).toHaveAttribute("data-account-layout", "card");
+    await userEvent.click(within(listActions).getByRole("button", { name: "新增账号" }));
+    expect(await screen.findByRole("heading", { name: "新增账号" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "关闭新增账号" }));
+    expect(screen.queryByRole("heading", { name: "新增账号" })).not.toBeInTheDocument();
+    await waitFor(() => expect(within(listActions).getByRole("button", { name: "打开刷新菜单" })).toBeEnabled());
+    await userEvent.click(within(listActions).getByRole("button", { name: "打开刷新菜单" }));
+    expect(within(listActions).getByRole("menu", { name: "刷新操作" })).toBeInTheDocument();
+  });
+
   it("renders route credentials under the selected first-level agent tab and toggles pool membership", async () => {
     renderScreen();
 
@@ -964,15 +1161,11 @@ describe("AccountsScreen", () => {
     expect(scrollRegion.parentElement).toBe(workspace);
     expect(workspace).toHaveClass("bg-transparent");
     expect(scrollRegion).toHaveClass("bg-transparent");
-    expect(screen.getByTestId("account-workspace-toolbar")).toContainElement(
-      screen.getByRole("button", { name: "配置 Codex 基线模型" }),
-    );
-    expect(screen.getByTestId("pool-status-strip")).toHaveClass(
-      "max-[599px]:mx-0",
-      "max-[599px]:max-w-none",
-      "max-[599px]:flex-1",
-    );
-    expect(screen.getByRole("button", { name: "配置 Codex 基线模型" }).parentElement).toHaveClass("max-[599px]:hidden");
+    const poolStrip = screen.getByTestId("pool-status-strip");
+    expect(within(poolStrip).getByRole("button", { name: "配置 Codex 基线模型" })).toBeInTheDocument();
+    expect(poolStrip).toHaveClass("w-full");
+    expect(screen.getByTestId("account-workspace-toolbar").children).toHaveLength(1);
+    expect(screen.queryByTestId("workspace-toolbar-leading")).not.toBeInTheDocument();
     expect(screen.getByLabelText("刷新账号列表")).toBeInTheDocument();
     expect(screen.queryByRole("menu", { name: "刷新操作" })).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("打开刷新菜单")).toBeEnabled());
@@ -1007,7 +1200,7 @@ describe("AccountsScreen", () => {
     // the opener adapter instead.
     await userEvent.click(openLinkButton);
     expect(openExternal).toHaveBeenCalledWith("https://api.example.com");
-    expect(screen.getByText("算力中心")).toBeInTheDocument();
+    expect(screen.queryByText("算力中心")).not.toBeInTheDocument();
     expect(screen.getByText("请求 3")).toBeInTheDocument();
     expect(screen.getByText(/成功 2/)).toBeInTheDocument();
     expect(screen.getByText(/失败 1/)).toBeInTheDocument();
@@ -1614,11 +1807,12 @@ describe("AccountsScreen", () => {
     expect(fetchRouteProxyModels).not.toHaveBeenCalled();
   });
 
-  it("hides the workspace toolbar label when the sidebar is collapsed", async () => {
+  it("keeps the full pool toolbar without a platform leading column when the sidebar is collapsed", async () => {
     renderScreen("codex", "out_of_pool", true);
 
-    await screen.findByTestId("pool-status-strip");
-    expect(screen.getByTestId("workspace-toolbar-leading")).toHaveClass("hidden", "max-[599px]:hidden");
+    const poolStrip = await screen.findByTestId("pool-status-strip");
+    expect(screen.queryByTestId("workspace-toolbar-leading")).not.toBeInTheDocument();
+    expect(within(poolStrip).getByRole("button", { name: "配置 Codex 基线模型" })).toBeInTheDocument();
   });
 
   it("reorders accounts when a dragged handle is released over the placeholder slot", async () => {
@@ -2357,8 +2551,8 @@ describe("AccountsScreen", () => {
     });
     expect(workspace).toHaveStyle("grid-template-rows: 60px minmax(0, 1fr) 32px");
     expect(toolbar).toContainElement(screen.getByTestId("pool-status-strip"));
-    expect(screen.getByTestId("workspace-toolbar-leading")).toHaveClass("opacity-100");
-    expect(screen.getByRole("button", { name: "配置 Codex 基线模型" }).parentElement).toHaveClass("opacity-100");
+    expect(screen.queryByTestId("workspace-toolbar-leading")).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("pool-status-strip")).getByRole("button", { name: "配置 Codex 基线模型" })).toBeInTheDocument();
   });
 
   it("fills the account list area and centers the empty state when no accounts exist", async () => {
@@ -3559,6 +3753,128 @@ describe("AccountsScreen", () => {
     expect(createApiRouteCredential).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { presetId: "google-gemini-image", label: "Nano Banana", model: "gemini-2.5-flash-image" },
+    { presetId: "google-nano-banana-pro", label: "Nano Banana Pro", model: "gemini-3-pro-image-preview" },
+  ])("creates a $label account with its own Gemini image model and endpoint", async ({ presetId, label, model }) => {
+    renderScreen("codex", "in_pool", false, createQueryClient(), "image.generate");
+    await userEvent.click(screen.getByRole("button", { name: "新增账号" }));
+    await userEvent.selectOptions(screen.getByLabelText("创建 账号预设"), presetId);
+    expect(screen.getByLabelText("创建 账号预设")).toHaveValue(presetId);
+    expect(within(screen.getByLabelText("创建 账号预设")).getByRole("option", { selected: true })).toHaveTextContent(label);
+    expect(screen.getByLabelText("接口格式")).toHaveValue("gemini");
+    expect(screen.getByLabelText("上游模型 1")).toHaveValue(model);
+    expect(screen.getByLabelText("图片上游端点")).toHaveValue(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`);
+    await userEvent.type(screen.getByLabelText("API Key"), "test-google-image-key");
+    await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
+    await waitFor(() => expect(createApiRouteCredential).toHaveBeenCalled());
+    const input = vi.mocked(createApiRouteCredential).mock.calls[0][0];
+    expect(input.interface_format).toBe("gemini");
+    expect(input.base_url).toBe("https://generativelanguage.googleapis.com");
+    expect(JSON.parse(input.model_mappings_json)).toEqual([
+      { from: model, to: model, capabilities: ["image.generate"] },
+    ]);
+  });
+
+  it("keeps Nano Banana Pro selected when editing accounts on the shared Google base URL", async () => {
+    const account = { ...credentialsFixture[1], config_json: JSON.stringify({
+      base_url: "https://generativelanguage.googleapis.com", interface_format: "gemini",
+      model_mappings: [{ from: "gemini-3-pro-image-preview", to: "gemini-3-pro-image-preview", capabilities: ["image.generate"] }],
+    }) };
+    vi.mocked(listRouteCredentials).mockResolvedValue([account]);
+    poolStateByPlatform.set("codex", [account.id]);
+    renderScreen("codex", "in_pool", false, createQueryClient(), "image.generate");
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 API Account" }));
+    expect(screen.getByLabelText("编辑 账号预设")).toHaveValue("google-nano-banana-pro");
+    expect(screen.getByLabelText("上游模型 1")).toHaveValue("gemini-3-pro-image-preview");
+    await userEvent.selectOptions(screen.getByLabelText("编辑 账号预设"), "google-gemini-image");
+    expect(screen.getByLabelText("编辑 账号预设")).toHaveValue("google-gemini-image");
+    expect(screen.getByLabelText("上游模型 1")).toHaveValue("gemini-2.5-flash-image");
+  });
+
+  it("uses image-specific protocols, provider presets and capability mappings when creating an image account", async () => {
+    renderScreen("codex", "in_pool", false, createQueryClient(), "image.generate");
+    await userEvent.click(screen.getByRole("button", { name: "新增账号" }));
+    const formats = screen.getByLabelText("接口格式");
+    expect(within(formats).queryByRole("option", { name: /Chat Completions|Responses|Claude Messages/ })).not.toBeInTheDocument();
+    expect(within(formats).getByRole("option", { name: /OpenAI.*图片|OpenAI Images/ })).toBeInTheDocument();
+    expect(within(formats).getByRole("option", { name: /Gemini.*图片/ })).toBeInTheDocument();
+    const presets = screen.getByLabelText("创建 账号预设");
+    expect(within(presets).getByRole("option", { name: /GPT Image/ })).toBeInTheDocument();
+    expect(within(presets).getAllByRole("option", { name: /Gemini.*图片/ })).toHaveLength(2);
+    expect(within(presets).getByRole("option", { name: /豆包.*Seedream/ })).toBeInTheDocument();
+    await userEvent.selectOptions(presets, "openai-image");
+    expect(screen.getByLabelText("Base URL")).toHaveValue("https://api.openai.com/v1");
+    expect(formats).toHaveValue("openai");
+    expect(screen.getByLabelText("上游模型 1")).toHaveValue("gpt-image-1");
+    expect(screen.getByLabelText("图片上游端点")).toHaveValue("https://api.openai.com/v1/images/generations");
+    expect(screen.queryByText(/上下文与推理程度会写进 Codex/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/推理程度 |上下文窗口|声明支持 1M/)).not.toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText("API Key"), "test-image-only-key");
+    await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
+    await waitFor(() => expect(createApiRouteCredential).toHaveBeenCalled());
+    const input = vi.mocked(createApiRouteCredential).mock.calls[0][0];
+    expect(input.interface_format).toBe("openai");
+    expect(JSON.parse(input.model_mappings_json)).toEqual([
+      { from: "gpt-image-1", to: "gpt-image-1", capabilities: ["image.generate"] },
+    ]);
+    expect(input.request_brotli_compression).toBeUndefined();
+    expect(input.content_rejection_compat).toBeUndefined();
+    expect(input.force_reasoning_content).toBeUndefined();
+    expect(input.responses_custom_tool_compat).toBeUndefined();
+  });
+
+  it("applies the Gemini and Seedream image presets without using text protocols", async () => {
+    renderScreen("codex", "in_pool", false, createQueryClient(), "image.generate");
+    await userEvent.click(screen.getByRole("button", { name: "新增账号" }));
+    await userEvent.selectOptions(screen.getByLabelText("创建 账号预设"), "google-gemini-image");
+    expect(screen.getByLabelText("Base URL")).toHaveValue("https://generativelanguage.googleapis.com");
+    expect(screen.getByLabelText("接口格式")).toHaveValue("gemini");
+    expect(screen.getByLabelText("上游模型 1")).toHaveValue("gemini-2.5-flash-image");
+    expect(screen.getByLabelText("图片上游端点")).toHaveValue("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent");
+    await userEvent.selectOptions(screen.getByLabelText("创建 账号预设"), "volcengine-seedream");
+    expect(screen.getByLabelText("Base URL")).toHaveValue("https://ark.cn-beijing.volces.com/api/v3");
+    expect(screen.getByLabelText("接口格式")).toHaveValue("openai");
+    expect(screen.getByLabelText("上游模型 1")).toHaveValue("doubao-seedream-4-0-250828");
+    expect(screen.getByLabelText("图片上游端点")).toHaveValue("https://ark.cn-beijing.volces.com/api/v3/images/generations");
+  });
+
+  it.each(["image.generate", "video.generate", "audio.generate"])("does not expose text compatibility settings when creating %s accounts", async (capability) => {
+    renderScreen("codex", "in_pool", false, createQueryClient(), capability);
+    await userEvent.click(screen.getByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("tab", { name: "高级" }));
+    expect(screen.queryByLabelText(/Brotli|内容过滤兼容|强制回传推理内容|兼容 custom 工具|每轮追加纠偏提醒/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/压缩发往上游|明文推理兼容|密文清理/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("创建 User-Agent")).toBeInTheDocument();
+  });
+
+  it("keeps image edits on an image protocol and preserves hidden general settings", async () => {
+    const config = {
+      base_url: "https://api.openai.com/v1", interface_format: "openai",
+      model_mappings: [{ from: "gpt-image-1", to: "gpt-image-1", capabilities: ["image.generate"] }],
+      request_brotli_compression: "on", content_rejection_compat: "trim_old_tool_outputs",
+      force_reasoning_content: true, turn_reminder: true, turn_reminder_text: "preserve existing text setting",
+    };
+    const account = { ...credentialsFixture[1], config_json: JSON.stringify(config) };
+    vi.mocked(listRouteCredentials).mockResolvedValue([account]);
+    poolStateByPlatform.set("codex", [account.id]);
+    renderScreen("codex", "in_pool", false, createQueryClient(), "image.generate");
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 API Account" }));
+    expect(within(screen.getByLabelText("编辑接口格式")).queryByRole("option", { name: /Chat Completions|Responses|Claude Messages/ })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("编辑图片上游端点")).toHaveValue("https://api.openai.com/v1/images/generations");
+    await userEvent.click(screen.getByRole("tab", { name: "高级" }));
+    expect(screen.queryByLabelText(/Brotli|内容过滤兼容|强制回传推理内容|兼容 custom 工具|每轮追加纠偏提醒|图片超限兼容|内联远程图片/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
+    const saved = JSON.parse(vi.mocked(updateRouteCredential).mock.calls[0][1].config_json);
+    expect(saved.interface_format).toBe("openai");
+    expect(saved.model_mappings[0].capabilities).toContain("image.generate");
+    expect(saved.request_brotli_compression).toBe("on");
+    expect(saved.content_rejection_compat).toBe("trim_old_tool_outputs");
+    expect(saved.force_reasoning_content).toBe(true);
+    expect(saved.turn_reminder_text).toBe("preserve existing text setting");
+  });
+
   it("creates and edits API account provider independently of the wire protocol", async () => {
     renderScreen();
     await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
@@ -3612,6 +3928,46 @@ describe("AccountsScreen", () => {
     await userEvent.click(screen.getByRole("button", { name: "账号来源筛选 Claude", pressed: false }));
     await waitFor(() => expect(listRouteCredentialPage).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "official", provider: "claude" })));
     await waitFor(() => expect(screen.queryByRole("button", { name: "编辑 Relay source" })).not.toBeInTheDocument());
+  });
+
+  it("filters the server query through a collapsed provider and restores it after resize", async () => {
+    let width = 190;
+    const resizeCallbacks = new Set<ResizeObserverCallback>();
+    const originalRect = HTMLElement.prototype.getBoundingClientRect;
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      let measured: number | undefined;
+      if (this.dataset.testid === "account-source-filter-row") measured = width;
+      else if (this.hasAttribute("data-source-filter-measure")) measured = 80;
+      else if (this.hasAttribute("data-source-filter-more-measure")) measured = 56;
+      if (measured === undefined) return originalRect.call(this);
+      return { x: 0, y: 0, width: measured, height: 28, top: 0, right: measured, bottom: 28, left: 0, toJSON: () => ({}) };
+    });
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(private callback: ResizeObserverCallback) {}
+      observe() { resizeCallbacks.add(this.callback); }
+      unobserve() {}
+      disconnect() { resizeCallbacks.delete(this.callback); }
+    });
+    try {
+      renderScreen();
+      await screen.findByText("Team Account");
+      expect(screen.queryByRole("button", { name: "账号来源筛选 OpenRouter" })).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "更多账号来源" }));
+      await userEvent.click(screen.getByRole("menuitemradio", { name: "账号来源筛选 OpenRouter" }));
+      await waitFor(() => expect(listRouteCredentialPage).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "api", provider: "openrouter", page: 1 })));
+      expect(screen.getByRole("button", { name: "更多账号来源" })).toHaveAttribute("aria-pressed", "true");
+      act(() => {
+        width = 1000;
+        for (const callback of resizeCallbacks) callback([], {} as ResizeObserver);
+      });
+      expect(screen.getByRole("button", { name: "账号来源筛选 OpenRouter", pressed: true })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "更多账号来源" })).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "账号来源筛选 OpenRouter", pressed: true }));
+      await waitFor(() => expect(listRouteCredentialPage).toHaveBeenLastCalledWith(expect.objectContaining({ kind: null, provider: null })));
+    } finally {
+      rect.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 
   it("media create screens do not offer official subscription imports", async () => {
@@ -7357,7 +7713,7 @@ describe("AccountsScreen", () => {
 
     await userEvent.click(await screen.findByLabelText("关闭算力池路由接入"));
     await waitFor(() => expect(stopRouteProxy).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText("路由接入已关闭（端口运行中）")).toBeInTheDocument();
+    expect(await screen.findByText("算力池路由已关闭（AI 服务运行中）")).toBeInTheDocument();
   });
 
   it("shows a start button when route access is enabled but the shared port is stopped", async () => {
@@ -7371,8 +7727,8 @@ describe("AccountsScreen", () => {
     });
     renderScreen("codex", "in_pool");
 
-    expect(await screen.findByText("路由已启用，端口未启动")).toBeInTheDocument();
-    const startButton = screen.getByLabelText("启动算力池路由");
+    const startButton = await screen.findByLabelText("启动算力池路由");
+    expect(screen.getByText("AI 服务未启动")).toBeInTheDocument();
     expect(startButton).toHaveClass("bg-emerald-600");
     expect(screen.queryByLabelText("关闭算力池路由接入")).not.toBeInTheDocument();
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   imageGenerationEndpoint,
+  routeProxyApiEndpoint,
   routeProxyEndpointForPlatform,
 } from "../src/lib/routeProxyEndpoint";
 
@@ -38,6 +39,17 @@ describe("routeProxyEndpointForPlatform", () => {
 
   it("returns an empty string for a missing address", () => {
     expect(routeProxyEndpointForPlatform("   ", "codex")).toBe("");
+  });
+});
+
+describe("routeProxyApiEndpoint", () => {
+  it.each([
+    ["http://127.0.0.1:43111", "/v1/images/edits", "http://127.0.0.1:43111/v1/images/edits"],
+    [" http://127.0.0.1:43111/v1/ ", "/v1/video/generations", "http://127.0.0.1:43111/v1/video/generations"],
+    ["https://host.example/api/v1", "/v1/audio/speech", "https://host.example/api/v1/audio/speech"],
+    ["", "/v1/videos", ""],
+  ])("joins %s and %s without repeating the version", (base, path, expected) => {
+    expect(routeProxyApiEndpoint(base, path)).toBe(expected);
   });
 });
 

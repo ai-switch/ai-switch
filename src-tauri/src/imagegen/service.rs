@@ -1,5 +1,5 @@
 use super::models::*;
-use super::protocol::{openai_images_body, parse_openai_images};
+use super::protocol::{openai_images_body, parse_openai_images, parse_openai_images_with_download};
 use super::repository::ImageGenerationRepository;
 use super::storage::store_image;
 use crate::app_state::AppState;
@@ -225,7 +225,8 @@ impl ImageGenerationService {
             .get("id")
             .and_then(serde_json::Value::as_str)
             .map(ToOwned::to_owned);
-        let images = parse_openai_images(&bytes)?;
+        let client = crate::services::http_client::build_outbound_http_client(Some(std::time::Duration::from_secs(30)))?;
+        let images = parse_openai_images_with_download(&bytes, &client).await?;
         if images.is_empty() {
             return Err("Image upstream returned no images".to_string());
         }
@@ -262,5 +263,74 @@ fn validation(code: &'static str, message: &str) -> AppError {
         message: message.to_string(),
         details: None,
         recoverable: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::{create_memory_pool, run_migrations};
+    use crate::database::repositories::route_credential_repository::RouteCredentialRepository;
+    use crate::database::repositories::route_pool_repository::RoutePoolRepository;
+    use axum::{response::IntoResponse, Json, Router};
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn image_generation_downloads_url_results_without_forwarding_the_upstream_key() {
+        const PNG: &[u8] = b"\x89PNG\r\n\x1a\nlocal-test-image";
+        let captures = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+        let sink = captures.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let image_url = format!("{base_url}/asset.png?temporary=test");
+        let app = Router::new().fallback(move |uri: axum::http::Uri, headers: HeaderMap| {
+            let captures = sink.clone();
+            let image_url = image_url.clone();
+            async move {
+                captures.lock().unwrap().push((uri.path().to_string(), headers.get("authorization").and_then(|value| value.to_str().ok()).map(str::to_owned)));
+                if uri.path() == "/asset.png" {
+                    ([ ("content-type", "image/png") ], PNG).into_response()
+                } else {
+                    Json(json!({"data":[{"url":image_url,"revised_prompt":"a cat"}]})).into_response()
+                }
+            }
+        });
+        let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let credential = RouteCredentialRepository::create(
+            &pool, "codex", "api", "url image", None, "ok", None,
+            r#"{"api_key":"image-upstream-key"}"#,
+            &json!({"base_url":format!("{base_url}/v1"),"interface_format":"openai","model_mappings":[{
+                "from":"image-alias","to":"gpt-image-1","capabilities":["image.generate"]
+            }]}).to_string(), "{}",
+        ).await.unwrap();
+        RoutePoolRepository::replace_members(&pool, "codex", &[credential.id]).await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState {
+            paths: crate::paths::AppPaths::from_data_dir(temp.path().to_path_buf()),
+            pool,
+            saas: Default::default(),
+            config_writes: Default::default(),
+            deeplink_protocols: Default::default(),
+            close_to_tray: Default::default(),
+            route_proxy: Default::default(),
+            web_service: Default::default(),
+            tailscale: Default::default(),
+            terminals: Default::default(),
+            terminal_hub: Default::default(),
+            event_broadcaster: Default::default(),
+        };
+        let result = ImageGenerationService::execute(&state, "codex", "image-alias", "a cat", 1, "1024x1024", "auto").await;
+        upstream.abort();
+        let (_, images) = result.expect("URL result should become a usable image asset");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].bytes, PNG);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!(images[0].revised_prompt.as_deref(), Some("a cat"));
+        let captures = captures.lock().unwrap();
+        assert_eq!(captures[0], ("/v1/images/generations".to_string(), Some("Bearer image-upstream-key".to_string())));
+        assert_eq!(captures[1], ("/asset.png".to_string(), None));
     }
 }

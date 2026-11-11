@@ -13,13 +13,14 @@ vi.mock("../src/screens/AccountsScreen", () => ({
   AccountsScreen: ({
     platform,
     capabilityFilter,
+    modality,
   }: {
     platform?: string;
     capabilityFilter?: string;
+    modality?: string;
   }) => (
     <div>
-      accounts:{platform}
-      {capabilityFilter ? `:${capabilityFilter}` : ""}
+      {modality === "vector" ? "向量接口尚未开放" : <>accounts:{platform}{capabilityFilter ? `:${capabilityFilter}` : ""}</>}
     </div>
   ),
 }));
@@ -30,7 +31,7 @@ vi.mock("../src/components/accounts/ImageCapabilitySegment", () => ({
 function renderScreen() {
   return render(
     <I18nProvider initialLanguage="zh-CN">
-      <CodexChannelsScreen imageGenerationEnabled />
+      <CodexChannelsScreen />
     </I18nProvider>,
   );
 }
@@ -64,7 +65,7 @@ describe("CodexChannelsScreen", () => {
     renderScreen();
 
     await userEvent.click(screen.getByRole("tab", { name: "图片" }));
-    expect(screen.getByText("image-segment")).toBeInTheDocument();
+    expect(screen.queryByText("image-segment")).not.toBeInTheDocument();
     expect(screen.getByText("accounts:codex:image.generate")).toBeInTheDocument();
     expect(screen.queryByText("accounts:codex")).not.toBeInTheDocument();
 
@@ -94,7 +95,7 @@ describe("CodexChannelsScreen", () => {
   it("opens the segment the sidebar navigation pointed at", async () => {
     render(
       <I18nProvider initialLanguage="zh-CN">
-        <CodexChannelsScreen imageGenerationEnabled initialSegment="video" />
+        <CodexChannelsScreen initialSegment="video" />
       </I18nProvider>,
     );
     expect(screen.getByRole("tab", { name: "视频" })).toHaveAttribute("aria-selected", "true");
@@ -109,7 +110,7 @@ describe("CodexChannelsScreen", () => {
   it("shows the vector placeholder and does not render any account list", () => {
     render(
       <I18nProvider initialLanguage="zh-CN">
-        <CodexChannelsScreen imageGenerationEnabled initialSegment="vector" />
+        <CodexChannelsScreen initialSegment="vector" />
       </I18nProvider>,
     );
     expect(screen.getByRole("tab", { name: "向量" })).toBeInTheDocument();
@@ -120,7 +121,7 @@ describe("CodexChannelsScreen", () => {
   it("follows controlled sidebar modality changes without keeping a stale segment", () => {
     const view = (modality: "video" | "audio" | "vector") => (
       <I18nProvider initialLanguage="zh-CN">
-        <CodexChannelsScreen imageGenerationEnabled modality={modality} hideSegmentTabs />
+        <CodexChannelsScreen modality={modality} hideSegmentTabs />
       </I18nProvider>
     );
     const { rerender } = render(view("video"));

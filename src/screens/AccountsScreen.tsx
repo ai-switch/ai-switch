@@ -1,5 +1,10 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion } from "motion/react";
+import { AccountSourceFilterBar } from "../components/accounts/AccountSourceFilterBar";
+import { ModalityAccessPanel, type MediaModality } from "../components/accounts/ModalityAccessPanel";
+import { NativeErrorNotice, formatApiError } from "../components/accounts/NativeErrorNotice";
+import { PlatformSupportBadge } from "../components/platform/PlatformSupportBadge";
+import type { AccountModality } from "../lib/accountModalities";
 import { MotionMenu } from "../components/motion/MotionPrimitives";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
@@ -51,7 +56,6 @@ import {
   type ReactNode,
 } from "react";
 import { DismissButton } from "../components/ui/DismissButton";
-import { PlatformSupportBadge } from "../components/platform/PlatformSupportBadge";
 import { baselineModelsForPlatform, expandDisplayModelMappings, ModelMappingSummary, modelSummaryLine } from "../components/accounts/ModelMappingSummary";
 import {
   ExternalClientImportPanel,
@@ -205,7 +209,6 @@ import {
 } from "../lib/modelTestModels";
 import {
   type AccountPreset,
-  matchPresetByBaseUrl,
   presetsForPlatform,
 } from "../lib/accountPresets";
 import {
@@ -226,6 +229,8 @@ import {
 import { getTransport, isDesktop, isTauriRuntime } from "../lib/transport";
 import { fetchRouteProxyModels } from "../lib/routeProxyModels";
 import { AUDIO_CAPABILITY, AUDIO_DIALECTS } from "../lib/audioPlatforms";
+import { IMAGE_ACCOUNT_PRESETS, IMAGE_CAPABILITY, IMAGE_DIALECTS, imageDialectLabel, imageUpstreamEndpoint } from "../lib/imagePlatforms";
+import { EndpointRow } from "../components/accounts/EndpointRow";
 import {
   accountProvider, accountProviderLabel, accountSourceFilters, apiAccountProviders, officialAccountProviders,
   officialProviderPlatform, type ApiAccountProvider, type OfficialAccountProvider,
@@ -363,39 +368,6 @@ const editTabs: Array<FormTab<EditTab>> = [
   { value: "failure", label: "故障处理" },
   { value: "other", label: "其他" },
 ];
-
-function formatApiError(error: unknown, fallback: string): string {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message;
-  }
-  if (error && typeof error === "object") {
-    const record = error as {
-      message?: unknown;
-      details?: unknown;
-      code?: unknown;
-    };
-    const message =
-      typeof record.message === "string" ? record.message.trim() : "";
-    const details =
-      typeof record.details === "string" ? record.details.trim() : "";
-    if (message && details) {
-      return `${message} (${details})`;
-    }
-    if (message) {
-      return message;
-    }
-    if (details) {
-      return details;
-    }
-    if (typeof record.code === "string" && record.code.trim()) {
-      return record.code;
-    }
-  }
-  if (typeof error === "string" && error.trim()) {
-    return error;
-  }
-  return fallback;
-}
 
 // 来源筛选 chip 的图标：官方厂商用品牌 SVG，中转/自定义用线性图标。
 const sourceFilterIcons: Record<string, ReactNode> = {
@@ -663,6 +635,8 @@ type AccountsScreenProps = {
   ///
   /// 过滤在服务端做（分页与总数都在 SQL 里算），前端过滤会让页数失真。
   capabilityFilter?: string;
+  /** Vector uses the same shell but does not query or advertise unsupported accounts. */
+  modality?: AccountModality;
 };
 
 const platformLabels: Record<PlatformKey, string> = {
@@ -691,10 +665,12 @@ const interfaceFormatLabels: Record<InterfaceFormat, string> = {
   sora: "Sora",
 };
 
-function interfaceFormatLabel(value: InterfaceFormat | string | null | undefined) {
+function interfaceFormatLabel(value: InterfaceFormat | string | null | undefined, capabilityFilter?: string) {
   if (!value) {
     return "";
   }
+  if (capabilityFilter === IMAGE_CAPABILITY) return imageDialectLabel(value);
+  if (capabilityFilter === AUDIO_CAPABILITY) return AUDIO_DIALECTS.find((item) => item.dialect === value)?.label ?? value;
   if (value in interfaceFormatLabels) {
     return interfaceFormatLabels[value as InterfaceFormat];
   }
@@ -838,6 +814,9 @@ function defaultInterfaceFormat(platform: PlatformKey, capabilityFilter?: string
 }
 
 function interfaceFormatsForPlatform(platform: PlatformKey, capabilityFilter?: string): InterfaceFormat[] {
+  if (capabilityFilter === IMAGE_CAPABILITY) {
+    return IMAGE_DIALECTS.map((item) => item.dialect);
+  }
   if (capabilityFilter === AUDIO_CAPABILITY) {
     return AUDIO_DIALECTS.map((item) => item.dialect);
   }
@@ -947,7 +926,7 @@ function anthropicApiKeyFieldDescription(value: AnthropicApiKeyField) {
 }
 
 function isMediaCapability(capability?: string): boolean {
-  return capability === AUDIO_CAPABILITY || capability === VIDEO_CAPABILITY;
+  return capability === IMAGE_CAPABILITY || capability === AUDIO_CAPABILITY || capability === VIDEO_CAPABILITY;
 }
 
 function mappingsWithMediaCapability(mappings: ModelMapping[], capability?: string): ModelMapping[] {
@@ -2345,11 +2324,10 @@ function ModelMappingsEditor({
   platform,
   value,
 }: ModelMappingsEditorProps) {
-  const isClaude = platform === "claude";
-  // Codex is the only client that reads a per-model context window and effort
-  // ladder out of the catalog we write, so it is the only editor that offers
-  // them. Claude keeps its single 1M checkbox.
-  const isCodex = platform === "codex";
+  const mediaMapping = isMediaCapability(capabilityFilter);
+  const isClaude = !mediaMapping && platform === "claude";
+  // Context and reasoning settings belong only to the general text model list.
+  const isCodex = !mediaMapping && platform === "codex";
   const templateValues = new Set<string>(claudeRoleTemplates.map((template) => template.value));
   const rows = isClaude
     ? [
@@ -2537,7 +2515,7 @@ function ModelMappingsEditor({
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-[13px] text-stone-900 outline-none motion-control focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
                     list={modelListId}
                     onChange={(event) => updateRow(index, { from: event.target.value })}
-                    placeholder="gpt-5.5"
+                    placeholder={capabilityFilter === IMAGE_CAPABILITY ? "gpt-image-1" : "gpt-5.5"}
                     value={mapping.from}
                   />
                 )}
@@ -2547,7 +2525,7 @@ function ModelMappingsEditor({
                   className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-[13px] text-stone-900 outline-none motion-control focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
                   list={modelListId}
                   onChange={(event) => updateRow(index, { to: event.target.value })}
-                  placeholder="例如：gpt-4o"
+                  placeholder={capabilityFilter === IMAGE_CAPABILITY ? "例如：gpt-image-1 / gemini-2.5-flash-image / doubao-seedream" : "例如：gpt-4o"}
                   value={mapping.to}
                 />
                 {isClaude ? (
@@ -2585,7 +2563,7 @@ function ModelMappingsEditor({
                 <div className="grid gap-2 rounded-lg border border-stone-200 bg-white p-2" key={rowKey}>
                   {rowControls}
                   <span className="text-[11px] font-medium text-stone-500">
-                    模型能力：{capabilityFilter === VIDEO_CAPABILITY ? "视频生成" : "语音合成"}
+                    模型能力：{capabilityFilter === IMAGE_CAPABILITY ? "图片生成" : capabilityFilter === VIDEO_CAPABILITY ? "视频生成" : "语音合成"}
                   </span>
                 </div>
               );
@@ -3007,24 +2985,38 @@ function BaseUrlAdjustmentNotice({ adjustment }: { adjustment: CodexBaseUrlAdjus
 
 function PresetFields({
   baseUrl,
+  capabilityFilter,
   fieldClass,
   idPrefix,
+  interfaceFormat,
   labelClass,
+  modelMappings = [],
   onApply,
   platform,
 }: {
   baseUrl: string;
+  capabilityFilter?: string;
   fieldClass: string;
   idPrefix: string;
+  interfaceFormat?: InterfaceFormat;
   labelClass: string;
+  modelMappings?: ModelMapping[];
   onApply: (preset: AccountPreset) => void;
   platform: PlatformKey;
 }) {
-  const presets = presetsForPlatform(platform);
+  const presets = capabilityFilter === IMAGE_CAPABILITY ? IMAGE_ACCOUNT_PRESETS : isMediaCapability(capabilityFilter) ? [] : presetsForPlatform(platform);
   if (presets.length === 0) {
     return null;
   }
-  const matched = matchPresetByBaseUrl(platform, baseUrl);
+  const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "").toLowerCase();
+  const candidates = presets.filter((preset) => preset.baseUrl.replace(/\/+$/, "").toLowerCase() === normalizedBaseUrl);
+  // Nano Banana and Pro share the same URL; match the saved image model, not
+  // whichever Google preset happened to be listed first.
+  const upstreamModels = new Set(modelMappings.map((mapping) => mapping.to.trim().replace(/^\/?models\//, "").toLowerCase()));
+  const matched = capabilityFilter === IMAGE_CAPABILITY
+    ? candidates.find((preset) => preset.interfaceFormat === interfaceFormat && preset.modelMappings.some((mapping) => upstreamModels.has(mapping.to.toLowerCase())))
+      ?? (candidates.length === 1 ? candidates[0] : undefined)
+    : candidates[0];
   return (
     <label className={labelClass}>
       账号预设
@@ -3333,10 +3325,17 @@ export function AccountsScreen({
   providerFilterFocus = null,
   poolScopeFocus = null,
   capabilityFilter,
+  modality,
 }: AccountsScreenProps) {
   const queryClient = useQueryClient();
   const activePlatform = platform;
-  const mediaView = Boolean(capabilityFilter);
+  const mediaModality: MediaModality | null = modality && modality !== "general"
+    ? modality
+    : capabilityFilter === "image.generate" ? "image"
+      : capabilityFilter === VIDEO_CAPABILITY ? "video"
+        : capabilityFilter === AUDIO_CAPABILITY ? "audio" : null;
+  const mediaView = Boolean(capabilityFilter) || mediaModality !== null;
+  const vectorView = mediaModality === "vector";
   // Native file pickers come from the Tauri dialog plugin; in a browser they
   // reject, so the entry points that use them have to be disabled rather than
   // failing silently.
@@ -3348,15 +3347,15 @@ export function AccountsScreen({
   const officialImportRule = activeCapability?.operations.official_import;
   const officialQuotaRule = activeCapability?.operations.official_quota;
   const modelTestRule = activeCapability?.operations.model_test;
-  const configWriteEnabled = capabilityReady && operationEnabled(configWriteRule);
+  const configWriteEnabled = !mediaView && capabilityReady && operationEnabled(configWriteRule);
   const officialImportEnabled = !mediaView && capabilityReady && operationEnabled(officialImportRule);
   const officialQuotaEnabled = capabilityReady && operationEnabled(officialQuotaRule);
-  const modelTestEnabled = capabilityReady && operationEnabled(modelTestRule);
+  const modelTestEnabled = !mediaView && capabilityReady && operationEnabled(modelTestRule);
   const configWriteReason = capabilityReason(configWriteRule);
   const officialImportReason = capabilityReason(officialImportRule);
   const officialQuotaReason = capabilityReason(officialQuotaRule);
   const modelTestReason = capabilityReason(modelTestRule);
-  const directModeSupported = desktop && (activePlatform === "codex" || activePlatform === "claude");
+  const directModeSupported = !mediaView && desktop && (activePlatform === "codex" || activePlatform === "claude");
   const [pendingDirectCredential, setPendingDirectCredential] = useState<RouteCredential | null>(null);
   const [directModeMessage, setDirectModeMessage] = useState<string | null>(null);
   const [directModeError, setDirectModeError] = useState<string | null>(null);
@@ -3399,6 +3398,21 @@ export function AccountsScreen({
   const [accountKindFilter, setAccountKindFilter] = useState<"official" | "api" | "">("");
   const [accountProviderFilter, setAccountProviderFilter] = useState("");
   const effectiveKindFilter = mediaView ? "api" : accountKindFilter || null;
+  const activeSourceFilterKey = accountSourceFilters.find((item) => item.kind === null
+    ? !accountKindFilter && !accountProviderFilter
+    : effectiveKindFilter === item.kind && accountProviderFilter === item.provider)?.key ?? "";
+  const selectSourceFilter = (key: string) => {
+    const item = accountSourceFilters.find((filter) => filter.key === key);
+    if (!item) return;
+    if (item.key !== activeSourceFilterKey && item.kind !== null) {
+      setAccountKindFilter(item.kind);
+      setAccountProviderFilter(item.provider);
+    } else {
+      setAccountKindFilter("");
+      setAccountProviderFilter("");
+    }
+    setAccountPage(1);
+  };
   const [accountPage, setAccountPage] = useState(1);
   const [accountPageSize, setAccountPageSize] = useState(20);
   // Keyboard reordering keeps its own "picked up" row; the pointer drag tracks its
@@ -3603,6 +3617,7 @@ export function AccountsScreen({
   const [modelTestToolCall, setModelTestToolCall] = useState(false);
   const [routePoolModelsDialogOpen, setRoutePoolModelsDialogOpen] = useState(false);
   const [baselineModelsDialogOpen, setBaselineModelsDialogOpen] = useState(false);
+  const [proxyOperationError, setProxyOperationError] = useState<{ operation: "start" | "stop"; error: unknown } | null>(null);
   const [liveLogOpen, setLiveLogOpen] = useState(false);
   const [liveLogEntries, setLiveLogEntries] = useState<RouteProxyLiveLogEntry[]>([]);
   const [expandedLiveLogId, setExpandedLiveLogId] = useState<string | null>(null);
@@ -3945,6 +3960,7 @@ export function AccountsScreen({
       };
     },
     placeholderData: keepPreviousData,
+    enabled: !vectorView,
     staleTime: 0,
     refetchOnMount: "always",
     refetchOnWindowFocus: true,
@@ -4821,17 +4837,15 @@ export function AccountsScreen({
           fetched_models_json: JSON.stringify(apiFetchedModels),
           preview_json: apiPreviewJson.trim() || null,
           batch_id: batch?.id ?? null,
-          responses_custom_tool_compat: apiResponsesCustomToolCompat,
-          ...(apiForceReasoningContent ? { force_reasoning_content: true } : {}),
-          ...(apiPlaintextReasoningMode !== "auto" ? { responses_plaintext_reasoning_compat: apiPlaintextReasoningMode } : {}),
-          ...(apiRequestCompressionMode !== "auto" ? { request_brotli_compression: apiRequestCompressionMode } : {}),
-          ...(apiContentRejectionCompat
-            ? { content_rejection_compat: "trim_old_tool_outputs" as const }
-            : {}),
-          ...(apiResponsesEncryptedContentCleanup ? { responses_encrypted_content_cleanup: true } : {}),
-          ...(apiResponsesEncryptedContentCleanup && apiResponsesEncryptedContentAggressiveStrip
-            ? { responses_encrypted_content_aggressive_strip: true }
-            : {}),
+          ...(!mediaView ? {
+            responses_custom_tool_compat: apiResponsesCustomToolCompat,
+            ...(apiForceReasoningContent ? { force_reasoning_content: true } : {}),
+            ...(apiPlaintextReasoningMode !== "auto" ? { responses_plaintext_reasoning_compat: apiPlaintextReasoningMode } : {}),
+            ...(apiRequestCompressionMode !== "auto" ? { request_brotli_compression: apiRequestCompressionMode } : {}),
+            ...(apiContentRejectionCompat ? { content_rejection_compat: "trim_old_tool_outputs" as const } : {}),
+            ...(apiResponsesEncryptedContentCleanup ? { responses_encrypted_content_cleanup: true } : {}),
+            ...(apiResponsesEncryptedContentCleanup && apiResponsesEncryptedContentAggressiveStrip ? { responses_encrypted_content_aggressive_strip: true } : {}),
+          } : {}),
           user_agent: apiUserAgent.trim() || null,
           relay_balance_provider:
             apiRelayBalance.provider === "none" || apiRelayBalance.provider === "custom"
@@ -5211,16 +5225,26 @@ export function AccountsScreen({
   ]);
   const startProxyMutation = useMutation({
     mutationFn: startRouteProxy,
+    onMutate: () => setProxyOperationError(null),
     onSuccess: async (status) => {
       queryClient.setQueryData(["route-proxy-status"], status);
       await refreshSharedServiceStatus();
     },
+    onError: (error) => {
+      setProxyOperationError({ operation: "start", error });
+      void routeProxyQuery.refetch();
+    },
   });
   const stopProxyMutation = useMutation({
     mutationFn: stopRouteProxy,
+    onMutate: () => setProxyOperationError(null),
     onSuccess: async (status) => {
       queryClient.setQueryData(["route-proxy-status"], status);
       await refreshSharedServiceStatus();
+    },
+    onError: (error) => {
+      setProxyOperationError({ operation: "stop", error });
+      void routeProxyQuery.refetch();
     },
   });
   // Pool-wide client behavior switches. Claude Code reads these from its own
@@ -5261,7 +5285,7 @@ export function AccountsScreen({
     enabled: routeServiceReady && configWriteEnabled,
     staleTime: 0,
   });
-  const configWriteStale = configWriteStaleQuery.data === true;
+  const configWriteStale = !mediaView && configWriteStaleQuery.data === true;
   const updateMutation = useMutation({
     mutationFn: async () => {
       if (!editingCredential) {
@@ -5401,6 +5425,14 @@ export function AccountsScreen({
               ),
               editUserAgent,
             );
+      if (mediaView && editingCredential.kind === "api") {
+        // Settings hidden in this modality must not be silently changed by its form.
+        const previous = parseJsonObject(editConfigJson.trim() || "{}");
+        for (const key of ["request_brotli_compression", "content_rejection_compat", "force_reasoning_content", "responses_custom_tool_compat", "responses_plaintext_reasoning_compat", "responses_encrypted_content_cleanup", "responses_encrypted_content_aggressive_strip", "inline_remote_images", "image_limit_compat", "turn_reminder", "turn_reminder_text"]) {
+          if (Object.prototype.hasOwnProperty.call(previous, key)) baseConfig[key] = previous[key];
+          else delete baseConfig[key];
+        }
+      }
       const configWithProxy = writeProxyUrlToConfig(baseConfig, editProxyUrl);
       const configWithFetchedModels =
         editingCredential.kind === "api"
@@ -6046,7 +6078,7 @@ export function AccountsScreen({
   };
 
   const openAccountTestDialog = (credential: RouteCredential) => {
-    if (credential.archived_at || !credentialKindAllowed(modelTestRule, credential.kind)) {
+    if (mediaView || credential.archived_at || !credentialKindAllowed(modelTestRule, credential.kind)) {
       return;
     }
     setModelTestAccount(credential);
@@ -6438,9 +6470,7 @@ export function AccountsScreen({
           }
         }}
         style={{
-          gridTemplateRows: toolbarAutoHidden
-            ? "44px minmax(0, 1fr) 32px"
-            : "60px minmax(0, 1fr) 32px",
+          gridTemplateRows: `${toolbarAutoHidden ? "44px" : "60px"}${mediaModality ? " auto" : ""} minmax(0, 1fr) 32px`,
         }}
       >
         <div
@@ -6460,33 +6490,7 @@ export function AccountsScreen({
           }}
         >
           <div
-            className={`min-w-0 flex-1 motion-control duration-300 max-[599px]:hidden ${sidebarCollapsed ? "hidden" : ""} ${toolbarAutoHidden ? "pointer-events-none -translate-y-3 opacity-0" : "translate-y-0 opacity-100"}`}
-            data-testid="workspace-toolbar-leading"
-          >
-            <div className="flex items-center gap-2">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-stone-400">
-                {platformLabels[activePlatform]}
-              </p>
-              {activeCapability?.support_level === "partial" ? (
-                <PlatformSupportBadge
-                  displayName={activeCapability.display_name}
-                  supportLevel={activeCapability.support_level}
-                />
-              ) : null}
-            </div>
-            <h1 className="mt-0.5 text-lg font-semibold leading-tight tracking-tight text-stone-950">
-              {sidebarCollapsed ? (
-                "AI Switch"
-              ) : (
-                <>
-                  <span className="max-[599px]:hidden">算力中心</span>
-                  <span className="hidden max-[599px]:inline">AI Switch</span>
-                </>
-              )}
-            </h1>
-          </div>
-          <div
-            className="mx-2 flex min-w-0 max-w-[560px] flex-[1.5] items-center justify-between gap-3 rounded-lg border border-stone-300/80 bg-stone-100/75 px-2.5 py-1.5 shadow-[inset_0_1px_2px_rgba(28,25,23,0.08),inset_0_-1px_0_rgba(255,255,255,0.82)] max-[599px]:mx-0 max-[599px]:max-w-none max-[599px]:flex-1"
+            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-1.5 rounded-lg border border-stone-300/80 bg-stone-100/75 px-2.5 py-1.5 shadow-[inset_0_1px_2px_rgba(28,25,23,0.08),inset_0_-1px_0_rgba(255,255,255,0.82)]"
             data-testid="pool-status-strip"
           >
             <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
@@ -6494,6 +6498,9 @@ export function AccountsScreen({
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-center gap-1.5">
                   <span className="shrink-0 text-[11px] font-semibold text-stone-800">算力池</span>
+                  {!mediaView && activeCapability?.support_level === "partial" ? (
+                    <PlatformSupportBadge displayName={activeCapability.display_name} supportLevel={activeCapability.support_level} />
+                  ) : null}
                   <span className="shrink-0 font-mono text-[10px] text-stone-500">{draftPoolIds.size} 个账号</span>
                 </div>
                 <div className="hidden min-w-0 items-center gap-2 truncate text-[10px] text-stone-500 sm:flex">
@@ -6503,29 +6510,53 @@ export function AccountsScreen({
                         ? draftPoolIds.size > 0
                           ? routeProxyQuery.data?.base_url ?? "路由已启用"
                           : "路由已启用，暂无可用账号"
-                        : "路由已启用，端口未启动"
+                        : "AI 服务未启动"
                       : routeListenerRunning
-                        ? "路由接入已关闭（端口运行中）"
-                        : "路由接入已关闭"}
+                        ? "算力池路由已关闭（AI 服务运行中）"
+                        : "AI 服务未启动"}
                   </span>
                   {lastRouteAccount ? <span className="truncate">最近：{lastRouteAccount}</span> : null}
                 </div>
                 <span className="sr-only">已加入 {draftPoolIds.size} 个账号</span>
                 <span className="sr-only">
-                  算力池路由：{routeAccessEnabled ? routeListenerRunning ? routeProxyQuery.data?.base_url ?? "已启用" : "已启用，端口未启动" : routeListenerRunning ? "已关闭，端口运行中" : "已关闭"}
+                  算力池路由：{routeAccessEnabled ? routeListenerRunning ? routeProxyQuery.data?.base_url ?? "已启用" : "已启用，AI 服务未启动" : routeListenerRunning ? "已关闭，AI 服务运行中" : "已关闭"}
                 </span>
                 {lastRouteAccount ? <span className="sr-only">最近路由到：{lastRouteAccount}</span> : null}
               </div>
             </div>
 
-            <div className="flex shrink-0 items-center gap-2">
+            <div aria-label="算力池操作" role="group" className="flex shrink-0 items-center gap-1 sm:gap-2">
+              {!mediaView && activePlatform === "codex" ? (
+                <button
+                  aria-label="配置 Codex 基线模型"
+                  className="grid h-6 w-6 shrink-0 place-items-center border border-stone-300 bg-white text-stone-700 motion-control hover:bg-stone-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-400"
+                  onClick={() => {
+                    saveBaselineModelsMutation.reset();
+                    setBaselineModelsDialogOpen(true);
+                  }}
+                  title="配置 Codex 基线模型"
+                  type="button"
+                >
+                  <Settings2 aria-hidden="true" className="h-3.5 w-3.5" />
+                </button>
+              ) : !mediaView && activePlatform !== "codex" ? (
+                <button
+                  aria-label="会话管理"
+                  className="grid h-6 w-6 shrink-0 place-items-center border border-stone-300 bg-white text-stone-700 motion-control hover:bg-stone-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-400"
+                  onClick={() => onOpenSessions?.(activePlatform)}
+                  title="会话管理"
+                  type="button"
+                >
+                  <MessageSquareText aria-hidden="true" className="h-3.5 w-3.5" />
+                </button>
+              ) : null}
               {routeServiceReady ? (
                 <button
                   aria-label="关闭算力池路由接入"
                   className="grid h-6 w-6 place-items-center border border-red-700 bg-red-600 text-white motion-control hover:bg-red-700 disabled:opacity-50"
                   disabled={startProxyMutation.isPending || stopProxyMutation.isPending}
                   onClick={() => stopProxyMutation.mutate()}
-                  title="关闭算力池路由接入；共享服务端口保持运行"
+                  title="停止 AI 服务并关闭算力池路由接入"
                   type="button"
                 >
                   <Square aria-hidden="true" className="h-3.5 w-3.5 fill-current" />
@@ -6538,15 +6569,15 @@ export function AccountsScreen({
                   onClick={() => startProxyMutation.mutate()}
                   title={
                     routeAccessEnabled
-                      ? "启动共享服务端口并恢复算力池路由"
-                      : "启用算力池路由接入；需要时自动启动共享服务端口"
+                      ? "启动 AI 服务并恢复算力池路由"
+                      : "启动 AI 服务并启用算力池路由接入"
                   }
                   type="button"
                 >
                   <Play aria-hidden="true" className="h-3.5 w-3.5 fill-current" />
                 </button>
               )}
-              <button
+              {!mediaView ? <button
                 aria-label="写入路由配置文件"
                 className={`relative grid h-6 w-6 place-items-center border bg-white motion-control hover:bg-stone-200 disabled:opacity-50 ${
                   configWriteStale
@@ -6571,14 +6602,14 @@ export function AccountsScreen({
                     className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-amber-500"
                   />
                 ) : null}
-              </button>
+              </button> : null}
               {configWriteStale ? (
                 <span className="shrink-0 text-[11px] font-semibold text-amber-700">
                   配置已变更，需重新写入
                 </span>
               ) : null}
               <div className="relative flex shrink-0" ref={modelTestMenuRef}>
-                <button
+              {!mediaView ? <button
                   aria-label="真实生成测试算力池路由"
                   className="grid h-6 w-6 place-items-center rounded-l-md border border-stone-300 border-r-0 bg-transparent text-sky-700 motion-control hover:bg-stone-100 disabled:opacity-50"
                   disabled={!modelTestEnabled || !hasEligiblePoolModelTestCredential || modelTestMutation.isPending}
@@ -6593,12 +6624,12 @@ export function AccountsScreen({
                   type="button"
                 >
                   <Send aria-hidden="true" className="h-3.5 w-3.5" />
-                </button>
+                </button> : null}
                 <button
                   aria-expanded={modelTestMenuOpen}
                   aria-haspopup="menu"
                   aria-label="打开算力池测试菜单"
-                  className="grid h-6 w-5 place-items-center rounded-r-md border border-stone-300 bg-transparent text-sky-700 motion-control hover:bg-stone-100"
+                  className={`grid h-6 w-5 place-items-center ${mediaView ? "rounded-md" : "rounded-r-md"} border border-stone-300 bg-transparent text-sky-700 motion-control hover:bg-stone-100`}
                   onClick={() => setModelTestMenuOpen((open) => !open)}
                   title="更多测试操作"
                   type="button"
@@ -6619,6 +6650,7 @@ export function AccountsScreen({
                   origin="top-right"
                   role="menu"
                 >
+                    {!mediaView ? <>
                     <button
                       aria-label="复制 curl 执行语句"
                       className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[12px] font-medium text-stone-700 motion-control hover:bg-stone-100"
@@ -6652,6 +6684,7 @@ export function AccountsScreen({
                       <Copy aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
                       复制 curl（CMD）
                     </button>
+                    </> : null}
                     <button
                       aria-label="查看模型列表"
                       className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[12px] font-medium text-stone-700 motion-control hover:bg-stone-100"
@@ -6678,347 +6711,7 @@ export function AccountsScreen({
                 </MotionMenu>
               </div>
             </div>
-          </div>
-          <div className={`flex min-w-0 flex-1 justify-end motion-control duration-300 max-[599px]:hidden ${toolbarAutoHidden ? "pointer-events-none -translate-y-3 opacity-0" : "translate-y-0 opacity-100"}`}>
-            {activePlatform === "codex" ? (
-              <button
-                aria-label="配置 Codex 基线模型"
-                className="grid h-7 w-7 shrink-0 place-items-center border border-stone-300 bg-white text-stone-700 motion-control hover:bg-stone-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-400"
-                onClick={() => {
-                  saveBaselineModelsMutation.reset();
-                  setBaselineModelsDialogOpen(true);
-                }}
-                title="配置 Codex 基线模型"
-                type="button"
-              >
-                <Settings2 aria-hidden="true" className="h-3.5 w-3.5" />
-              </button>
-            ) : (
-              <button
-                aria-label="会话管理"
-                className="grid h-7 w-7 shrink-0 place-items-center border border-stone-300 bg-white text-stone-700 motion-control hover:bg-stone-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-400"
-                onClick={() => onOpenSessions?.(activePlatform)}
-                title="会话管理"
-                type="button"
-              >
-                <MessageSquareText aria-hidden="true" className="h-3.5 w-3.5" />
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div
-          className="min-h-0 overflow-x-hidden overflow-y-auto overscroll-contain bg-transparent"
-          data-testid="account-workspace-scroll-region"
-          ref={accountScrollRef}
-        >
-        {/* The dialog stays open on failure and shows this same sentence, so
-            rendering it here too would duplicate it on screen. */}
-        {directModeMessage ? <p role="status" className="mx-4 mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-950">{directModeMessage}</p> : null}
-        {directModeError && !pendingDirectCredential ? <p role="alert" className="mx-4 mb-3 rounded-xl bg-red-50 px-3 py-2 text-[12px] text-red-700">{directModeError}</p> : null}
-        {modelTestMutation.isPending ? (
-          <div
-            aria-label="真实生成测试进行中"
-            aria-live="polite"
-            className="mx-4 mb-3 mt-3 rounded-xl border border-sky-200 bg-sky-50 px-3 py-3 text-[12px] text-sky-950"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="flex items-center gap-2 font-semibold">
-                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                  真实生成测试：正在请求中...
-                </p>
-                <p className="mt-1 text-[11px] opacity-80">
-                  {(modelTestAccount?.display_name ?? "算力池路由")}
-                  {routeTestModel.trim() ? ` · 模型 ${routeTestModel.trim()}` : " · 默认测试模型"}
-                </p>
-                <p className="mt-1 text-[11px] text-sky-800/80">
-                  请求已发出，等待上游响应；完成后会显示在此区域。
-                </p>
-              </div>
-              <span className="shrink-0 rounded-full bg-white/80 px-2 py-0.5 font-mono text-[11px] text-sky-800">
-                pending
-              </span>
-            </div>
-          </div>
-        ) : null}
-        {modelTestOutcome ? (
-          <div
-            aria-label="真实生成测试结果"
-            className={`mx-4 mb-3 mt-3 space-y-3 rounded-xl border px-3 py-2 text-[12px] ${
-              modelTestOutcome.success
-                ? "border-emerald-200 bg-emerald-50 text-emerald-950"
-                : "border-red-200 bg-red-50 text-red-950"
-            }`}
-            onMouseEnter={() => setModelTestAutoClosePaused(true)}
-            onMouseLeave={() => setModelTestAutoClosePaused(false)}
-          >
-            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <p className="font-semibold">
-                  真实生成测试：{modelTestOutcome.success ? "通过" : "失败"}
-                </p>
-                <p className="text-[11px] opacity-80">
-                  {modelTestOutcome.selected_account_name} · {interfaceFormatLabel(modelTestOutcome.interface_format)} · {modelTestTargetText(modelTestOutcome)}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                <p className="font-mono text-[11px]">{modelTestStatusLine(modelTestOutcome)}</p>
-                {modelTestAutoCloseCountdown}
-                <DismissButton
-                  ariaLabel="关闭真实生成测试结果"
-                  onClick={closeModelTestOutcome}
-                />
-              </div>
-            </div>
-
-            {modelTestOutcome.response_text ? (
-              <div>
-                <p className="font-semibold">模型输出</p>
-                <p className="mt-1 rounded-lg bg-white/80 px-2 py-1 font-mono text-[11px] text-stone-800">
-                  {modelTestOutcome.response_text}
-                </p>
-              </div>
-            ) : null}
-
-            {modelTestOutcome.via_route_proxy ? (
-              <div
-                aria-label="算力池请求链路"
-                className="rounded-lg bg-white/80 px-2 py-2 text-[11px] text-stone-800"
-              >
-                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                  <p className="font-semibold text-stone-700">算力池请求链路</p>
-                  {modelTestOutcome.route_proxy_trace_id ? (
-                    <p className="truncate font-mono text-[10px] text-stone-500">
-                      trace {modelTestOutcome.route_proxy_trace_id}
-                    </p>
-                  ) : null}
-                </div>
-                <div className="mt-2 grid gap-2 lg:grid-cols-3">
-                  {modelTestRouteChainItems(modelTestOutcome).map((item) => (
-                    <div
-                      className="min-w-0 rounded-md border border-stone-200/80 bg-white px-2 py-1.5"
-                      key={item.label}
-                    >
-                      <p className="text-[10px] font-semibold uppercase tracking-wide text-stone-400">
-                        {item.label}
-                      </p>
-                      <p className="mt-0.5 truncate font-mono text-[11px] text-stone-800" title={item.value}>
-                        {item.value}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            {modelTestOutcome.error_message ? (
-              <p className="rounded-lg bg-white/80 px-2 py-1 font-mono text-[11px] text-red-800">
-                {modelTestOutcome.error_message}
-              </p>
-            ) : null}
-
-            {looksLikeMissingScope(
-              modelTestOutcome.error_message,
-              modelTestOutcome.response_body,
-            ) ? (
-              <p
-                className="rounded-lg bg-amber-100/80 px-2 py-1.5 text-[11px] leading-5 text-amber-900"
-                data-testid="model-test-missing-scope-hint"
-              >
-                {MISSING_SCOPE_HINT}
-              </p>
-            ) : null}
-
-            <details className="rounded-lg bg-white/80 px-2 py-1">
-              <summary className="cursor-pointer font-semibold">查看输入输出</summary>
-              <div className="mt-2 grid gap-2 lg:grid-cols-2">
-                <div>
-                  <p className="mb-1 font-semibold text-stone-600">请求 JSON</p>
-                  <pre className="max-h-56 overflow-auto rounded-lg border border-stone-200 bg-white p-2 font-mono text-[11px] leading-relaxed text-stone-700">
-                    {prettyJsonOrText(modelTestOutcome.request_body_json)}
-                  </pre>
-                </div>
-                <div>
-                  <p className="mb-1 font-semibold text-stone-600">响应 Body</p>
-                  <pre className="max-h-56 overflow-auto rounded-lg border border-stone-200 bg-white p-2 font-mono text-[11px] leading-relaxed text-stone-700">
-                    {prettyJsonOrText(modelTestOutcome.response_body)}
-                  </pre>
-                </div>
-              </div>
-            </details>
-          </div>
-        ) : null}
-        {modelTestMutation.isError ? (
-          <div
-            className="mx-4 mb-3 flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-800"
-            onMouseEnter={() => setModelTestAutoClosePaused(true)}
-            onMouseLeave={() => setModelTestAutoClosePaused(false)}
-          >
-            <p>
-              真实生成测试失败：
-              {formatApiError(
-                modelTestMutation.error,
-                "请检查算力池账号和网络。",
-              )}
-            </p>
-            <div className="flex shrink-0 items-center gap-2">
-              {modelTestAutoCloseCountdown}
-              <DismissButton
-                ariaLabel="关闭真实生成测试错误"
-                onClick={closeModelTestOutcome}
-              />
-            </div>
-          </div>
-        ) : null}
-      <>
-          <motion.div
-            key={accountView}
-            className="account-view-motion min-h-full"
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
-          >
-      <section className="flex min-h-full flex-col border-t border-stone-300/80 bg-transparent pt-2">
-        <div className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-2 border-y border-stone-300/80 bg-stone-100/90 px-2 py-1.5 backdrop-blur-sm">
-          <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <span className="shrink-0 text-[12px] font-semibold text-stone-600 max-[599px]:hidden">筛选：</span>
-              <div className="relative w-72 max-w-full flex-none" ref={accountFilterMenuRef}>
-                <div
-                  className="flex min-h-8 w-full min-w-0 flex-wrap items-center gap-1.5 rounded-md border border-stone-300 bg-white px-2 py-1"
-                  onClick={() => setAccountFilterMenuOpen(true)}
-                >
-                  {accountFilters.length === 0 ? (
-                    <span className="px-1 text-[12px] text-stone-400">选择批量名或单账号</span>
-                  ) : (
-                    accountFilters.map((filterKey) => (
-                      <span
-                        className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-800"
-                        key={filterKey}
-                      >
-                        {accountFilterLabels.get(filterKey) ?? credentialBatchFilterLabel(filterKey)}
-                        <button
-                          aria-label={`移除筛选 ${accountFilterLabels.get(filterKey) ?? credentialBatchFilterLabel(filterKey)}`}
-                            className="p-0.5 text-blue-700 motion-control hover:bg-blue-100"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            removeAccountFilter(filterKey);
-                          }}
-                          type="button"
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </span>
-                    ))
-                  )}
-                  <button
-                    aria-label="打开账号筛选"
-                    className="ml-auto inline-flex items-center gap-1 px-1.5 py-1 text-[12px] font-semibold text-stone-600 motion-control hover:bg-stone-50"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setAccountFilterMenuOpen((open) => !open);
-                    }}
-                    type="button"
-                  >
-                    <ChevronDown className={`h-3.5 w-3.5 motion-control ${accountFilterMenuOpen ? "rotate-180" : ""}`} />
-                  </button>
-                </div>
-                <MotionMenu
-                  ariaLabel="账号筛选"
-                  className="absolute left-0 right-0 z-20 mt-1 max-h-56 overflow-auto rounded-xl border border-stone-300 bg-white p-1 shadow-lg"
-                  open={accountFilterMenuOpen}
-                  origin="top-left"
-                  role="menu"
-                >
-                    {accountFilterOptions.length === 0 ? (
-                      <p className="px-2 py-2 text-[12px] text-stone-500">暂无可筛选项</p>
-                    ) : (
-                      accountFilterOptions.map((option) => {
-                        const checked = accountFilters.includes(option);
-                        return (
-                          <button
-                            aria-label={`筛选 ${accountFilterLabels.get(option) ?? credentialBatchFilterLabel(option)}`}
-                            className={`flex w-full items-center justify-between rounded-sm px-2.5 py-1.5 text-left text-[12px] font-semibold motion-control ${
-                              checked ? "bg-blue-50 text-blue-800" : "text-stone-700 hover:bg-stone-50"
-                            }`}
-                            key={option}
-                            onClick={() => toggleAccountFilter(option)}
-                            type="button"
-                          >
-                            <span>{accountFilterLabels.get(option) ?? credentialBatchFilterLabel(option)}</span>
-                            {checked ? <Check className="h-3.5 w-3.5" /> : null}
-                          </button>
-                        );
-                      })
-                    )}
-                    {accountFilters.length > 0 && (
-                      <button
-                        aria-label="清空账号筛选"
-                        className="mt-1 w-full rounded-sm border border-stone-300 px-2.5 py-1.5 text-[12px] font-semibold text-stone-600 motion-control hover:bg-stone-50"
-                        onClick={() => { setAccountFilters([]); setAccountPage(1); }}
-                        type="button"
-                      >
-                        清空筛选
-                      </button>
-                    )}
-                </MotionMenu>
-              </div>
-              {!mediaView && (
-                <div
-                  aria-label="账号来源筛选"
-                  className="flex h-8 min-w-0 shrink-0 items-center gap-0.5 overflow-x-auto rounded-lg border border-stone-300 bg-white p-0.5 shadow-sm"
-                  role="group"
-                >
-                  {accountSourceFilters.map((item) => {
-                    const active = item.kind === null
-                      ? !accountKindFilter && !accountProviderFilter
-                      : effectiveKindFilter === item.kind && accountProviderFilter === item.provider;
-                    return (
-                      <button
-                        aria-label={`账号来源筛选 ${item.label}`}
-                        aria-pressed={active}
-                        className={`inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[12px] font-semibold motion-control ${
-                          active ? "bg-stone-900 text-white" : "text-stone-600 hover:bg-stone-100"
-                        }`}
-                        key={item.key}
-                        onClick={() => {
-                          if (!active && item.kind !== null) {
-                            setAccountKindFilter(item.kind);
-                            setAccountProviderFilter(item.provider);
-                          } else {
-                            setAccountKindFilter("");
-                            setAccountProviderFilter("");
-                          }
-                          setAccountPage(1);
-                        }}
-                        title={item.label}
-                        type="button"
-                      >
-                        {sourceFilterIcons[item.key]}
-                        {item.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-              {mediaView && (
-                <select
-                  aria-label="账号来源筛选"
-                  className="h-8 shrink-0 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-semibold text-stone-700 motion-control"
-                  onChange={(event) => { setAccountProviderFilter(event.target.value); setAccountPage(1); }}
-                  value={accountProviderFilter}
-                >
-                  <option value="">全部来源</option>
-                  {apiAccountProviders.map((item) => (
-                    <option key={`api-${item.value}`} value={item.value}>{item.label}</option>
-                  ))}
-                </select>
-              )}
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
+            {!vectorView ? <div aria-label="账号列表操作" role="group" className="flex shrink-0 items-center gap-1.5 justify-self-end border-l border-stone-300/80 pl-2 sm:gap-2 sm:pl-3">
             <div
               aria-label="账号展示模式"
               className="flex h-7 shrink-0 items-center gap-0.5 rounded-lg border border-stone-300 bg-white p-0.5 shadow-sm"
@@ -7219,6 +6912,306 @@ export function AccountsScreen({
                   </button>
               </MotionMenu>
             </div>
+            </div> : <div aria-hidden="true" />}
+          </div>
+        </div>
+        {mediaModality ? <ModalityAccessPanel modality={mediaModality} /> : null}
+
+        <div
+          className="min-h-0 overflow-x-hidden overflow-y-auto overscroll-contain bg-transparent"
+          data-testid="account-workspace-scroll-region"
+          ref={accountScrollRef}
+        >
+        {proxyOperationError ? (
+          <div className="m-3">
+            <NativeErrorNotice
+              title={proxyOperationError.operation === "start" ? "启动算力池失败" : "停止算力池失败"}
+              error={proxyOperationError.error}
+              retryLabel={proxyOperationError.operation === "start" ? "重试启动算力池" : "重试停止算力池"}
+              retrying={startProxyMutation.isPending || stopProxyMutation.isPending}
+              onRetry={() => proxyOperationError.operation === "start" ? startProxyMutation.mutate() : stopProxyMutation.mutate()}
+            />
+          </div>
+        ) : null}
+        {routeProxyQuery.error ? (
+          <div className="m-3"><NativeErrorNotice title="读取 AI 服务状态失败" error={routeProxyQuery.error} retryLabel="重试读取服务状态" retrying={routeProxyQuery.isFetching} onRetry={() => void routeProxyQuery.refetch()} /></div>
+        ) : null}
+        {!vectorView ? <>
+        {/* The dialog stays open on failure and shows this same sentence, so
+            rendering it here too would duplicate it on screen. */}
+        {directModeMessage ? <p role="status" className="mx-4 mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-950">{directModeMessage}</p> : null}
+        {directModeError && !pendingDirectCredential ? <p role="alert" className="mx-4 mb-3 rounded-xl bg-red-50 px-3 py-2 text-[12px] text-red-700">{directModeError}</p> : null}
+        {modelTestMutation.isPending ? (
+          <div
+            aria-label="真实生成测试进行中"
+            aria-live="polite"
+            className="mx-4 mb-3 mt-3 rounded-xl border border-sky-200 bg-sky-50 px-3 py-3 text-[12px] text-sky-950"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="flex items-center gap-2 font-semibold">
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  真实生成测试：正在请求中...
+                </p>
+                <p className="mt-1 text-[11px] opacity-80">
+                  {(modelTestAccount?.display_name ?? "算力池路由")}
+                  {routeTestModel.trim() ? ` · 模型 ${routeTestModel.trim()}` : " · 默认测试模型"}
+                </p>
+                <p className="mt-1 text-[11px] text-sky-800/80">
+                  请求已发出，等待上游响应；完成后会显示在此区域。
+                </p>
+              </div>
+              <span className="shrink-0 rounded-full bg-white/80 px-2 py-0.5 font-mono text-[11px] text-sky-800">
+                pending
+              </span>
+            </div>
+          </div>
+        ) : null}
+        {modelTestOutcome ? (
+          <div
+            aria-label="真实生成测试结果"
+            className={`mx-4 mb-3 mt-3 space-y-3 rounded-xl border px-3 py-2 text-[12px] ${
+              modelTestOutcome.success
+                ? "border-emerald-200 bg-emerald-50 text-emerald-950"
+                : "border-red-200 bg-red-50 text-red-950"
+            }`}
+            onMouseEnter={() => setModelTestAutoClosePaused(true)}
+            onMouseLeave={() => setModelTestAutoClosePaused(false)}
+          >
+            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="font-semibold">
+                  真实生成测试：{modelTestOutcome.success ? "通过" : "失败"}
+                </p>
+                <p className="text-[11px] opacity-80">
+                  {modelTestOutcome.selected_account_name} · {interfaceFormatLabel(modelTestOutcome.interface_format)} · {modelTestTargetText(modelTestOutcome)}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <p className="font-mono text-[11px]">{modelTestStatusLine(modelTestOutcome)}</p>
+                {modelTestAutoCloseCountdown}
+                <DismissButton
+                  ariaLabel="关闭真实生成测试结果"
+                  onClick={closeModelTestOutcome}
+                />
+              </div>
+            </div>
+
+            {modelTestOutcome.response_text ? (
+              <div>
+                <p className="font-semibold">模型输出</p>
+                <p className="mt-1 rounded-lg bg-white/80 px-2 py-1 font-mono text-[11px] text-stone-800">
+                  {modelTestOutcome.response_text}
+                </p>
+              </div>
+            ) : null}
+
+            {modelTestOutcome.via_route_proxy ? (
+              <div
+                aria-label="算力池请求链路"
+                className="rounded-lg bg-white/80 px-2 py-2 text-[11px] text-stone-800"
+              >
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="font-semibold text-stone-700">算力池请求链路</p>
+                  {modelTestOutcome.route_proxy_trace_id ? (
+                    <p className="truncate font-mono text-[10px] text-stone-500">
+                      trace {modelTestOutcome.route_proxy_trace_id}
+                    </p>
+                  ) : null}
+                </div>
+                <div className="mt-2 grid gap-2 lg:grid-cols-3">
+                  {modelTestRouteChainItems(modelTestOutcome).map((item) => (
+                    <div
+                      className="min-w-0 rounded-md border border-stone-200/80 bg-white px-2 py-1.5"
+                      key={item.label}
+                    >
+                      <p className="text-[10px] font-semibold uppercase tracking-wide text-stone-400">
+                        {item.label}
+                      </p>
+                      <p className="mt-0.5 truncate font-mono text-[11px] text-stone-800" title={item.value}>
+                        {item.value}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {modelTestOutcome.error_message ? (
+              <p className="rounded-lg bg-white/80 px-2 py-1 font-mono text-[11px] text-red-800">
+                {modelTestOutcome.error_message}
+              </p>
+            ) : null}
+
+            {looksLikeMissingScope(
+              modelTestOutcome.error_message,
+              modelTestOutcome.response_body,
+            ) ? (
+              <p
+                className="rounded-lg bg-amber-100/80 px-2 py-1.5 text-[11px] leading-5 text-amber-900"
+                data-testid="model-test-missing-scope-hint"
+              >
+                {MISSING_SCOPE_HINT}
+              </p>
+            ) : null}
+
+            <details className="rounded-lg bg-white/80 px-2 py-1">
+              <summary className="cursor-pointer font-semibold">查看输入输出</summary>
+              <div className="mt-2 grid gap-2 lg:grid-cols-2">
+                <div>
+                  <p className="mb-1 font-semibold text-stone-600">请求 JSON</p>
+                  <pre className="max-h-56 overflow-auto rounded-lg border border-stone-200 bg-white p-2 font-mono text-[11px] leading-relaxed text-stone-700">
+                    {prettyJsonOrText(modelTestOutcome.request_body_json)}
+                  </pre>
+                </div>
+                <div>
+                  <p className="mb-1 font-semibold text-stone-600">响应 Body</p>
+                  <pre className="max-h-56 overflow-auto rounded-lg border border-stone-200 bg-white p-2 font-mono text-[11px] leading-relaxed text-stone-700">
+                    {prettyJsonOrText(modelTestOutcome.response_body)}
+                  </pre>
+                </div>
+              </div>
+            </details>
+          </div>
+        ) : null}
+        {modelTestMutation.isError ? (
+          <div
+            className="mx-4 mb-3 flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-800"
+            onMouseEnter={() => setModelTestAutoClosePaused(true)}
+            onMouseLeave={() => setModelTestAutoClosePaused(false)}
+          >
+            <p>
+              真实生成测试失败：
+              {formatApiError(
+                modelTestMutation.error,
+                "请检查算力池账号和网络。",
+              )}
+            </p>
+            <div className="flex shrink-0 items-center gap-2">
+              {modelTestAutoCloseCountdown}
+              <DismissButton
+                ariaLabel="关闭真实生成测试错误"
+                onClick={closeModelTestOutcome}
+              />
+            </div>
+          </div>
+        ) : null}
+      <>
+          <motion.div
+            key={accountView}
+            className="account-view-motion min-h-full"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+          >
+      <section className="flex min-h-full flex-col border-t border-stone-300/80 bg-transparent pt-2">
+        <div className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-2 border-y border-stone-300/80 bg-stone-100/90 px-2 py-1.5 backdrop-blur-sm">
+          <div className="min-w-0 flex-1">
+            <div aria-label="账号筛选条件" className="flex min-w-0 items-center justify-end gap-2" role="group">
+              <span className="shrink-0 text-[12px] font-semibold text-stone-600 max-[599px]:hidden">筛选：</span>
+              <div className="relative w-72 min-w-0 shrink" ref={accountFilterMenuRef}>
+                <div
+                  className="flex min-h-8 w-full min-w-0 flex-wrap items-center gap-1.5 rounded-md border border-stone-300 bg-white px-2 py-1"
+                  onClick={() => setAccountFilterMenuOpen(true)}
+                >
+                  {accountFilters.length === 0 ? (
+                    <span className="px-1 text-[12px] text-stone-400">选择批量名或单账号</span>
+                  ) : (
+                    accountFilters.map((filterKey) => (
+                      <span
+                        className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-800"
+                        key={filterKey}
+                      >
+                        {accountFilterLabels.get(filterKey) ?? credentialBatchFilterLabel(filterKey)}
+                        <button
+                          aria-label={`移除筛选 ${accountFilterLabels.get(filterKey) ?? credentialBatchFilterLabel(filterKey)}`}
+                            className="p-0.5 text-blue-700 motion-control hover:bg-blue-100"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            removeAccountFilter(filterKey);
+                          }}
+                          type="button"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))
+                  )}
+                  <button
+                    aria-label="打开账号筛选"
+                    className="ml-auto inline-flex items-center gap-1 px-1.5 py-1 text-[12px] font-semibold text-stone-600 motion-control hover:bg-stone-50"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setAccountFilterMenuOpen((open) => !open);
+                    }}
+                    type="button"
+                  >
+                    <ChevronDown className={`h-3.5 w-3.5 motion-control ${accountFilterMenuOpen ? "rotate-180" : ""}`} />
+                  </button>
+                </div>
+                <MotionMenu
+                  ariaLabel="账号筛选"
+                  className="absolute left-0 right-0 z-20 mt-1 max-h-56 overflow-auto rounded-xl border border-stone-300 bg-white p-1 shadow-lg"
+                  open={accountFilterMenuOpen}
+                  origin="top-left"
+                  role="menu"
+                >
+                    {accountFilterOptions.length === 0 ? (
+                      <p className="px-2 py-2 text-[12px] text-stone-500">暂无可筛选项</p>
+                    ) : (
+                      accountFilterOptions.map((option) => {
+                        const checked = accountFilters.includes(option);
+                        return (
+                          <button
+                            aria-label={`筛选 ${accountFilterLabels.get(option) ?? credentialBatchFilterLabel(option)}`}
+                            className={`flex w-full items-center justify-between rounded-sm px-2.5 py-1.5 text-left text-[12px] font-semibold motion-control ${
+                              checked ? "bg-blue-50 text-blue-800" : "text-stone-700 hover:bg-stone-50"
+                            }`}
+                            key={option}
+                            onClick={() => toggleAccountFilter(option)}
+                            type="button"
+                          >
+                            <span>{accountFilterLabels.get(option) ?? credentialBatchFilterLabel(option)}</span>
+                            {checked ? <Check className="h-3.5 w-3.5" /> : null}
+                          </button>
+                        );
+                      })
+                    )}
+                    {accountFilters.length > 0 && (
+                      <button
+                        aria-label="清空账号筛选"
+                        className="mt-1 w-full rounded-sm border border-stone-300 px-2.5 py-1.5 text-[12px] font-semibold text-stone-600 motion-control hover:bg-stone-50"
+                        onClick={() => { setAccountFilters([]); setAccountPage(1); }}
+                        type="button"
+                      >
+                        清空筛选
+                      </button>
+                    )}
+                </MotionMenu>
+              </div>
+              {!mediaView && (
+                <AccountSourceFilterBar
+                  items={accountSourceFilters}
+                  icons={sourceFilterIcons}
+                  activeKey={activeSourceFilterKey}
+                  onSelect={selectSourceFilter}
+                />
+              )}
+              {mediaView && (
+                <select
+                  aria-label="账号来源筛选"
+                  className="h-8 shrink-0 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-semibold text-stone-700 motion-control"
+                  onChange={(event) => { setAccountProviderFilter(event.target.value); setAccountPage(1); }}
+                  value={accountProviderFilter}
+                >
+                  <option value="">全部来源</option>
+                  {apiAccountProviders.map((item) => (
+                    <option key={`api-${item.value}`} value={item.value}>{item.label}</option>
+                  ))}
+                </select>
+              )}
+            </div>
           </div>
         </div>
 
@@ -7315,8 +7308,8 @@ export function AccountsScreen({
             </div>
           )}
           {credentialsQuery.isLoading && <p className="rounded-xl bg-stone-50 p-4 text-sm text-stone-500">正在加载账号...</p>}
-          {credentialsQuery.error && <p className="rounded-xl bg-red-50 p-4 text-sm text-red-700">账号加载失败。</p>}
-          {!credentialsQuery.isLoading && credentials.length === 0 && (
+          {credentialsQuery.error ? <NativeErrorNotice title="账号加载失败" error={credentialsQuery.error} retryLabel="重试加载账号" retrying={credentialsQuery.isFetching} onRetry={() => void credentialsQuery.refetch()} /> : null}
+          {!credentialsQuery.isLoading && !credentialsQuery.error && credentials.length === 0 && (
             <div
               className="flex min-h-0 flex-1 items-center justify-center rounded-xl border border-dashed border-stone-300 bg-stone-50 p-6 text-center text-sm text-stone-500"
               data-testid="account-empty-state"
@@ -7521,7 +7514,7 @@ export function AccountsScreen({
                         <Copy aria-hidden="true" className="h-3.5 w-3.5" />
                       ),
                   });
-                  if (!credential.archived_at) {
+                  if (!mediaView && !credential.archived_at) {
                     const isTesting = testingAccountId === credential.id && modelTestMutation.isPending;
                     rowActions.push({
                       key: "test",
@@ -8221,6 +8214,7 @@ export function AccountsScreen({
       </section>
           </motion.div>
       </>
+        </> : null}
 
         </div>
         <footer
@@ -9163,6 +9157,9 @@ export function AccountsScreen({
                 {createTab === "basic" ? (
                   <>
                     <PresetFields
+                      capabilityFilter={capabilityFilter}
+                      modelMappings={apiMappings}
+                      interfaceFormat={apiInterfaceFormat}
                       baseUrl={apiBaseUrl}
                       fieldClass={fieldClass}
                       idPrefix="创建"
@@ -9171,7 +9168,7 @@ export function AccountsScreen({
                         setApiBaseUrl(preset.baseUrl);
                         setApiBaseUrlAdjustment(null);
                         setApiInterfaceFormat(preset.interfaceFormat);
-                        setApiMappings(preset.modelMappings.map((mapping) => ({ ...mapping })));
+                        setApiMappings(mappingsWithMediaCapability(preset.modelMappings.map((mapping) => ({ ...mapping })), capabilityFilter));
                         setApiName((current) => (current.trim() ? current : preset.defaultName));
                         setApiFetchedModels([]);
                         setApiFetchModelsError(null);
@@ -9292,11 +9289,17 @@ export function AccountsScreen({
                         >
                           {interfaceFormatsForPlatform(activePlatform, capabilityFilter).map((format) => (
                             <option key={format} value={format}>
-                              {interfaceFormatLabel(format)}
+                              {interfaceFormatLabel(format, capabilityFilter)}
                             </option>
                           ))}
                         </select>
                       </label>
+                    ) : null}
+                    {capabilityFilter === IMAGE_CAPABILITY ? (
+                      <div className="rounded-xl border border-stone-200 bg-stone-50 p-3">
+                        <EndpointRow label="图片上游端点" value={imageUpstreamEndpoint(apiBaseUrl, apiInterfaceFormat, apiMappings.find((mapping) => mapping.to.trim())?.to ?? "")} />
+                        <p className="mt-2 text-[11px] leading-5 text-stone-500">POST 到该图片接口；Base URL 填服务根路径，模型填写该服务的图片 Model ID 或 Endpoint ID。Google 使用 Gemini 生图，不是 Imagen predict；OpenAI 预设使用 API Key，不是 ChatGPT 登录令牌。</p>
+                      </div>
                     ) : null}
                     <BaseUrlAdjustmentNotice adjustment={apiBaseUrlAdjustment} />
                     {isAnthropicInterfaceFormat(apiInterfaceFormat) ? (
@@ -9350,11 +9353,13 @@ export function AccountsScreen({
                       onChange={setApiUserAgent}
                       value={apiUserAgent}
                     />
+                    {!mediaView ? <>
                     <RequestCompressionOption mode={apiRequestCompressionMode} baseUrl={apiBaseUrl} onChange={setApiRequestCompressionMode} />
                     <ContentRejectionCompatOption
                       checked={apiContentRejectionCompat}
                       onChange={setApiContentRejectionCompat}
                     />
+                    </> : null}
                     <RelayBalanceFields
                       allowCustom={false}
                       fieldClass={fieldClass}
@@ -9365,7 +9370,7 @@ export function AccountsScreen({
                       onChange={setApiRelayBalance}
                       value={apiRelayBalance}
                     />
-                    {shouldShowResponsesCustomToolCompatForFormat(activePlatform, apiInterfaceFormat) ? (
+                    {!mediaView && shouldShowResponsesCustomToolCompatForFormat(activePlatform, apiInterfaceFormat) ? (
                       <label className="flex items-start gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12px] font-medium text-stone-700">
                         <input
                           aria-label="兼容 custom 工具（Responses 中转）"
@@ -9382,10 +9387,10 @@ export function AccountsScreen({
                         </span>
                       </label>
                     ) : null}
-                    {shouldShowResponsesCustomToolCompatForFormat(activePlatform, apiInterfaceFormat) ? (
+                    {!mediaView && shouldShowResponsesCustomToolCompatForFormat(activePlatform, apiInterfaceFormat) ? (
                       <ResponsesPlaintextReasoningOption mode={apiPlaintextReasoningMode} baseUrl={apiBaseUrl} onChange={setApiPlaintextReasoningMode} />
                     ) : null}
-                    {shouldShowResponsesCustomToolCompatForFormat(activePlatform, apiInterfaceFormat) ? (
+                    {!mediaView && shouldShowResponsesCustomToolCompatForFormat(activePlatform, apiInterfaceFormat) ? (
                       <ResponsesEncryptedContentCleanupOption
                         aggressiveStrip={apiResponsesEncryptedContentAggressiveStrip}
                         checked={apiResponsesEncryptedContentCleanup}
@@ -9393,7 +9398,7 @@ export function AccountsScreen({
                         onChange={setApiResponsesEncryptedContentCleanup}
                       />
                     ) : null}
-                    {shouldShowForceReasoningContentForFormat(activePlatform, apiInterfaceFormat) ? (
+                    {!mediaView && shouldShowForceReasoningContentForFormat(activePlatform, apiInterfaceFormat) ? (
                       <label className="flex items-start gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12px] font-medium text-stone-700">
                         <input
                           aria-label="强制回传推理内容（Chat 中转）"
@@ -10229,6 +10234,24 @@ export function AccountsScreen({
                       ))}
                     </select>
                   </label>
+                  {capabilityFilter === IMAGE_CAPABILITY ? <PresetFields
+                    capabilityFilter={capabilityFilter}
+                    modelMappings={editModelMappings}
+                    interfaceFormat={editApiInterfaceFormat}
+                    baseUrl={editApiBaseUrl}
+                    fieldClass={fieldClass}
+                    idPrefix="编辑"
+                    labelClass={labelClass}
+                    platform={activePlatform}
+                    onApply={(preset) => {
+                      setEditApiBaseUrl(preset.baseUrl);
+                      setEditApiBaseUrlAdjustment(null);
+                      setEditApiInterfaceFormat(preset.interfaceFormat);
+                      setEditModelMappings(mappingsWithMediaCapability(preset.modelMappings.map((mapping) => ({ ...mapping })), capabilityFilter));
+                      setEditFetchedModels([]);
+                      setEditFetchModelsError(null);
+                    }}
+                  /> : null}
                   <label className={labelClass}>
                     编辑 Base URL
                     <input
@@ -10274,11 +10297,17 @@ export function AccountsScreen({
                           ...interfaceFormatsForPlatform(activePlatform, capabilityFilter),
                         ].map((format) => (
                           <option key={format} value={format}>
-                            {interfaceFormatLabel(format)}
+                            {interfaceFormatLabel(format, capabilityFilter)}
                           </option>
                         ))}
                       </select>
                     </label>
+                  ) : null}
+                  {capabilityFilter === IMAGE_CAPABILITY ? (
+                    <div className="rounded-xl border border-stone-200 bg-stone-50 p-3">
+                      <EndpointRow label="编辑图片上游端点" value={imageUpstreamEndpoint(editApiBaseUrl, editApiInterfaceFormat, editModelMappings.find((mapping) => mapping.to.trim())?.to ?? "")} />
+                      <p className="mt-2 text-[11px] leading-5 text-stone-500">POST 到该图片接口；模型填写服务实际开放的图片 Model ID 或 Endpoint ID，其他模态的设置不在这里修改。</p>
+                    </div>
                   ) : null}
                   <BaseUrlAdjustmentNotice adjustment={editApiBaseUrlAdjustment} />
                   {isAnthropicInterfaceFormat(editApiInterfaceFormat) ? (
@@ -10334,6 +10363,7 @@ export function AccountsScreen({
               ) : null}
               {editTab === "advanced" && editingCredential.kind === "api" ? (
                 <>
+                  {!mediaView ? <>
                   <RequestCompressionOption mode={editRequestCompressionMode} baseUrl={editApiBaseUrl} onChange={setEditRequestCompressionMode} />
                   <ContentRejectionCompatOption
                     checked={editContentRejectionCompat}
@@ -10437,6 +10467,7 @@ export function AccountsScreen({
                       ) : null}
                     </div>
                   ) : null}
+                  </> : null}
                   <div className="grid gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2">
                     <RelayBalanceFields
                       fieldClass={fieldClass}

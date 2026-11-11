@@ -6760,6 +6760,9 @@ fn build_api_upstream_request(
     // converted a Responses request into `messages` or `contents`, so a reminder
     // written any earlier would land in the wrong shape.
     let mut rewritten_body = rewritten_body;
+    if dialect == ApiDialect::OpenAi && matches!(upstream_path.as_str(), "/images/generations" | "/v1/images/generations") {
+        rewritten_body = crate::imagegen::protocol::normalize_images_request_for_upstream(base_url, &rewritten_body)?;
+    }
     // 目标账号专属的出站适配：切到 Chat/Anthropic/Gemini 不经过此分支，
     // 客户端传入的历史字节从未修改，密文清理由下方独立开关控制。
     if bridge_kind == Some(ProtocolBridgeKind::ResponsesToResponses)
@@ -9364,10 +9367,15 @@ fn upstream_path_for_base(base_url: &str, path: &str) -> String {
         base_last_segment.is_some_and(|segment| segment.eq_ignore_ascii_case(first_segment));
     let should_strip_codex_proxy_version =
         first_segment.eq_ignore_ascii_case("v1") && is_codex_backend_base_url(base_url);
+    // Image-compatible versioned APIs such as Ark /api/v3 already select their
+    // API version in the base; the incoming OpenAI /v1 is not a second version.
+    let should_strip_image_version = first_segment.eq_ignore_ascii_case("v1")
+        && matches!(path, "/v1/images/generations" | "/v1/images/edits")
+        && base_last_segment.is_some_and(is_version_path_segment);
 
     if should_strip_duplicate_version {
         strip_leading_matching_path_segments(path, first_segment)
-    } else if should_strip_codex_proxy_version {
+    } else if should_strip_codex_proxy_version || should_strip_image_version {
         strip_first_path_segment(path)
     } else {
         path.to_string()
@@ -15406,6 +15414,48 @@ mod tests {
         .expect_err("partial platforms do not support official routing");
 
         assert!(error.contains("capability.unavailable"));
+    }
+
+    #[test]
+    fn seedream_images_use_the_ark_v3_endpoint_and_image_only_parameters() {
+        let credential = api_credential_with_config("seedream", &json!({
+            "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+            "interface_format": "openai",
+            "model_mappings": [{"from":"local-image","to":"doubao-seedream-4-0-250828","capabilities":["image.generate"]}]
+        }).to_string());
+        let (url, headers, body) = build_upstream_request(
+            &credential, "codex", "/v1/images/generations", None, HeaderMap::new(),
+            br#"{"model":"local-image","prompt":"a cat","n":2,"size":"2K","quality":"high","response_format":"b64_json"}"#,
+        ).unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(url, "https://ark.cn-beijing.volces.com/api/v3/images/generations");
+        assert_eq!(headers["authorization"], "Bearer sk-test");
+        assert_eq!(body["model"], "doubao-seedream-4-0-250828");
+        assert_eq!(body["size"], "2K");
+        assert_eq!(body["response_format"], "b64_json");
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["sequential_image_generation"], "auto");
+        assert_eq!(body["sequential_image_generation_options"]["max_images"], 2);
+        assert!(body.get("n").is_none());
+        assert!(body.get("quality").is_none());
+    }
+
+    #[test]
+    fn gpt_image_requests_do_not_forward_the_unsupported_response_format_parameter() {
+        let credential = api_credential_with_config("gpt-image", &json!({
+            "base_url": "https://api.openai.com/v1", "interface_format": "openai",
+            "model_mappings": [{"from":"local-image","to":"gpt-image-1","capabilities":["image.generate"]}]
+        }).to_string());
+        let (url, _, body) = build_upstream_request(
+            &credential, "codex", "/v1/images/generations", None, HeaderMap::new(),
+            br#"{"model":"local-image","prompt":"a cat","n":1,"size":"1024x1024","quality":"high","response_format":"b64_json"}"#,
+        ).unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(url, "https://api.openai.com/v1/images/generations");
+        assert_eq!(body["model"], "gpt-image-1");
+        assert_eq!(body["n"], 1);
+        assert_eq!(body["quality"], "high");
+        assert!(body.get("response_format").is_none());
     }
 
     #[test]

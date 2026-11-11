@@ -254,8 +254,7 @@ export function App() {
                       <CodexChannelsScreen
                         hideSegmentTabs
                         modality={accountModality}
-                        imageGenerationEnabled={imageGenerationEnabled}
-                        onOpenImageStudio={() => navigate("ImageGen")}
+                        onOpenClientSetup={(platform, clientKey) => openClientSetup({ platform, clientKey })}
                         onOpenSessions={openSessions}
                         onPoolScopeFocusConsumed={handlePoolScopeFocusConsumed}
                         onProviderFilterFocusConsumed={handleProviderFilterFocusConsumed}

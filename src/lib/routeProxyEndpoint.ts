@@ -31,12 +31,18 @@ export function routeProxyEndpointForPlatform(baseUrl: string, platform: string)
  * 已经带 `/v1`（客户端自己接 `/responses`），gemini 的是裸的（客户端自己接
  * `/v1beta/...`），同一个绝对路径因此要接在两段不同的位置上。
  */
+export const DEFAULT_ROUTE_PROXY_BASE_URL = "http://127.0.0.1:43111";
+
+/** Join a native listener address with an absolute API path without doubling /v1. */
+export function routeProxyApiEndpoint(baseUrl: string, apiPath: string): string {
+  const trimmed = baseUrl.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  const path = apiPath.startsWith("/") ? apiPath : `/${apiPath}`;
+  return /\/v1$/i.test(trimmed) && path.startsWith("/v1/")
+    ? `${trimmed}${path.slice(3)}`
+    : `${trimmed}${path}`;
+}
+
 export function imageGenerationEndpoint(poolBaseUrl: string, platform: string): string {
-  const endpoint = routeProxyEndpointForPlatform(poolBaseUrl, platform);
-  if (!endpoint) {
-    return "";
-  }
-  return /\/v1$/i.test(endpoint)
-    ? `${endpoint}/images/generations`
-    : `${endpoint}/v1/images/generations`;
+  return routeProxyApiEndpoint(routeProxyEndpointForPlatform(poolBaseUrl, platform), "/v1/images/generations");
 }
