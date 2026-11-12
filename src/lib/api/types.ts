@@ -20,6 +20,17 @@ export type AccountStatus = "ok" | "warning" | "error" | "revoked" | "paused";
 
 export type RouteCredentialKind = "official" | "api";
 
+/** 可重试的失败类别。硬判定错误（额度/权限/内容/参数/401/403）不在此列。 */
+export type RouteRetryClassKey =
+  | "transport"
+  | "server_error"
+  | "rate_limit"
+  | "capacity"
+  | "semantic";
+
+/** null / 字段缺失 = 跟随通用「额外重试次数」。 */
+export type RouteRetryClassLimits = Record<RouteRetryClassKey, number | null>;
+
 export type RouteCredentialFailurePolicy = {
   retry_count: number;
   retry_interval_ms: number;
@@ -33,6 +44,23 @@ export type RouteCredentialFailurePolicy = {
   stream_continue_max: number;
   /** 重试/续写都失败后，是否切到池内其它账号（仅聚合模式有效）。 */
   failover_enabled: boolean;
+  /** 按错误类别单独设置额外重试次数；null 表示跟随 retry_count。 */
+  retry_class_limits: RouteRetryClassLimits;
+  /** 容量不足类专用重试间隔（毫秒）；0 表示跟随 retry_interval_ms。 */
+  capacity_retry_interval_ms: number;
+  /** 整次请求重试总时长上限（秒）；0 表示只按次数限制。 */
+  max_retry_elapsed_seconds: number;
+  /**
+   * 流式响应开头只有零输出建流帧时，最多扣住多久等后续帧（毫秒）。
+   * 0 表示收到建流帧立即提交、不再等待失败帧。
+   */
+  stream_prelude_wait_ms: number;
+  /**
+   * 已经输出正文后，上游才在 SSE 流里报容量不足 / 限流 / 5xx 时，是否扣住
+   * 失败帧并复用续写管线把同一条响应接完。默认关闭；额度、内容审核、
+   * 上下文超长等硬判决永远不进入这条路径。
+   */
+  stream_salvage_enabled: boolean;
 };
 
 export type PlatformId =
@@ -369,6 +397,7 @@ export type CreateApiRouteCredentialInput = {
   responses_plaintext_reasoning_compat?: "auto" | "on" | "off" | null;
   request_brotli_compression?: "auto" | "on" | "off" | null;
   responses_encrypted_content_cleanup?: boolean | null;
+  responses_cross_resource_strip?: "auto" | "on" | "off" | null;
   force_reasoning_content?: boolean | null;
   content_rejection_compat?: "trim_old_tool_outputs" | "off" | null;
   user_agent?: string | null;
@@ -1191,6 +1220,10 @@ export type ClaudeSlotPlan = {
   slots: ClaudeSlotPlanSlot[];
   subagent_model: string | null;
   fallback_model: string | null;
+  /** `precise`（路由模式）或 `aggregate`（聚合模式）；决定可选模型 id 的形态。 */
+  model_mode: string;
+  /** 当前模式下代理接受的模型别名；路由模式带 `<账号>/` 前缀。 */
+  available_models: string[];
 };
 
 export type AppSettings = {
@@ -1213,6 +1246,13 @@ export type AppSettings = {
    * shares, so unlike model mappings they cannot be per-account.
    */
   claude_client_config_json?: string | null;
+  /**
+   * Per-model-mode Claude Code `/model` slot overrides, as
+   * `{"aggregate":{...},"precise":{...}}`. Routing mode pins
+   * `<account>/<alias>` while aggregate mode exposes the bare `<alias>`, so the
+   * two branches must never share a saved choice.
+   */
+  claude_slot_overrides_json?: string | null;
   /**
    * Which clients each platform writes config for, as
    * `{"codex":["codex","zcode"]}`. Recorded per platform because the dialog

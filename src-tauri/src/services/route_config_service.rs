@@ -26,10 +26,12 @@ use crate::services::route_model_capability::{
     normalize_reasoning_levels, parse_model_capability,
 };
 use crate::services::settings_service::SettingsService;
+use crate::services::route_pool_model_mode::PoolModelMode;
 use directories::BaseDirs;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -56,6 +58,80 @@ pub struct ClaudeSlotPlan {
     pub slots: Vec<ClaudeSlotPlanSlot>,
     pub subagent_model: Option<String>,
     pub fallback_model: Option<String>,
+    /// Which model mode produced `available_models`. The dialog stores its
+    /// overrides per mode, so it must know which branch to load.
+    pub model_mode: String,
+    /// Model ids the local proxy accepts for this mode. Routing (precise) mode
+    /// exposes `<account>/<alias>`; aggregate mode exposes the bare `<alias>`.
+    /// These are aliases, NOT upstream model names: Claude Code sends them back
+    /// verbatim and the proxy rewrites them per account.
+    pub available_models: Vec<String>,
+}
+
+/// A user-edited `/model` slot in the Claude Code settings dialog.
+///
+/// `model = None` keeps the automatic pool consensus for that row; `Some("")`
+/// explicitly clears it. `supports_1m` appends the `[1M]` suffix exactly like
+/// the automatic resolver does when every account declares 1M support.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+struct ClaudeSlotOverride {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    supports_1m: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+struct ClaudeSlotOverrideSet {
+    #[serde(default)]
+    slots: HashMap<String, ClaudeSlotOverride>,
+    #[serde(default)]
+    subagent_model: Option<String>,
+    #[serde(default)]
+    fallback_model: Option<String>,
+}
+
+/// Overrides are keyed by model mode on purpose: the same slot cannot point at
+/// `claude-sonnet-alias` in aggregate mode and still be valid in routing mode,
+/// where the proxy only accepts `<account>/claude-sonnet-alias`.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+struct ClaudeSlotOverrides {
+    #[serde(default)]
+    aggregate: Option<ClaudeSlotOverrideSet>,
+    #[serde(default)]
+    precise: Option<ClaudeSlotOverrideSet>,
+}
+
+impl ClaudeSlotOverrides {
+    fn for_mode(&self, mode: PoolModelMode) -> Option<&ClaudeSlotOverrideSet> {
+        match mode {
+            PoolModelMode::Aggregate => self.aggregate.as_ref(),
+            PoolModelMode::Precise => self.precise.as_ref(),
+        }
+    }
+}
+
+fn parse_claude_slot_overrides(raw: Option<&str>) -> ClaudeSlotOverrides {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return ClaudeSlotOverrides::default();
+    };
+    // A half-written preference must never block a config write, same rule as
+    // `claude_client_config_json` and `config_write_clients_json`.
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+fn override_model(value: &str, supports_1m: bool) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(if supports_1m && !trimmed.ends_with(CLAUDE_ONE_M_SUFFIX) {
+        format!("{trimmed}{CLAUDE_ONE_M_SUFFIX}")
+    } else {
+        trimmed.to_string()
+    })
 }
 
 pub struct RouteConfigService;
@@ -717,7 +793,7 @@ impl RouteConfigService {
 
         let account_mappings = Self::claude_pool_mappings(pool).await?;
         let settings = SettingsService::load(paths).await?;
-        Ok(ClaudeEnvPlan {
+        let automatic = ClaudeEnvPlan {
             subagent_model: Self::resolve_alias_write(
                 &account_mappings,
                 CLAUDE_SUBAGENT_MODEL_ALIAS,
@@ -732,7 +808,48 @@ impl RouteConfigService {
             client_config: Self::parse_claude_client_config(
                 settings.claude_client_config_json.as_deref(),
             ),
-        })
+        };
+        let mode = RoutePoolRepository::model_mode(pool, PlatformId::Claude.as_str()).await?;
+        let overrides =
+            parse_claude_slot_overrides(settings.claude_slot_overrides_json.as_deref());
+        Ok(Self::apply_claude_slot_overrides(
+            automatic,
+            overrides.for_mode(mode),
+        ))
+    }
+
+    /// Lays the dialog's explicit slot choices over the automatic consensus.
+    /// Only rows the user actually edited are replaced; the rest keep the
+    /// account-mapping derived value, so adding a new account still updates
+    /// untouched slots.
+    fn apply_claude_slot_overrides(
+        mut plan: ClaudeEnvPlan,
+        overrides: Option<&ClaudeSlotOverrideSet>,
+    ) -> ClaudeEnvPlan {
+        let Some(set) = overrides else {
+            return plan;
+        };
+        for (slot, write) in CLAUDE_MODEL_SLOTS.iter().zip(plan.slots.iter_mut()) {
+            let Some(value) = set.slots.get(slot.alias) else {
+                continue;
+            };
+            if let Some(model) = value.model.as_deref() {
+                write.model = override_model(model, value.supports_1m);
+            }
+            write.display_name = value
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(str::to_string);
+        }
+        if let Some(value) = set.subagent_model.as_deref() {
+            plan.subagent_model = override_model(value, false);
+        }
+        if let Some(value) = set.fallback_model.as_deref() {
+            plan.fallback_model = override_model(value, false);
+        }
+        plan
     }
 
     /// Read-only view of what the next Claude config write would put into the
@@ -744,6 +861,24 @@ impl RouteConfigService {
         pool: &SqlitePool,
     ) -> Result<ClaudeSlotPlan, AppError> {
         let plan = Self::resolve_claude_env_plan(paths, pool, PlatformId::Claude).await?;
+        let mode = RoutePoolRepository::model_mode(pool, PlatformId::Claude.as_str()).await?;
+        // The dialog's model picker must offer ids the proxy actually accepts in
+        // the *current* mode, not the upstream names a third-party Claude client
+        // would see. `advertised_*` uses alias / `<account>/alias` accordingly.
+        let credentials = Self::pool_member_credentials(pool, PlatformId::Claude).await?;
+        let members = catalog_members(&catalog_member_inputs(&credentials));
+        let mut available_models = advertised_model_catalog_entries_with_baseline(
+            PlatformId::Claude.as_str(),
+            &members,
+            mode,
+            None,
+        )
+        .into_iter()
+        .map(|model| model.id)
+        .collect::<Vec<_>>();
+        available_models.sort();
+        available_models.dedup();
+
         Ok(ClaudeSlotPlan {
             slots: CLAUDE_MODEL_SLOTS
                 .iter()
@@ -757,6 +892,8 @@ impl RouteConfigService {
                 .collect(),
             subagent_model: plan.subagent_model,
             fallback_model: plan.fallback_model,
+            model_mode: mode.as_str().to_string(),
+            available_models,
         })
     }
 
@@ -1939,6 +2076,7 @@ command = "npx"
                 responses_plaintext_reasoning_compat: None,
                 request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
+                responses_cross_resource_strip: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
                 content_rejection_compat: None,
@@ -2761,6 +2899,13 @@ command = "npx"
             paths.ensure().await.expect("paths");
             let pool = create_memory_pool().await.expect("pool");
             run_migrations(&pool).await.expect("migrations");
+            // These tests assert the merged (bare-alias) catalog. Pin the mode
+            // explicitly instead of inheriting the product default, which is
+            // routing mode for a fresh pool; a test that needs prefixes sets
+            // `Precise` itself.
+            RoutePoolRepository::save_model_mode(&pool, "codex", PoolModelMode::Aggregate)
+                .await
+                .expect("pin aggregate mode");
             let home = temp.path().join("home");
             tokio::fs::create_dir_all(&home).await.expect("home");
 
@@ -3915,6 +4060,95 @@ model_provider = "ai-switch"
         paths.ensure().await.expect("paths");
         let pool = create_memory_pool().await.expect("pool");
         run_migrations(&pool).await.expect("migrations");
+        // These write-path cases assert bare aliases (e.g. `gpt-5.6-sol`).
+        // Pin the merged catalog instead of inheriting the fresh-pool routing
+        // default; a case that needs prefixes sets `Precise` itself.
+        RoutePoolRepository::save_model_mode(&pool, "codex", PoolModelMode::Aggregate)
+            .await
+            .expect("pin aggregate mode");
         (app_dir, paths, pool, ConfigWriteRuntimeState::default())
+    }
+
+    fn automatic_slot_plan() -> ClaudeEnvPlan {
+        ClaudeEnvPlan {
+            subagent_model: Some(CLAUDE_SUBAGENT_MODEL_ALIAS.to_string()),
+            fallback_model: None,
+            slots: CLAUDE_MODEL_SLOTS
+                .iter()
+                .map(|_| ClaudeSlotWrite::default())
+                .collect(),
+            client_config: None,
+        }
+    }
+
+    #[test]
+    fn claude_slot_overrides_are_scoped_to_the_active_model_mode() {
+        // The same slot cannot point at a bare alias in aggregate mode and
+        // still be valid in routing mode, where ids are `<account>/<alias>`.
+        let raw = r#"{
+            "aggregate": {"slots": {"claude-sonnet-alias": {"model": "claude-sonnet-alias", "display_name": "Sonnet"}}},
+            "precise": {"slots": {"claude-sonnet-alias": {"model": "AcctA/claude-haiku-alias", "display_name": "Fast"}}}
+        }"#;
+        let overrides = parse_claude_slot_overrides(Some(raw));
+        let routed = RouteConfigService::apply_claude_slot_overrides(
+            automatic_slot_plan(),
+            overrides.for_mode(PoolModelMode::Precise),
+        );
+        assert_eq!(
+            routed.slots[0].model.as_deref(),
+            Some("AcctA/claude-haiku-alias")
+        );
+        assert_eq!(routed.slots[0].display_name.as_deref(), Some("Fast"));
+        // Rows the user left on 「自动」 keep the consensus-derived value.
+        assert_eq!(routed.slots[1].model, None);
+        assert_eq!(
+            routed.subagent_model.as_deref(),
+            Some(CLAUDE_SUBAGENT_MODEL_ALIAS)
+        );
+
+        let aggregated = RouteConfigService::apply_claude_slot_overrides(
+            automatic_slot_plan(),
+            overrides.for_mode(PoolModelMode::Aggregate),
+        );
+        assert_eq!(
+            aggregated.slots[0].model.as_deref(),
+            Some("claude-sonnet-alias")
+        );
+    }
+
+    #[test]
+    fn claude_slot_override_1m_suffix_is_appended_once_and_empty_clears() {
+        let raw = r#"{"precise":{"slots":{"claude-sonnet-alias":{"model":"AcctA/sonnet","supports_1m":true}}}}"#;
+        let overrides = parse_claude_slot_overrides(Some(raw));
+        let plan = RouteConfigService::apply_claude_slot_overrides(
+            automatic_slot_plan(),
+            overrides.for_mode(PoolModelMode::Precise),
+        );
+        assert_eq!(plan.slots[0].model.as_deref(), Some("AcctA/sonnet[1M]"));
+
+        let already_suffixed = r#"{"precise":{"slots":{"claude-sonnet-alias":{"model":"AcctA/sonnet[1M]","supports_1m":true}}}}"#;
+        let plan = RouteConfigService::apply_claude_slot_overrides(
+            automatic_slot_plan(),
+            parse_claude_slot_overrides(Some(already_suffixed))
+                .for_mode(PoolModelMode::Precise),
+        );
+        assert_eq!(plan.slots[0].model.as_deref(), Some("AcctA/sonnet[1M]"));
+
+        let cleared = r#"{"precise":{"slots":{"claude-sonnet-alias":{"model":""}}}}"#;
+        let plan = RouteConfigService::apply_claude_slot_overrides(
+            automatic_slot_plan(),
+            parse_claude_slot_overrides(Some(cleared)).for_mode(PoolModelMode::Precise),
+        );
+        assert_eq!(plan.slots[0].model, None);
+    }
+
+    #[test]
+    fn malformed_claude_slot_overrides_never_block_a_config_write() {
+        let plan = automatic_slot_plan();
+        let result = RouteConfigService::apply_claude_slot_overrides(
+            plan.clone(),
+            parse_claude_slot_overrides(Some("{not json")).for_mode(PoolModelMode::Precise),
+        );
+        assert_eq!(result, plan);
     }
 }

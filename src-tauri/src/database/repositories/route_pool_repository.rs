@@ -988,9 +988,10 @@ impl RoutePoolRepository {
             .collect())
     }
 
-    /// The platform's model catalog mode. A missing row — or an unrecognized
-    /// value — reads as [`PoolModelMode::Aggregate`]: this switch must never be
-    /// the thing that makes the pool unusable.
+    /// The pool's model catalog mode. A missing row reads as the product default
+    /// (`Precise`, shown as 「路由模式」); an unrecognized stored value still
+    /// fails closed to [`PoolModelMode::Aggregate`] so a hand-edited row can
+    /// never make the pool unusable.
     pub async fn model_mode(pool: &SqlitePool, platform: &str) -> Result<PoolModelMode, AppError> {
         let platform = UNIFIED_POOL_PLATFORM;
         let row = sqlx::query("SELECT mode FROM route_pool_model_modes WHERE platform = ?")
@@ -1542,16 +1543,17 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn model_mode_defaults_to_aggregate_and_survives_a_round_trip() {
+    async fn model_mode_defaults_to_routing_and_survives_a_round_trip() {
         let pool = crate::database::create_memory_pool().await.unwrap();
         crate::database::run_migrations(&pool).await.unwrap();
 
-        // No row yet: every pool that predates the switch keeps rotating.
+        // A fresh pool starts in routing mode; a database that already stored
+        // `aggregate` keeps reading Aggregate through `parse`.
         assert_eq!(
             RoutePoolRepository::model_mode(&pool, "codex")
                 .await
                 .unwrap(),
-            PoolModelMode::Aggregate
+            PoolModelMode::Precise
         );
 
         RoutePoolRepository::save_model_mode(&pool, "codex", PoolModelMode::Precise)

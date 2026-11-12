@@ -64,6 +64,7 @@ mod tests {
             close_to_tray: false,
             image_generation_enabled: true,
             claude_client_config_json: Some(r#"{"includeCoAuthoredBy":false}"#.to_string()),
+            claude_slot_overrides_json: None,
             config_write_clients_json: None,
             deepseek_harness_config_path: Some("/custom/dsh/settings.yaml".to_string()),
             notification_config_json: None,

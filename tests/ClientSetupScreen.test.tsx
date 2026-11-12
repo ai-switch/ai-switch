@@ -86,11 +86,11 @@ const codexClients: ConfigWriteClientStatus[] = [
 
 const claudeClients: ConfigWriteClientStatus[] = [
   {
-    client_key: "claude",
+    client_key: "claude_code",
     display_name: "Claude Code",
     native: true,
     restart_required: false,
-    target_key: "claude",
+    target_key: "claude_code",
     platform: "claude",
     config_path: "/home/u/.claude/settings.json",
     file_status: "managed",
@@ -107,6 +107,8 @@ const slotPlan: ClaudeSlotPlan = {
   ],
   subagent_model: "claude-subagent",
   fallback_model: null,
+  model_mode: "precise",
+  available_models: ["AcctA/claude-sonnet-alias", "AcctA/claude-haiku-alias"],
 };
 
 function capabilityOf(platform: PlatformId, display_name: string): PlatformCapability {
@@ -188,7 +190,7 @@ describe("ClientSetupScreen", () => {
     );
     vi.mocked(getSettings).mockResolvedValue(settingsFixture);
     vi.mocked(saveSettings).mockImplementation(async (settings) => settings);
-    vi.mocked(getRoutePool).mockResolvedValue({ model_mode: "aggregate" } as RoutePoolState);
+    vi.mocked(getRoutePool).mockResolvedValue({ model_mode: "precise" } as RoutePoolState);
     vi.mocked(getClientDirectModes).mockResolvedValue([]);
     vi.mocked(listRouteCredentials).mockResolvedValue([]);
     vi.mocked(routeConfigWriteIsStale).mockResolvedValue(false);
@@ -207,16 +209,24 @@ describe("ClientSetupScreen", () => {
 
     expect(await screen.findByRole("checkbox", { name: "写入 Codex CLI" })).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "写入 ZCode" })).toBeInTheDocument();
-    expect(screen.getByText("已接管")).toBeInTheDocument();
+    // Claude Code joins the former Codex list on the same page.
+    expect(screen.getByRole("checkbox", { name: "写入 Claude Code" })).toBeInTheDocument();
+    // Both first-party CLIs are "managed" in this fixture; third-party is not.
+    expect(screen.getAllByText("已接管").length).toBeGreaterThan(0);
     expect(screen.getByText("未接管")).toBeInTheDocument();
     expect(screen.getByTitle("/home/u/.zcode/v2/config.json")).toBeInTheDocument();
+    // Every card names the wire format the gateway writes for it.
+    expect(screen.getByLabelText("接口格式 Responses")).toBeInTheDocument();
+    expect(screen.getByLabelText("接口格式 Chat")).toBeInTheDocument();
+    expect(screen.getByLabelText("接口格式 Messages")).toBeInTheDocument();
   });
 
-  it("checks only the native client when the user has never chosen", async () => {
+  it("checks only the primary CLI by default and leaves Claude Code opt-in", async () => {
     setup();
 
     expect(await screen.findByRole("checkbox", { name: "写入 Codex CLI" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "写入 ZCode" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "写入 Claude Code" })).not.toBeChecked();
   });
 
   it("restores a stored selection", async () => {
@@ -368,7 +378,7 @@ describe("ClientSetupScreen", () => {
     setup();
 
     await screen.findByRole("checkbox", { name: "写入 Codex CLI" });
-    expect(screen.getByRole("alert")).toHaveTextContent("该平台暂不支持此功能。");
+    expect(screen.getByRole("alert")).toHaveTextContent("该接入方式暂不支持此功能。");
     expect(screen.getByRole("button", { name: "写入" })).toBeDisabled();
     await user.click(screen.getByRole("checkbox", { name: "写入 Codex CLI" }));
     expect(screen.getByRole("checkbox", { name: "写入 Codex CLI" })).toBeDisabled();
@@ -395,14 +405,15 @@ describe("ClientSetupScreen", () => {
     expect(writeText).toHaveBeenLastCalledWith("sk-ai-switch-codex-key");
   });
 
-  it("keeps the key masked until revealed, and names the platform it belongs to", async () => {
+  it("keeps the key masked until revealed, and names the client family it belongs to", async () => {
     const user = userEvent.setup();
     setup();
 
     await screen.findByRole("checkbox", { name: "写入 Codex CLI" });
     await user.click(screen.getByText("手动配置参数（内置支持之外的 Agent）"));
 
-    expect(screen.getByText(/Codex 平台的 Key/)).toBeInTheDocument();
+    expect(screen.getByText(/主接入 Key（Codex \/ Chat 协议族）/)).toBeInTheDocument();
+    expect(screen.getByText(/Anthropic Messages 客户端使用另一把 Key/)).toBeInTheDocument();
     const key = screen.getByLabelText("API Key");
     expect(key).toHaveAttribute("type", "password");
     await user.click(screen.getByLabelText("显示 API Key"));
@@ -411,61 +422,110 @@ describe("ClientSetupScreen", () => {
     expect(key).toHaveAttribute("type", "password");
   });
 
-  it("switches platform tabs and leaves a claude endpoint bare", async () => {
+  it("renders one unified agent list instead of platform tabs", async () => {
+    setup();
+
+    await screen.findByRole("checkbox", { name: "写入 Codex CLI" });
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    expect(screen.getByText("智能体接入目标")).toBeInTheDocument();
+    expect(screen.getByText(/账号池始终只有同一个/)).toBeInTheDocument();
+    // Both halves of the old, wrong copy must be gone with the tabs.
+    expect(screen.queryByText(/每个平台的算力池/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/切换平台后要各自复制/)).not.toBeInTheDocument();
+  });
+
+  it("shows the Codex /v1 endpoint and the Claude Code card in the same list", async () => {
     const user = userEvent.setup();
     setup();
 
     await screen.findByRole("checkbox", { name: "写入 Codex CLI" });
-    await user.click(screen.getByRole("tab", { name: "Claude" }));
-
-    expect(await screen.findByRole("checkbox", { name: "写入 Claude Code" })).toBeChecked();
-    expect(screen.getByRole("tab", { name: "Claude" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("checkbox", { name: "写入 Claude Code" })).toBeInTheDocument();
     await user.click(screen.getByText("手动配置参数（内置支持之外的 Agent）"));
-    expect(screen.getByLabelText("Base URL")).toHaveValue("http://127.0.0.1:43111");
+    expect(screen.getByLabelText("Base URL")).toHaveValue("http://127.0.0.1:43111/v1");
   });
 
-  it("opens the Claude slot panel and links to the account mappings", async () => {
+  it("writes Messages clients through the Claude adapters in the same action", async () => {
+    const user = userEvent.setup();
+    setup();
+
+    await screen.findByRole("checkbox", { name: "写入 Codex CLI" });
+    await user.click(screen.getByRole("checkbox", { name: "写入 Claude Code" }));
+    await user.click(screen.getByRole("button", { name: "写入" }));
+
+    await waitFor(() => expect(writeRouteProxyConfigs).toHaveBeenCalledTimes(2));
+    expect(writeRouteProxyConfigs).toHaveBeenCalledWith("http://127.0.0.1:43111", "codex", [
+      "codex",
+    ]);
+    expect(writeRouteProxyConfigs).toHaveBeenCalledWith("http://127.0.0.1:43111", "claude", [
+      "claude_code",
+    ]);
+  });
+
+  it("opens the Claude Code slot dialog and links to the account mappings", async () => {
     const user = userEvent.setup();
     const onOpenAccounts = vi.fn();
     setup({ onOpenAccounts });
 
     await screen.findByRole("checkbox", { name: "写入 Codex CLI" });
-    await user.click(screen.getByRole("tab", { name: "Claude" }));
-    await user.click(await screen.findByRole("button", { name: "设置 Claude 槽位映射" }));
+    await user.click(screen.getByRole("button", { name: "设置 Claude Code 槽位映射" }));
 
-    const rows = await screen.findByTestId("claude-slot-plan");
-    expect(rows).toHaveTextContent("Sonnet");
-    expect(rows).toHaveTextContent("claude-sonnet-alias[1M]");
-    expect(rows).toHaveTextContent("Subagent");
-    expect(rows).toHaveTextContent(/未映射（写入时清空）/);
+    const dialog = await screen.findByRole("dialog", {
+      name: "设置 Claude Code 模型槽位映射",
+    });
+    expect(dialog).toHaveTextContent("路由模式");
+    expect(dialog).toHaveTextContent("Sonnet");
+    expect(dialog).toHaveTextContent("Subagent");
+    expect(dialog).toHaveTextContent("默认兜底模型");
+    expect(screen.getByTestId("claude-slot-editor")).toBeInTheDocument();
+    expect(screen.getByText(/可选模型 2 个/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "去调整映射" }));
+    await user.click(screen.getByRole("button", { name: "去调整账号映射" }));
     expect(onOpenAccounts).toHaveBeenCalledWith("claude");
   });
 
-  it("validates and saves the global client config JSON", async () => {
+  it("saves Claude slot overrides under the active model mode only", async () => {
     const user = userEvent.setup();
     setup();
 
     await screen.findByRole("checkbox", { name: "写入 Codex CLI" });
-    await user.click(screen.getByRole("tab", { name: "Claude" }));
-    await user.click(await screen.findByRole("button", { name: "设置 Claude 槽位映射" }));
+    await user.click(screen.getByRole("button", { name: "设置 Claude Code 槽位映射" }));
+    await screen.findByRole("dialog");
+
+    await user.click(screen.getByRole("checkbox", { name: "Sonnet 自动解析" }));
+    fireEvent.change(screen.getByLabelText("Sonnet 模型"), {
+      target: { value: "AcctA/claude-haiku-alias" },
+    });
+    await user.click(screen.getByRole("button", { name: "保存槽位设置" }));
+
+    await waitFor(() => expect(saveSettings).toHaveBeenCalled());
+    const payload = vi.mocked(saveSettings).mock.calls[0][0];
+    const saved = JSON.parse(payload.claude_slot_overrides_json ?? "{}");
+    expect(saved.precise.slots["claude-sonnet-alias"].model).toBe("AcctA/claude-haiku-alias");
+    expect(saved.aggregate).toBeUndefined();
+  });
+
+  it("validates and saves the global client config JSON from the dialog", async () => {
+    const user = userEvent.setup();
+    setup();
+
+    await screen.findByRole("checkbox", { name: "写入 Codex CLI" });
+    await user.click(screen.getByRole("button", { name: "设置 Claude Code 槽位映射" }));
+    await screen.findByRole("dialog");
 
     const editor = screen.getByLabelText("全局客户端配置 JSON");
     fireEvent.change(editor, { target: { value: "not-json" } });
-    await user.click(screen.getByRole("button", { name: "保存全局配置" }));
+    await user.click(screen.getByRole("button", { name: "保存槽位设置" }));
     expect(screen.getByRole("alert")).toHaveTextContent("不是合法的 JSON。");
     expect(saveSettings).not.toHaveBeenCalled();
 
-    // A JSON array parses but is not a settings object — reject before saving,
-    // because the writer silently ignores a malformed value.
     fireEvent.change(editor, { target: { value: "[1,2]" } });
-    await user.click(screen.getByRole("button", { name: "保存全局配置" }));
+    await user.click(screen.getByRole("button", { name: "保存槽位设置" }));
     expect(screen.getByRole("alert")).toHaveTextContent("需要一个 JSON 对象");
     expect(saveSettings).not.toHaveBeenCalled();
 
     fireEvent.change(editor, { target: { value: '{"includeCoAuthoredBy": false}' } });
-    await user.click(screen.getByRole("button", { name: "保存全局配置" }));
+    await user.click(screen.getByRole("button", { name: "保存槽位设置" }));
     await waitFor(() =>
       expect(saveSettings).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -482,32 +542,31 @@ describe("ClientSetupScreen", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("配置已变更，需重新写入");
   });
 
-  it("shows the model list mode picker and reports a switch", async () => {
+  it("defaults to routing mode, puts it first, and reports a switch to aggregate", async () => {
     const user = userEvent.setup();
-    vi.mocked(setRoutePoolModelMode).mockResolvedValue({ model_mode: "precise" } as RoutePoolState);
+    vi.mocked(setRoutePoolModelMode).mockImplementation(async () => ({
+      model_mode: "aggregate",
+    } as never));
     setup();
 
-    vi.mocked(setRoutePoolModelMode).mockImplementation(async ({ platform, mode }) => ({
-      model_mode: mode,
-    } as never));
-    expect(await screen.findByRole("radio", { name: "聚合模式" })).toHaveAttribute("aria-checked", "true");
-    await user.click(screen.getByRole("radio", { name: "精确模式" }));
-    // Saved on toggle: the pool's own /v1/models changes at once, and a user whose
-    // clients discover models over HTTP never clicks 写入 at all.
-    await waitFor(() =>
-      expect(setRoutePoolModelMode).toHaveBeenCalledWith({ platform: "codex", mode: "precise" }),
+    expect(await screen.findByRole("radio", { name: "路由模式" })).toHaveAttribute(
+      "aria-checked",
+      "true",
     );
+    expect(screen.getAllByRole("radio")[0]).toHaveTextContent("路由模式");
+    expect(screen.queryByRole("radio", { name: "精确模式" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: "聚合模式" }));
     await waitFor(() =>
-      expect(screen.getByRole("radio", { name: "精确模式" })).toHaveAttribute("aria-checked", "true"),
+      expect(setRoutePoolModelMode).toHaveBeenCalledWith({ platform: "codex", mode: "aggregate" }),
     );
   });
 
-  it("preselects the platform tab and client from a deep-link focus", async () => {
+  it("preselects the deep-linked client on the unified list", async () => {
     const onFocusConsumed = vi.fn();
-    setup({ focus: { platform: "claude", clientKey: "claude" }, onFocusConsumed });
+    setup({ focus: { platform: "claude", clientKey: "claude_code" }, onFocusConsumed });
 
-    expect(await screen.findByRole("tab", { name: "Claude" })).toHaveAttribute("aria-selected", "true");
     expect(await screen.findByRole("checkbox", { name: "写入 Claude Code" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "写入 Codex CLI" })).not.toBeChecked();
     await waitFor(() => expect(onFocusConsumed).toHaveBeenCalled());
   });
 
@@ -734,7 +793,10 @@ describe("ClientSetupScreen", () => {
     await waitFor(() =>
       expect(vi.mocked(saveSettings)).toHaveBeenCalledWith(
         expect.objectContaining({
-          config_write_clients_json: JSON.stringify({ codex: ["codex", "zcode"] }),
+          config_write_clients_json: JSON.stringify({
+            codex: ["codex", "zcode"],
+            claude: [],
+          }),
         }),
       ),
     );
@@ -749,13 +811,13 @@ describe("ClientSetupScreen", () => {
     setup();
 
     await screen.findByRole("checkbox", { name: "写入 Codex CLI" });
-    await user.click(screen.getByRole("tab", { name: "Claude" }));
-    await user.click(await screen.findByRole("button", { name: "设置 Claude 槽位映射" }));
+    await user.click(screen.getByRole("button", { name: "设置 Claude Code 槽位映射" }));
+    await screen.findByRole("dialog");
 
     const editor = screen.getByLabelText("全局客户端配置 JSON");
     expect(editor).toHaveValue('{"includeCoAuthoredBy":false}');
     await user.clear(editor);
-    await user.click(screen.getByRole("button", { name: "保存全局配置" }));
+    await user.click(screen.getByRole("button", { name: "保存槽位设置" }));
 
     // null, not "" — the writer treats absent and empty the same, but null is
     // the honest representation of "manage nothing".
@@ -777,15 +839,44 @@ describe("ClientSetupScreen", () => {
     expect(screen.getByRole("checkbox", { name: "写入 ZCode" })).not.toBeChecked();
   });
 
-  it("carries separate selections per platform tab", async () => {
+  it("renders a brand monogram for third-party agents instead of a generic icon", async () => {
+    setup();
+
+    const zcode = await screen.findByTestId("client-card-zcode");
+    expect(zcode.querySelector('[title="ZCode"]')).not.toBeNull();
+    // The two first-party CLIs keep their real brand SVG.
+    expect(screen.getByTestId("client-card-codex").querySelector("svg")).not.toBeNull();
+    expect(screen.getByTestId("client-card-claude_code").querySelector("svg")).not.toBeNull();
+  });
+
+  it("keeps aggregate-mode slot overrides separate from routing mode", async () => {
+    vi.mocked(getClaudeSlotPlan).mockResolvedValue({
+      ...slotPlan,
+      model_mode: "aggregate",
+      available_models: ["claude-sonnet-alias", "claude-haiku-alias"],
+    });
+    vi.mocked(getSettings).mockResolvedValue({
+      ...settingsFixture,
+      claude_slot_overrides_json: JSON.stringify({
+        precise: { slots: { "claude-sonnet-alias": { model: "AcctA/x" } } },
+      }),
+    });
     const user = userEvent.setup();
     setup();
 
-    await user.click(await screen.findByRole("checkbox", { name: "写入 ZCode" }));
-    await user.click(screen.getByRole("tab", { name: "Claude" }));
-    expect(await screen.findByRole("checkbox", { name: "写入 Claude Code" })).toBeChecked();
-    await user.click(screen.getByRole("tab", { name: "Codex" }));
-    expect(screen.getByRole("checkbox", { name: "写入 ZCode" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "写入 Codex CLI" })).toBeChecked();
+    await screen.findByRole("checkbox", { name: "写入 Codex CLI" });
+    await user.click(screen.getByRole("button", { name: "设置 Claude Code 槽位映射" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("聚合模式");
+    // A precise-mode override must not leak into the aggregate branch.
+    expect(screen.getByRole("checkbox", { name: "Sonnet 自动解析" })).toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "保存槽位设置" }));
+    await waitFor(() => expect(saveSettings).toHaveBeenCalled());
+    const saved = JSON.parse(
+      vi.mocked(saveSettings).mock.calls[0][0].claude_slot_overrides_json ?? "{}",
+    );
+    expect(saved.precise.slots["claude-sonnet-alias"].model).toBe("AcctA/x");
+    expect(saved.aggregate).toBeDefined();
   });
 });

@@ -49,6 +49,97 @@ pub const MAX_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX: u32 = 10;
 /// credential (a pooled conversation whose reasoning was minted elsewhere is
 /// refused outright, and cost is easier to attribute per account).
 pub const DEFAULT_ROUTE_CREDENTIAL_FAILOVER_ENABLED: bool = true;
+/// Per-class retry ceilings are deliberately allowed to be far larger than the
+/// global one. A drained upstream pool ("no_capacity" / high demand) is not an
+/// account fault: the user may want to keep the task alive through a hundred
+/// retries, while ordinary errors must still stop after a handful.
+pub const MAX_ROUTE_CREDENTIAL_CLASS_RETRY_COUNT: u32 = 1_000;
+/// `0` means "use the global `retry_interval_ms`". A high capacity retry count
+/// with a 200 ms interval would hammer the upstream, so the UI exposes this.
+pub const DEFAULT_ROUTE_CREDENTIAL_CAPACITY_RETRY_INTERVAL_MS: u32 = 0;
+pub const MAX_ROUTE_CREDENTIAL_CAPACITY_RETRY_INTERVAL_MS: u32 = 60_000;
+/// Wall-clock guard for long retry loops. `0` means no time limit.
+pub const DEFAULT_ROUTE_CREDENTIAL_MAX_RETRY_ELAPSED_SECONDS: u32 = 0;
+pub const MAX_ROUTE_CREDENTIAL_MAX_RETRY_ELAPSED_SECONDS: u32 = 86_400;
+/// How long a zero-output Responses opening frame (`response.created` /
+/// `response.in_progress`) may be held back before the 200 is committed.
+///
+/// Upstreams that are about to refuse a turn for capacity reasons often emit
+/// `response.created` first and only report the `error` / `response.failed`
+/// frames many seconds later (a real Azure "token rate limit" refusal took 14s).
+/// The old hard-coded 3s grace committed the stream before that verdict arrived,
+/// which made the failure unretryable. `0` disables the hold-back entirely.
+pub const DEFAULT_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS: u32 = 60_000;
+pub const MAX_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS: u32 = 600_000;
+/// Default for "salvage an in-stream refusal by continuing the same response".
+/// Off by default: continuing spends another billed request and the client
+/// receives an answer the model did not write in one pass.
+pub const DEFAULT_ROUTE_CREDENTIAL_STREAM_SALVAGE_ENABLED: bool = false;
+
+/// Buckets a single failed attempt falls into. Only these five are retryable;
+/// the hard verdicts (quota, permissions, content policy, oversized request,
+/// invalid parameter, 401/403) are handled before the retry budget is consulted
+/// and can never be configured into retrying.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteFailureClass {
+    /// No HTTP response at all: connect failure, timeout, read failure.
+    Transport,
+    /// HTTP 408 / 5xx from the upstream.
+    ServerError,
+    /// HTTP 429 or an explicit rate-limit error envelope.
+    RateLimit,
+    /// Upstream capacity/overload, including a 200 SSE `response.failed` with
+    /// `code: no_capacity` or a "high demand" message.
+    Capacity,
+    /// Any other in-body semantic failure (`response.failed`, `/error`, ...).
+    Semantic,
+    /// A retryable status that does not fit the buckets above.
+    Other,
+}
+
+/// Optional per-class overrides for `retry_count`. `None` means "follow the
+/// global `retry_count`", which keeps every existing account config valid and
+/// unchanged when read back.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct RouteRetryClassLimits {
+    pub transport: Option<u32>,
+    pub server_error: Option<u32>,
+    pub rate_limit: Option<u32>,
+    pub capacity: Option<u32>,
+    pub semantic: Option<u32>,
+}
+
+impl RouteRetryClassLimits {
+    pub fn for_class(self, class: RouteFailureClass) -> Option<u32> {
+        match class {
+            RouteFailureClass::Transport => self.transport,
+            RouteFailureClass::ServerError => self.server_error,
+            RouteFailureClass::RateLimit => self.rate_limit,
+            RouteFailureClass::Capacity => self.capacity,
+            RouteFailureClass::Semantic => self.semantic,
+            RouteFailureClass::Other => None,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        for (name, limit) in [
+            ("transport", self.transport),
+            ("server_error", self.server_error),
+            ("rate_limit", self.rate_limit),
+            ("capacity", self.capacity),
+            ("semantic", self.semantic),
+        ] {
+            if limit.is_some_and(|value| value > MAX_ROUTE_CREDENTIAL_CLASS_RETRY_COUNT) {
+                return Err(format!(
+                    "retry_class_limits.{name} must be between 0 and {MAX_ROUTE_CREDENTIAL_CLASS_RETRY_COUNT}"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -68,6 +159,20 @@ pub struct RouteCredentialFailurePolicy {
     /// 重试/续写都失败后，是否切到池内其它账号。仅聚合模式有意义——精确模式下
     /// 候选本来只有这一个账号。
     pub failover_enabled: bool,
+    /// 按错误类别覆盖「额外重试次数」；字段为 null/缺失即沿用 retry_count。
+    pub retry_class_limits: RouteRetryClassLimits,
+    /// 容量不足类失败专用的重试间隔；0 表示沿用 retry_interval_ms。
+    pub capacity_retry_interval_ms: u32,
+    /// 整次请求的重试总时长上限（秒）；0 表示只按次数限制，不按时间。
+    pub max_retry_elapsed_seconds: u32,
+    /// 流式响应开头只有零输出的 Responses 建流帧时，最多扣住多久等后续帧。
+    /// 0 表示不扣留（收到建流帧立刻提交），单位毫秒。
+    pub stream_prelude_wait_ms: u32,
+    /// 已经输出正文后上游才在流内报「容量不足 / 限流 / 5xx」时，是否扣住失败帧
+    /// 并复用断流续写管线把这一轮接完。默认关闭：客户端拿到的是模型分多次写成
+    /// 的答案，且每轮续写都是一次完整计费请求。额度、内容审核、上下文超长等
+    /// 硬判决永远不进入这条路径。
+    pub stream_salvage_enabled: bool,
 }
 
 impl Default for RouteCredentialFailurePolicy {
@@ -82,6 +187,11 @@ impl Default for RouteCredentialFailurePolicy {
             stream_continue_enabled: DEFAULT_ROUTE_CREDENTIAL_STREAM_CONTINUE_ENABLED,
             stream_continue_max: DEFAULT_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX,
             failover_enabled: DEFAULT_ROUTE_CREDENTIAL_FAILOVER_ENABLED,
+            retry_class_limits: RouteRetryClassLimits::default(),
+            capacity_retry_interval_ms: DEFAULT_ROUTE_CREDENTIAL_CAPACITY_RETRY_INTERVAL_MS,
+            max_retry_elapsed_seconds: DEFAULT_ROUTE_CREDENTIAL_MAX_RETRY_ELAPSED_SECONDS,
+            stream_prelude_wait_ms: DEFAULT_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS,
+            stream_salvage_enabled: DEFAULT_ROUTE_CREDENTIAL_STREAM_SALVAGE_ENABLED,
         }
     }
 }
@@ -102,6 +212,44 @@ impl RouteCredentialFailurePolicy {
             .map_err(|error| format!("failure_policy must contain integer values: {error}"))?;
         policy.validate()?;
         Ok(policy)
+    }
+
+    /// How many *additional* attempts the same account may spend on this class.
+    /// A class without an explicit override inherits the global `retry_count`.
+    pub fn retry_limit_for(&self, class: RouteFailureClass) -> u32 {
+        self.retry_class_limits
+            .for_class(class)
+            .unwrap_or(self.retry_count)
+    }
+
+    /// Per-class backoff. Capacity has its own dial because a hundred retries
+    /// at the global 200 ms interval would be a burst, not a wait.
+    pub fn retry_interval_for(&self, class: RouteFailureClass) -> std::time::Duration {
+        let millis = match class {
+            RouteFailureClass::Capacity if self.capacity_retry_interval_ms > 0 => {
+                self.capacity_retry_interval_ms
+            }
+            _ => self.retry_interval_ms,
+        };
+        std::time::Duration::from_millis(millis.into())
+    }
+
+    /// True once the whole request has been retrying longer than the configured
+    /// wall-clock ceiling. Kept separate from the per-attempt count so a high
+    /// class ceiling can never pin a client connection open indefinitely.
+    pub fn retry_elapsed_exceeded(&self, elapsed: std::time::Duration) -> bool {
+        self.max_retry_elapsed_seconds > 0
+            && elapsed >= std::time::Duration::from_secs(self.max_retry_elapsed_seconds.into())
+    }
+
+    /// Total time the proxy may keep a zero-output Responses opening frame to
+    /// itself while waiting for either the first output or a failure frame.
+    /// `None` means the hold-back is switched off: commit the announcement at
+    /// once, which restores the pre-hold-back behaviour for upstreams that
+    /// legitimately sit on `response.created` for minutes.
+    pub fn stream_prelude_wait(&self) -> Option<std::time::Duration> {
+        (self.stream_prelude_wait_ms > 0)
+            .then(|| std::time::Duration::from_millis(self.stream_prelude_wait_ms.into()))
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -134,6 +282,22 @@ impl RouteCredentialFailurePolicy {
                 "stream_continue_max must be between 0 and {MAX_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX}"
             ));
         }
+        if self.capacity_retry_interval_ms > MAX_ROUTE_CREDENTIAL_CAPACITY_RETRY_INTERVAL_MS {
+            return Err(format!(
+                "capacity_retry_interval_ms must be between 0 and {MAX_ROUTE_CREDENTIAL_CAPACITY_RETRY_INTERVAL_MS}"
+            ));
+        }
+        if self.max_retry_elapsed_seconds > MAX_ROUTE_CREDENTIAL_MAX_RETRY_ELAPSED_SECONDS {
+            return Err(format!(
+                "max_retry_elapsed_seconds must be between 0 and {MAX_ROUTE_CREDENTIAL_MAX_RETRY_ELAPSED_SECONDS}"
+            ));
+        }
+        if self.stream_prelude_wait_ms > MAX_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS {
+            return Err(format!(
+                "stream_prelude_wait_ms must be between 0 and {MAX_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS}"
+            ));
+        }
+        self.retry_class_limits.validate()?;
         Ok(())
     }
 }
@@ -287,6 +451,12 @@ pub struct CreateApiRouteCredentialInput {
     pub request_brotli_compression: Option<String>,
     #[serde(default)]
     pub responses_encrypted_content_cleanup: Option<bool>,
+    /// None/auto follows the verified site list; explicit off overrides it.
+    /// Strips resource-bound Responses state (item ids, `encrypted*` fields,
+    /// `previous_response_id`) so a multi-resource Azure relay can serve the
+    /// replayed history from any resource.
+    #[serde(default)]
+    pub responses_cross_resource_strip: Option<String>,
     /// Sub-switch of `responses_encrypted_content_cleanup`: strip even
     /// well-formed reasoning ciphertext instead of only malformed values.
     #[serde(default)]
@@ -604,13 +774,16 @@ pub fn normalize_anthropic_api_key_field(value: Option<&str>) -> Result<&'static
 #[cfg(test)]
 mod tests {
     use super::{
-        RouteCredentialFailurePolicy, DEFAULT_ROUTE_CREDENTIAL_COOLDOWN_SECONDS,
-        DEFAULT_ROUTE_CREDENTIAL_RETRY_COUNT, DEFAULT_ROUTE_CREDENTIAL_RETRY_INTERVAL_MS,
-        DEFAULT_ROUTE_CREDENTIAL_SEMANTIC_ERROR_THRESHOLD,
-        DEFAULT_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX, MAX_ROUTE_CREDENTIAL_COOLDOWN_SECONDS,
-        MAX_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX,
+        RouteCredentialFailurePolicy, RouteFailureClass,
+        DEFAULT_ROUTE_CREDENTIAL_COOLDOWN_SECONDS, DEFAULT_ROUTE_CREDENTIAL_RETRY_COUNT,
+        DEFAULT_ROUTE_CREDENTIAL_RETRY_INTERVAL_MS, DEFAULT_ROUTE_CREDENTIAL_SEMANTIC_ERROR_THRESHOLD,
+        DEFAULT_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX,
+        DEFAULT_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS, MAX_ROUTE_CREDENTIAL_CLASS_RETRY_COUNT,
+        MAX_ROUTE_CREDENTIAL_COOLDOWN_SECONDS, MAX_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX,
+        MAX_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS,
     };
     use serde_json::json;
+    use std::time::Duration;
 
     #[test]
     fn failure_policy_uses_defaults_for_existing_account_configs() {
@@ -744,5 +917,128 @@ mod tests {
             .is_ok(),
             "0 must stay legal: it is how an account turns continuation off"
         );
+    }
+
+    /// Old accounts have none of the new keys; reading them must be a no-op.
+    #[test]
+    fn existing_failure_policies_inherit_global_retry_settings() {
+        let policy = RouteCredentialFailurePolicy::from_config_value(&json!({
+            "failure_policy": {"retry_count": 4, "retry_interval_ms": 750}
+        }))
+        .expect("legacy policy");
+        assert_eq!(policy.retry_limit_for(RouteFailureClass::Capacity), 4);
+        assert_eq!(
+            policy.retry_interval_for(RouteFailureClass::Capacity),
+            Duration::from_millis(750)
+        );
+        assert!(!policy.retry_elapsed_exceeded(Duration::from_secs(86_400)));
+    }
+
+    #[test]
+    fn a_class_can_outlive_the_global_ceiling_without_changing_other_classes() {
+        let policy = RouteCredentialFailurePolicy::from_config_value(&json!({
+            "failure_policy": {
+                "retry_count": 2,
+                "retry_interval_ms": 200,
+                "retry_class_limits": {"capacity": 100, "transport": 0},
+                "capacity_retry_interval_ms": 5_000,
+                "max_retry_elapsed_seconds": 600
+            }
+        }))
+        .expect("per-class policy");
+        assert_eq!(policy.retry_count, 2);
+        assert_eq!(policy.retry_limit_for(RouteFailureClass::Capacity), 100);
+        assert_eq!(policy.retry_limit_for(RouteFailureClass::Transport), 0);
+        assert_eq!(policy.retry_limit_for(RouteFailureClass::Semantic), 2);
+        assert_eq!(policy.retry_limit_for(RouteFailureClass::RateLimit), 2);
+        assert_eq!(policy.retry_limit_for(RouteFailureClass::ServerError), 2);
+        assert_eq!(
+            policy.retry_interval_for(RouteFailureClass::Capacity),
+            Duration::from_millis(5_000)
+        );
+        assert_eq!(
+            policy.retry_interval_for(RouteFailureClass::Semantic),
+            Duration::from_millis(200)
+        );
+        assert!(policy.retry_elapsed_exceeded(Duration::from_secs(600)));
+        assert!(!policy.retry_elapsed_exceeded(Duration::from_secs(599)));
+    }
+
+    #[test]
+    fn per_class_limits_reject_values_above_the_safe_ceiling() {
+        let too_high = RouteCredentialFailurePolicy::from_config_value(&json!({
+            "failure_policy": {
+                "retry_class_limits": {"capacity": MAX_ROUTE_CREDENTIAL_CLASS_RETRY_COUNT + 1}
+            }
+        }))
+        .expect_err("above ceiling");
+        assert!(too_high.contains("retry_class_limits.capacity"));
+
+        let bad_interval = RouteCredentialFailurePolicy::from_config_value(&json!({
+            "failure_policy": {"capacity_retry_interval_ms": 60_001}
+        }))
+        .expect_err("above interval ceiling");
+        assert!(bad_interval.contains("capacity_retry_interval_ms"));
+    }
+
+    /// A refusal that arrives 14s after `response.created` must still be
+    /// retriable: the old hard-coded 3s grace committed the stream first.
+    #[test]
+    fn stream_prelude_wait_defaults_to_a_window_longer_than_slow_refusals() {
+        let policy = RouteCredentialFailurePolicy::default();
+        assert_eq!(
+            policy.stream_prelude_wait(),
+            Some(Duration::from_millis(
+                DEFAULT_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS.into()
+            ))
+        );
+        assert!(policy.stream_prelude_wait().unwrap() > Duration::from_secs(14));
+        // Legacy configs stay valid and get the new default.
+        let legacy = RouteCredentialFailurePolicy::from_config_value(&json!({
+            "failure_policy": {"retry_count": 3}
+        }))
+        .expect("legacy policy");
+        assert_eq!(legacy.stream_prelude_wait(), policy.stream_prelude_wait());
+    }
+
+    #[test]
+    fn stream_prelude_wait_is_configurable_and_can_be_disabled() {
+        let tuned = RouteCredentialFailurePolicy::from_config_value(&json!({
+            "failure_policy": {"stream_prelude_wait_ms": 1_500}
+        }))
+        .expect("tuned policy");
+        assert_eq!(tuned.stream_prelude_wait(), Some(Duration::from_millis(1_500)));
+
+        let disabled = RouteCredentialFailurePolicy::from_config_value(&json!({
+            "failure_policy": {"stream_prelude_wait_ms": 0}
+        }))
+        .expect("disabled policy");
+        assert_eq!(disabled.stream_prelude_wait(), None);
+
+        let too_long = RouteCredentialFailurePolicy::from_config_value(&json!({
+            "failure_policy": {
+                "stream_prelude_wait_ms": MAX_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS + 1
+            }
+        }))
+        .expect_err("above ceiling");
+        assert!(too_long.contains("stream_prelude_wait_ms"));
+    }
+
+    /// Salvaging an in-stream refusal is opt-in: upgrading from an older
+    /// release must not silently start spending extra billed requests.
+    #[test]
+    fn stream_salvage_is_off_by_default_and_opt_in() {
+        assert!(!RouteCredentialFailurePolicy::default().stream_salvage_enabled);
+        let legacy = RouteCredentialFailurePolicy::from_config_value(&json!({
+            "failure_policy": {"retry_count": 3}
+        }))
+        .expect("legacy policy");
+        assert!(!legacy.stream_salvage_enabled);
+
+        let enabled = RouteCredentialFailurePolicy::from_config_value(&json!({
+            "failure_policy": {"stream_salvage_enabled": true}
+        }))
+        .expect("enabled policy");
+        assert!(enabled.stream_salvage_enabled);
     }
 }

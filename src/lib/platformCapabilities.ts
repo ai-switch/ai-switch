@@ -39,7 +39,7 @@ export function capabilityReason(rule: CapabilityRule | undefined): string {
     return constraints.length ? constraints.join("，") + "。" : "该功能仅部分支持。";
   }
   if (rule.availability === "unavailable") {
-    return "该平台暂不支持此功能。";
+    return "该接入方式暂不支持此功能。";
   }
   return "";
 }

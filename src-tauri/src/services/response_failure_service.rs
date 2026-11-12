@@ -25,15 +25,171 @@ pub(crate) fn is_content_rejection(failure: &SemanticResponseFailure) -> bool {
     })
 }
 
-/// Returns whether a semantic response failure is a temporary upstream
-/// capacity issue rather than an account-specific failure.
-pub fn is_transient_response_failure(message: &str) -> bool {
+/// Upstream codes that name a capacity/overload verdict. These arrive either on
+/// a 200 SSE stream (`event: error` / `response.failed`) or as a plain JSON
+/// error, so matching the structured code is far more reliable than prose.
+const CAPACITY_ERROR_CODES: &[&str] = &[
+    "no_capacity",
+    "capacity_exceeded",
+    "insufficient_capacity",
+    "overloaded",
+    "overloaded_error",
+    "server_overloaded",
+    "model_overloaded",
+    "high_demand",
+];
+/// Azure/OpenAI-style "high demand" relays answer with HTTP 200 and this error
+/// family; `no_capacity` takes precedence over the generic `too_many_requests`.
+///
+/// Deliberately phrase-based. A bare "capacity" or "service unavailable" also
+/// shows up in context-length, storage and 503 errors that have nothing to do
+/// with an exhausted upstream pool — misclassifying those would hand a hard
+/// verdict a hundred retries and skip its account penalty.
+const CAPACITY_MESSAGE_MARKERS: &[&str] = &[
+    "high demand",
+    "peak load",
+    "provisioned throughput",
+    "no capacity",
+    "insufficient capacity",
+    "out of capacity",
+    "currently overloaded",
+    "servers are overloaded",
+    "model is overloaded",
+    "at capacity",
+];
+const RATE_LIMIT_ERROR_CODES: &[&str] = &[
+    "rate_limit_exceeded",
+    "rate_limit_error",
+    "too_many_requests",
+    "requests_per_minute_limit",
+    "tokens_per_minute_limit",
+];
+const RATE_LIMIT_MESSAGE_MARKERS: &[&str] = &[
+    "rate limit",
+    "too many requests",
+    "requests per minute",
+    "tokens per minute",
+    "please slow down",
+];
+/// Azure / OpenAI regional deployment throughput verdicts reuse the generic
+/// `rate_limit_exceeded` code but describe a *token* rate limit on a region or
+/// deployment, not this account's fixed request window. They are upstream-side
+/// capacity: re-asking after a short wait often lands in a free window, and
+/// parking the key punishes it for the provider's load. Requiring both a
+/// rate-limit-family code and one of these phrases keeps ordinary account
+/// limits ("Rate limit reached, please slow down") in the RateLimit bucket.
+const REGIONAL_THROUGHPUT_CODES: &[&str] = &[
+    "rate_limit_exceeded",
+    "tokens_per_minute_limit",
+    "too_many_requests",
+];
+const REGIONAL_THROUGHPUT_MESSAGE_MARKERS: &[&str] = &[
+    "exceeded token rate limit",
+    "token rate limit exceeded",
+    "exceeded the token rate limit",
+    "exceeded tokens per minute limit",
+];
+/// An exhausted balance or plan is never an upstream capacity problem, even
+/// when the gateway stamps a rate-limit-looking code on the envelope.
+const ACCOUNT_QUOTA_MESSAGE_MARKERS: &[&str] = &[
+    "your current quota",
+    "insufficient_quota",
+    "plan and billing",
+    "check your plan",
+    "billing details",
+    "quota exhausted",
+    "额度",
+];
+
+fn normalized_failure_text(message: &str) -> String {
     message
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase()
-        .contains("our servers are currently overloaded")
+}
+
+fn code_matches(failure: &SemanticResponseFailure, known: &[&str]) -> bool {
+    failure.code.as_deref().is_some_and(|code| {
+        let code = code.trim();
+        known
+            .iter()
+            .any(|candidate| code.eq_ignore_ascii_case(candidate))
+    })
+}
+
+fn error_type_matches(failure: &SemanticResponseFailure, known: &[&str]) -> bool {
+    failure.error_type.as_deref().is_some_and(|kind| {
+        let kind = kind.trim();
+        known
+            .iter()
+            .any(|candidate| kind.eq_ignore_ascii_case(candidate))
+    })
+}
+
+/// Whether the upstream refused because it is out of capacity right now, not
+/// because this account or this request is at fault. This is the class users
+/// most want to keep retrying long after ordinary errors have given up.
+pub fn is_capacity_response_failure(failure: &SemanticResponseFailure) -> bool {
+    if code_matches(failure, CAPACITY_ERROR_CODES) {
+        return true;
+    }
+    if is_regional_throughput_rate_limit(failure) {
+        return true;
+    }
+    let message = normalized_failure_text(&failure.message);
+    CAPACITY_MESSAGE_MARKERS
+        .iter()
+        .any(|marker| message.contains(marker))
+}
+
+/// The regional/per-deployment token budget is a pool-side throughput window,
+/// not a verdict on this account. Only a rate-limit-family code plus an
+/// explicit "token rate limit" sentence counts; a bare `rate_limit_exceeded`
+/// stays in the ordinary RateLimit class.
+fn is_regional_throughput_rate_limit(failure: &SemanticResponseFailure) -> bool {
+    if !(code_matches(failure, REGIONAL_THROUGHPUT_CODES)
+        || error_type_matches(failure, REGIONAL_THROUGHPUT_CODES))
+    {
+        return false;
+    }
+    let message = normalized_failure_text(&failure.message);
+    if ACCOUNT_QUOTA_MESSAGE_MARKERS
+        .iter()
+        .any(|marker| message.contains(marker))
+    {
+        return false;
+    }
+    REGIONAL_THROUGHPUT_MESSAGE_MARKERS
+        .iter()
+        .any(|marker| message.contains(marker))
+}
+
+/// Whether the failure is an ordinary rate limit, distinct from capacity: the
+/// account has a fixed window to wait out, so hammering it 100 times is wrong.
+pub fn is_rate_limit_response_failure(failure: &SemanticResponseFailure) -> bool {
+    if is_capacity_response_failure(failure) {
+        return false;
+    }
+    if code_matches(failure, RATE_LIMIT_ERROR_CODES)
+        || error_type_matches(failure, RATE_LIMIT_ERROR_CODES)
+    {
+        return true;
+    }
+    let message = normalized_failure_text(&failure.message);
+    RATE_LIMIT_MESSAGE_MARKERS
+        .iter()
+        .any(|marker| message.contains(marker))
+}
+
+/// Kept for callers that only have the message; equivalent to recognising the
+/// "overloaded" family. The classifier above is the one the proxy uses.
+pub fn is_transient_response_failure(message: &str) -> bool {
+    is_capacity_response_failure(&SemanticResponseFailure {
+        code: None,
+        error_type: None,
+        message: message.to_string(),
+    })
 }
 
 /// The `error.type` new-api style gateways stamp on their own errors, as
@@ -711,6 +867,111 @@ data: {"type":"response.failed","error":{"message":"down"}}
             " our   servers are currently overloaded "
         ));
         assert!(!is_transient_response_failure("invalid model"));
+    }
+
+    /// The real 200 SSE failure from the live log: `event: error` carries
+    /// `too_many_requests` + `no_capacity`, then `response.failed` repeats it.
+    #[test]
+    fn classifies_high_demand_relay_failure_as_capacity() {
+        let body = br#"event: error
+data: {"type":"error","error":{"type":"too_many_requests","code":"no_capacity","message":"The system is currently experiencing high demand and cannot process your request. Your request exceeds the maximum usage size allowed during peak load. For improved capacity reliability, consider switching to Provisioned Throughput."}}
+
+event: response.failed
+data: {"type":"response.failed","response":{"status":"failed","error":{"code":"no_capacity","message":"The system is currently experiencing high demand"}}}
+"#;
+        let failure = detect_response_failed(body).expect("semantic failure");
+        assert_eq!(failure.code.as_deref(), Some("no_capacity"));
+        assert_eq!(failure.error_type.as_deref(), Some("too_many_requests"));
+        assert!(is_capacity_response_failure(&failure));
+        // Capacity wins over the generic `too_many_requests` family.
+        assert!(!is_rate_limit_response_failure(&failure));
+    }
+
+    #[test]
+    fn separates_capacity_from_account_rate_limits_and_hard_verdicts() {
+        let rate_limit = detect_response_failed(
+            br#"{"error":{"code":"rate_limit_exceeded","type":"too_many_requests","message":"Rate limit reached, please slow down"}}"#,
+        )
+        .expect("rate limit failure");
+        assert!(!is_capacity_response_failure(&rate_limit));
+        assert!(is_rate_limit_response_failure(&rate_limit));
+
+        let quota = detect_response_failed(
+            br#"{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}"#,
+        )
+        .expect("quota failure");
+        assert!(!is_capacity_response_failure(&quota));
+        assert!(!is_rate_limit_response_failure(&quota));
+
+        let overload = SemanticResponseFailure {
+            code: None,
+            error_type: None,
+            message: "Our servers are currently overloaded. Please try again later.".to_string(),
+        };
+        assert!(is_capacity_response_failure(&overload));
+    }
+
+    /// The exact refusal reported after v0.1.2: HTTP 200, `response.created`,
+    /// then a generic `rate_limit_exceeded` naming an Azure region's token
+    /// budget. It describes the upstream pool, not this account, so it belongs
+    /// to the long-retry Capacity class.
+    #[test]
+    fn classifies_regional_token_rate_limit_as_capacity() {
+        let body = br#"event: error
+data: {"type":"error","error":{"type":"too_many_requests","code":"rate_limit_exceeded","message":"Your requests to gpt-6.1-sol for gpt-6.1-sol in eastus2 have exceeded token rate limit.","param":null}}
+
+event: response.failed
+data: {"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"Your requests to gpt-6.1-sol for gpt-6.1-sol in eastus2 have exceeded token rate limit."}}}
+"#;
+        let failure = detect_response_failed(body).expect("semantic failure");
+        assert_eq!(failure.code.as_deref(), Some("rate_limit_exceeded"));
+        assert_eq!(failure.error_type.as_deref(), Some("too_many_requests"));
+        assert!(is_capacity_response_failure(&failure));
+        assert!(!is_rate_limit_response_failure(&failure));
+
+        let bare = SemanticResponseFailure {
+            code: Some("tokens_per_minute_limit".to_string()),
+            error_type: None,
+            message: "Exceeded tokens per minute limit, please retry.".to_string(),
+        };
+        assert!(is_capacity_response_failure(&bare));
+    }
+
+    #[test]
+    fn regional_throughput_rule_does_not_swallow_account_limits() {
+        let candidates = [
+            r#"{"error":{"code":"rate_limit_exceeded","type":"too_many_requests","message":"Rate limit reached, please slow down"}}"#,
+            r#"{"error":{"code":"rate_limit_exceeded","message":"You exceeded your current quota, please check your plan and billing details"}}"#,
+            r#"{"error":{"code":"rate_limit_exceeded","message":"Requests per minute limit reached for this account"}}"#,
+            r#"{"error":{"code":"insufficient_quota","message":"Your requests have exceeded token rate limit"}}"#,
+        ];
+        for body in candidates {
+            let failure = detect_response_failed(body.as_bytes()).expect("semantic failure");
+            assert!(
+                !is_capacity_response_failure(&failure),
+                "misclassified as capacity: {}",
+                failure.message
+            );
+        }
+    }
+
+    /// Broad words must not turn a hard verdict into a hundred-retry class.
+    #[test]
+    fn generic_capacity_wording_does_not_claim_an_upstream_shortage() {
+        let candidates = [
+            r#"{"error":{"message":"This model's maximum context capacity is 128000 tokens"}}"#,
+            r#"{"error":{"message":"Service Unavailable"}}"#,
+            r#"{"error":{"message":"The upstream is temporarily unavailable"}}"#,
+            r#"{"error":{"code":"storage_capacity_exceeded","message":"Storage capacity is full"}}"#,
+        ];
+        for body in candidates {
+            let failure = detect_response_failed(body.as_bytes()).expect("semantic failure");
+            assert!(
+                !is_capacity_response_failure(&failure),
+                "misclassified as capacity: {}",
+                failure.message
+            );
+        }
     }
 
     #[test]

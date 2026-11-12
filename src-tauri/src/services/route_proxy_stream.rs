@@ -159,6 +159,54 @@ pub fn sse_payload_started(bytes: &[u8]) -> bool {
     })
 }
 
+/// Whether at least one *complete* SSE data frame has arrived.
+///
+/// A `response.created` frame echoes the whole request and is commonly
+/// delivered across several network chunks. Its trailing `data:` line is then
+/// only half a JSON document: `sse_payload_started` already says "payload",
+/// but there is no frame to judge yet. Committing on that partial line hands
+/// the client a truncated event and spends the only moment in which a late
+/// `response.failed` could still be retried.
+pub fn sse_has_complete_data_frame(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    text.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("data:")
+            .map(str::trim)
+            .is_some_and(|data| {
+                !data.is_empty()
+                    && (data == "[DONE]" || serde_json::from_str::<Value>(data).is_ok())
+            })
+    })
+}
+
+/// Whether the buffer ends in a `data:` line that is not yet a whole JSON
+/// document.
+///
+/// A large `response.created` echo is often delivered across several network
+/// chunks, and a late `response.failed` can be split the same way. Until that
+/// line parses there is no event to judge: committing would truncate the frame
+/// and spend the only moment in which the refusal could still be retried.
+///
+/// Pure keepalive comments have no `data:` line at all and deliberately return
+/// `false`, so they still hit the ordinary padding cap instead of inheriting
+/// the larger prelude budget.
+pub fn sse_has_partial_data_line(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    let mut partial = false;
+    for line in text.lines() {
+        let Some(data) = line.trim_start().strip_prefix("data:").map(str::trim) else {
+            continue;
+        };
+        if data.is_empty() || data == "[DONE]" {
+            partial = false;
+            continue;
+        }
+        partial = serde_json::from_str::<Value>(data).is_err();
+    }
+    partial
+}
+
 /// Whether every data frame buffered so far is a Chat role announcement that
 /// still carries no model output.
 ///
@@ -226,9 +274,75 @@ pub fn sse_is_chat_role_prelude(bytes: &[u8]) -> bool {
     saw_payload
 }
 
+/// Whether every data frame buffered so far is a zero-output Responses
+/// stream-opening event (`response.created` / `response.in_progress`).
+///
+/// A Responses upstream announces the response object before it emits any
+/// output — and so does a gateway that is about to refuse the turn for capacity
+/// reasons: it sends `response.created` and then `response.failed` (e.g. the
+/// "The system is currently experiencing high demand" refusal). Committing the
+/// stream on that announcement spends the only moment the attempt can still be
+/// retried; once the 200 and its first frame reached the client, a late
+/// `response.failed` can only be forwarded as a broken turn.
+///
+/// Only a prefix made entirely of such frames counts. Output, errors, terminal
+/// events, malformed JSON and Chat chunks all return `false`, so this never
+/// widens the hold-back window beyond the shape understood here.
+pub fn sse_is_responses_prelude(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    let mut saw_payload = false;
+    for line in text.lines() {
+        let Some(data) = line.trim_start().strip_prefix("data:").map(str::trim) else {
+            continue;
+        };
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        saw_payload = true;
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            return false;
+        };
+        if value.get("error").is_some_and(|error| !error.is_null())
+            || value
+                .pointer("/response/error")
+                .is_some_and(|error| !error.is_null())
+        {
+            return false;
+        }
+        match value.get("type").and_then(Value::as_str) {
+            Some("response.created" | "response.in_progress") => {}
+            // A few relays omit the envelope `type` and send the bare response
+            // object. Accept that shape only while it still says in progress —
+            // the status check below is what keeps a failed envelope out.
+            None => {}
+            _ => return false,
+        }
+        let Some(response) = value.get("response") else {
+            return false;
+        };
+        if response
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status != "in_progress" && status != "queued")
+        {
+            return false;
+        }
+        if response
+            .get("output")
+            .is_some_and(|output| output.as_array().is_some_and(|items| !items.is_empty()))
+        {
+            return false;
+        }
+    }
+    saw_payload
+}
+
 #[cfg(test)]
 mod payload_started_tests {
-    use super::{sse_is_chat_role_prelude, sse_payload_started};
+    use super::{
+        sse_has_complete_data_frame, sse_has_partial_data_line, sse_is_chat_role_prelude,
+        sse_is_responses_prelude, sse_payload_started,
+    };
 
     /// The shape that made this rule necessary: a gateway parks the client on
     /// comment frames, then reports the failure. Nothing was delivered, so the
@@ -254,6 +368,43 @@ mod payload_started_tests {
         assert!(!sse_payload_started(b"data: [DONE]\n\n"));
         assert!(!sse_payload_started(b"data:\n\n"));
         assert!(!sse_payload_started(b""));
+    }
+
+    /// A half-written `response.created` echo must not be mistaken for a
+    /// complete frame: it is the shape a 70 KB opening event has after the
+    /// first network chunk.
+    #[test]
+    fn a_split_opening_frame_is_not_complete_until_its_json_parses() {
+        let partial = b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"instructions\":\"sss";
+        assert!(sse_payload_started(partial));
+        assert!(!sse_has_complete_data_frame(partial));
+
+        let whole = b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n";
+        assert!(sse_has_complete_data_frame(whole));
+        assert!(sse_is_responses_prelude(whole));
+
+        assert!(sse_has_complete_data_frame(b"data: [DONE]\n\n"));
+        assert!(!sse_has_complete_data_frame(b": keepalive\n\n"));
+    }
+
+    /// Pure comment padding must keep the ordinary 64 KB cap: it has no
+    /// `data:` line in progress, so it is not a prelude that deserves the
+    /// larger hold-back. A complete frame followed by a split one, however,
+    /// still has an unfinished event and must stay inside the retry window.
+    #[test]
+    fn only_an_unfinished_data_line_counts_as_a_partial_frame() {
+        assert!(!sse_has_partial_data_line(
+            b": OPENROUTER PROCESSING\n\n: OPENROUTER PROCESSING\n\n"
+        ));
+        assert!(!sse_has_partial_data_line(b""));
+        assert!(sse_has_partial_data_line(
+            b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"instructions\":\"sss"
+        ));
+        let created = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n";
+        assert!(!sse_has_partial_data_line(created.as_bytes()));
+        assert!(sse_has_partial_data_line(
+            format!("{created}event: response.failed\ndata: {{\"type\":\"response.fa").as_bytes()
+        ));
     }
 
     /// A frame split across chunks still counts once its `data:` prefix lands,
@@ -298,6 +449,39 @@ mod payload_started_tests {
         assert!(!sse_is_chat_role_prelude(usage_only.as_bytes()));
         assert!(!sse_is_chat_role_prelude(b"data: [DONE]\n\n"));
         assert!(!sse_is_chat_role_prelude(b""));
+    }
+
+    /// The exact shape that used to leak a `response.failed` to the client:
+    /// the upstream creates the response, then refuses it for capacity reasons.
+    /// Nothing was produced, so the attempt is still retryable.
+    #[test]
+    fn responses_stream_opening_frames_are_a_prelude() {
+        let created = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\",\"output\":[],\"error\":null}}\n\n";
+        let in_progress = "data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"}}\n\n";
+        let bare = "data: {\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"}}\n\n";
+        assert!(sse_is_responses_prelude(created.as_bytes()));
+        assert!(sse_is_responses_prelude(in_progress.as_bytes()));
+        assert!(sse_is_responses_prelude(bare.as_bytes()));
+        assert!(sse_is_responses_prelude(
+            format!(": ping\n\n{created}").as_bytes()
+        ));
+    }
+
+    #[test]
+    fn a_failed_or_output_responses_frame_ends_the_prelude() {
+        let created = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"}}\n\n";
+        let failed = "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_1\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"The system is currently experiencing high demand\"}}}\n\n";
+        let output = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n";
+        let completed = "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
+        let chat = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n";
+        for frame in [failed, output, completed, chat] {
+            assert!(!sse_is_responses_prelude(
+                format!("{created}{frame}").as_bytes()
+            ));
+        }
+        assert!(!sse_is_responses_prelude(b"data: [DONE]\n\n"));
+        assert!(!sse_is_responses_prelude(b""));
+        assert!(!sse_is_responses_prelude(b"data: not-json\n\n"));
     }
 }
 
@@ -579,6 +763,18 @@ impl StreamObserver {
     }
     pub fn mark_stream_failed(&mut self) {
         self.semantic_failure = true;
+    }
+
+    /// An in-stream refusal was held back and the same response was finished by
+    /// the continuation pipeline. Settle this request as a success instead of
+    /// charging the account for the transient failure that was recovered.
+    ///
+    /// A later round can still fail: its own frames go through
+    /// `note_semantic_failure` again, so this only clears the verdict of the
+    /// round that was actually salvaged.
+    pub fn clear_semantic_failure(&mut self) {
+        self.semantic_failure = false;
+        self.failure = None;
     }
 
     pub fn quota_failure(&self) -> Option<&SemanticResponseFailure> {

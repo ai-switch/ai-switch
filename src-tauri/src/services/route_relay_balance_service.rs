@@ -2103,6 +2103,7 @@ mod tests {
                 responses_plaintext_reasoning_compat: None,
                 request_brotli_compression: None,
                 responses_encrypted_content_cleanup: None,
+                responses_cross_resource_strip: None,
                 responses_encrypted_content_aggressive_strip: None,
                 force_reasoning_content: None,
                 content_rejection_compat: None,

@@ -543,6 +543,7 @@ mod tests {
             close_to_tray: true,
             image_generation_enabled: false,
             claude_client_config_json: None,
+            claude_slot_overrides_json: None,
             config_write_clients_json: None,
             deepseek_harness_config_path: None,
             notification_config_json: None,

@@ -29,11 +29,15 @@ const FALLBACK_PREFIX_CHARS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum PoolModelMode {
-    /// Today's behavior: one merged, de-duplicated word list for the pool.
-    #[default]
+    /// One merged, de-duplicated word list for the pool.
     Aggregate,
     /// One entry per API account, plus one merged entry set for the official
-    /// accounts.
+    /// accounts. This is the default for a fresh pool: the client-setup page
+    /// presents it as 「路由模式」 and the user can see/pin which account a
+    /// model resolves to. An existing database that already stored
+    /// `aggregate` keeps reading `Aggregate` — `parse` is deliberately
+    /// unchanged, only the missing-row default moves.
+    #[default]
     Precise,
 }
 
@@ -221,7 +225,10 @@ mod tests {
             PoolModelMode::Aggregate
         );
         assert_eq!(PoolModelMode::parse(""), PoolModelMode::Aggregate);
-        assert_eq!(PoolModelMode::default(), PoolModelMode::Aggregate);
+        // A pool with no stored row starts in routing mode (the client-setup
+        // page's default); `parse` still fails closed to Aggregate for a
+        // hand-edited row.
+        assert_eq!(PoolModelMode::default(), PoolModelMode::Precise);
         assert_eq!(PoolModelMode::Precise.as_str(), "precise");
     }
 

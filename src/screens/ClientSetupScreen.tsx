@@ -1,15 +1,15 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, HelpCircle, Plug } from "lucide-react";
+import { HelpCircle, Plug } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { EndpointRow } from "../components/accounts/EndpointRow";
-import { AgentIcon } from "../components/brand/AgentIcon";
+import { ClaudeSlotSettingsDialog } from "../components/accounts/ClaudeSlotSettingsDialog";
 import {
   getClaudeSlotPlan,
   getClientDirectModes,
-  getSettings,
   getRoutePool,
   getRouteProxyKey,
   getRouteProxyStatus,
+  getSettings,
   listConfigWriteClients,
   listRouteCredentials,
   routeConfigWriteIsStale,
@@ -18,21 +18,21 @@ import {
   writeRouteProxyConfigs,
 } from "../lib/api/client";
 import type {
-  AppSettingsView,
-  ClaudeSlotPlan,
   ConfigWriteClientStatus,
   ConfigWriteOutcome,
-  DirectModeStatus,
   RouteCredential,
   RoutePoolModelMode,
 } from "../lib/api/types";
-import { claudeRoleForAlias } from "../lib/claude-roles";
 import {
+  CLAUDE_CODE_CLIENT_KEY,
   ClientIcon,
-  clientSetupPlatformLabels,
-  clientSetupPlatformOf,
-  clientSetupPlatforms,
-  type ClientSetupPlatform,
+  DEFAULT_AGENT_PLATFORM,
+  MESSAGES_AGENT_PLATFORM,
+  defaultAgentInterfaceFormat,
+  interfaceFormatHints,
+  interfaceFormatLabels,
+  platformForInterfaceFormat,
+  type AgentInterfaceFormat,
 } from "../lib/clientSetup";
 import { poolImageModels as poolImageModelsOf } from "../lib/imageCapability";
 import {
@@ -60,34 +60,29 @@ const fileStatusTones: Record<string, string> = {
   error: "bg-red-50 text-red-700",
 };
 
-/** The platform's first-party CLI: what a user who never chose gets today. */
-function nativeClientKeys(clients: ConfigWriteClientStatus[]): string[] {
-  return clients.filter((client) => client.native).map((client) => client.client_key);
+/**
+ * A fresh page preselects only the primary first-party CLI, matching the old
+ * Codex tab's default. Claude Code is opt-in: it has its own settings file and
+ * fixed `/model` slots, so writing it without an explicit choice would surprise
+ * users who only wanted their Codex CLI configured.
+ */
+function defaultSelectedClientKeys(clients: ConfigWriteClientStatus[]): string[] {
+  const firstNative = clients.find(
+    (client) => client.native && client.platform === DEFAULT_AGENT_PLATFORM,
+  );
+  return firstNative ? [firstNative.client_key] : [];
 }
 
 /**
  * Chinese copy for config-write failures whose backend message does not convey
  * the consequence. Keyed by error code so the wording stays with the reason.
  */
-/**
- * Codes that describe a *single target's* failure inside a grouped write.
- *
- * A grouped write reports one `filesystem.route_config_write` for the whole
- * batch and parks the real reason in `details.cause_code` / `targets[].error_code`,
- * so a message keyed only on the outer code is always the generic fallback.
- */
 const configWriteErrorMessages: Record<string, string> = {
-  // A failed parse makes a client fall back to its defaults and end up with an
-  // empty provider list, so "we did not touch it" is the load-bearing part.
   "validation.route_config_existing_invalid":
     "现有配置文件无法解析，已拒绝覆盖以免丢失你的 provider 配置。请先修复该文件再重试。",
-  "config.concurrent_modification":
-    "配置文件在写入期间被其他程序修改，未做改动。请重试。",
+  "config.concurrent_modification": "配置文件在写入期间被其他程序修改，未做改动。请重试。",
   "config.pool_models_empty": "算力池中没有可用模型，请先向池中加入账号。",
-  "config.client_unavailable": "所选客户端不支持当前平台。",
-  // Keeping the Codex login hands authentication to `auth.json`; without a
-  // ChatGPT login there is nothing to hand it to and the client would fail every
-  // request. The write is refused instead, so say how to fix it.
+  "config.client_unavailable": "所选客户端不支持当前接口格式。",
   "config.codex_login_missing":
     "已开启「保持 Codex 登录态」，但未找到 Codex 登录文件。请先在 Codex 中登录后再写入。",
   "config.codex_login_not_chatgpt":
@@ -109,15 +104,10 @@ function formatApiError(error: unknown, fallback: string): string {
   return message ? `${message}${detailText}` : fallback;
 }
 
-/**
- * Best-effort read of the failure code, including the code a grouped write
- * nested inside its `details` payload.
- */
 function configWriteErrorCode(error: unknown): string {
   if (!error || typeof error !== "object") return "";
   const outer = (error as { code?: unknown }).code;
   const code = typeof outer === "string" ? outer : "";
-  // A direct code is already the most specific thing we have.
   if (code && configWriteErrorMessages[code]) return code;
 
   const details = (error as { details?: unknown }).details;
@@ -149,34 +139,56 @@ function configWriteErrorCode(error: unknown): string {
   return code;
 }
 
-/** Prefers a code-specific Chinese message over the backend's raw text. */
 function formatConfigWriteError(error: unknown): string {
   const code = configWriteErrorCode(error);
   return configWriteErrorMessages[code] ?? formatApiError(error, "配置写入失败。");
 }
 
+/** A client plus the wire format the gateway writes into its config file. */
+type UnifiedClient = ConfigWriteClientStatus & {
+  interface_format: AgentInterfaceFormat;
+};
+
+type WriteGroup = { platform: string; clientKeys: string[] };
+
+/**
+ * One page, but two protocol families under the hood: Codex / Chat clients are
+ * written by the `codex` adapters, Anthropic Messages clients by the `claude`
+ * adapters. Each family has its own adapters, config path shape and access key.
+ * Splitting here keeps the backend wire contracts untouched.
+ */
+function groupsForClients(clients: UnifiedClient[], keys: string[] | null): WriteGroup[] {
+  const byKey = new Map(clients.map((client) => [client.client_key, client]));
+  const chosen = keys ?? defaultSelectedClientKeys(clients);
+  const groups = new Map<string, string[]>();
+  for (const key of chosen) {
+    const client = byKey.get(key);
+    if (!client) continue;
+    const platform = platformForInterfaceFormat(client.interface_format);
+    groups.set(platform, [...(groups.get(platform) ?? []), key]);
+  }
+  return [...groups].map(([platform, clientKeys]) => ({ platform, clientKeys }));
+}
+
+/**
+ * Aggregate versus precise, above the client cards because it decides the model
+ * list everywhere: what gets written into a client config, what a client that
+ * discovers models over `/v1/models` sees, and which ids the Claude slot dialog
+ * may offer. Routing (precise) mode is first and is the fresh-install default.
+ */
 const modelModeOptions: { mode: RoutePoolModelMode; label: string; hint: string }[] = [
+  {
+    mode: "precise",
+    label: "路由模式",
+    hint: "每个 API 账号各出「账号/模型」，请求钉在该账号；官方账号合并为「official/模型」继续轮换。",
+  },
   {
     mode: "aggregate",
     label: "聚合模式",
     hint: "同名模型合并成一条，请求在池内轮换。",
   },
-  {
-    mode: "precise",
-    label: "精确模式",
-    hint: "每个 API 账号各出「账号/模型」，请求钉在该账号；官方账号合并为「official/模型」继续轮换。",
-  },
 ];
 
-/**
- * Aggregate versus precise, above the platform tabs because it decides the model
- * list everywhere: what gets written into a client config, and what a client that
- * discovers models over `/v1/models` sees.
- *
- * Saved on toggle rather than on 写入 — it is a pool-level setting, the pool's own
- * model list changes at once, and the 「配置已过期」hint then nudges the user to
- * rewrite the client configs.
- */
 function ModelModePicker({
   mode,
   disabled,
@@ -205,9 +217,7 @@ function ModelModePicker({
             }`}
             disabled={disabled}
             onClick={() => {
-              if (mode !== option.mode) {
-                onChange(option.mode);
-              }
+              if (mode !== option.mode) onChange(option.mode);
             }}
             role="radio"
             type="button"
@@ -222,15 +232,15 @@ function ModelModePicker({
 }
 
 export type ClientSetupFocus = {
+  /** Legacy deep-link field: the page no longer has platform tabs. */
   platform?: string | null;
   clientKey?: string | null;
 };
 
 type ClientSetupScreenProps = {
-  /** Deep-link target (sidebar / 账号页 / 直连恢复)：预选平台 tab 与客户端。 */
   focus?: ClientSetupFocus | null;
   onFocusConsumed?: () => void;
-  /** Claude 槽位面板的「去调整映射」：跳到账号页并按来源筛选。 */
+  /** Claude Code 槽位弹窗的「去调整映射」：跳到账号页并按来源筛选。 */
   onOpenAccounts?: (provider: string) => void;
 };
 
@@ -241,48 +251,55 @@ export function ClientSetupScreen({
 }: ClientSetupScreenProps) {
   const queryClient = useQueryClient();
   const desktop = isDesktop();
-  const [platform, setPlatform] = useState<ClientSetupPlatform>(() =>
-    clientSetupPlatformOf(focus?.platform),
-  );
-  // 每个平台 tab 各记一份勾选：null 表示用户没碰过，按「内置客户端」默认。
-  const [selectionByPlatform, setSelectionByPlatform] = useState<
-    Partial<Record<ClientSetupPlatform, string[] | null>>
-  >({});
-  const [focusClientKey, setFocusClientKey] = useState<string | null>(
-    focus?.clientKey ?? null,
-  );
+  // `null` until the user picks, so the page defaults to the first-party CLIs.
+  const [selection, setSelection] = useState<string[] | null>(null);
+  const [focusClientKey, setFocusClientKey] = useState<string | null>(focus?.clientKey ?? null);
   const [deepSeekHarnessPathOverride, setDeepSeekHarnessPathOverride] = useState<string | null>(null);
-  const [slotPanelOpen, setSlotPanelOpen] = useState(false);
-  const [clientConfigDraft, setClientConfigDraft] = useState("");
-  const [clientConfigError, setClientConfigError] = useState<string | null>(null);
+  const [slotDialogOpen, setSlotDialogOpen] = useState(false);
+  const [slotSettingsError, setSlotSettingsError] = useState<string | null>(null);
   const [writeError, setWriteError] = useState<string | null>(null);
   const [outcomes, setOutcomes] = useState<ConfigWriteOutcome[]>([]);
 
-  // 深链：外部入口指定平台/客户端时，只应用一次，之后由用户自由切换。
+  // 深链：外部入口指定客户端时，只应用一次，之后由用户自由切换。
   useEffect(() => {
     if (!focus) return;
-    if (focus.platform) {
-      setPlatform(clientSetupPlatformOf(focus.platform));
-    }
     setFocusClientKey(focus.clientKey ?? null);
     onFocusConsumed?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- focus 对象由 App 每次 new，依赖它即可。
   }, [focus]);
 
   const capabilitiesQuery = usePlatformCapabilities();
-  const tabCapability = findPlatformCapability(capabilitiesQuery.data, platform);
-  const capabilityReady = capabilitiesQuery.isSuccess && Boolean(tabCapability);
-  const configWriteRule = tabCapability?.operations.config_write;
-  const configWriteEnabled = capabilityReady && operationEnabled(configWriteRule);
+  const configWriteRule = findPlatformCapability(
+    capabilitiesQuery.data,
+    DEFAULT_AGENT_PLATFORM,
+  )?.operations.config_write;
+  const configWriteEnabled =
+    capabilitiesQuery.isSuccess && Boolean(configWriteRule) && operationEnabled(configWriteRule);
   const configWriteReason = capabilityReason(configWriteRule);
   const capabilityDisabledReason = configWriteEnabled ? null : configWriteReason;
 
-  // Pool-wide client behavior switches. Claude Code reads these from its own
-  // settings file, which the whole pool shares, so they cannot be per-account.
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getSettings });
-  const clientsQuery = useQuery({
-    queryKey: ["config-write-clients", platform],
-    queryFn: () => listConfigWriteClients(platform),
+  /** The old Codex client list plus Claude Code; every other agent appears once. */
+  const clientsQuery = useQuery<UnifiedClient[]>({
+    queryKey: ["config-write-clients-unified"],
+    queryFn: async () => {
+      const [codex, claude] = await Promise.all([
+        listConfigWriteClients(DEFAULT_AGENT_PLATFORM),
+        listConfigWriteClients(MESSAGES_AGENT_PLATFORM),
+      ]);
+      const claudeCode =
+        claude.find((client) => client.client_key === CLAUDE_CODE_CLIENT_KEY) ??
+        claude.find((client) => client.client_key === "claude") ??
+        claude.find((client) => client.native);
+      const merged = [...codex];
+      if (claudeCode && !merged.some((client) => client.client_key === claudeCode.client_key)) {
+        merged.push(claudeCode);
+      }
+      return merged.map((client) => ({
+        ...client,
+        interface_format: defaultAgentInterfaceFormat(client.client_key),
+      }));
+    },
   });
   const routeProxyQuery = useQuery({
     queryKey: ["route-proxy-status"],
@@ -291,10 +308,10 @@ export function ClientSetupScreen({
   });
   const routeServiceReady =
     Boolean(routeProxyQuery.data?.route_access_enabled) && Boolean(routeProxyQuery.data?.running);
-  // 每个平台一把池 key：读即铸造，页面挂载即代表用户有写入意图。
+  // 主接入 Key（Codex / Chat 协议族）。Messages 客户端的 Key 由写入流程自己铸。
   const routeProxyKeyQuery = useQuery({
-    queryKey: ["route-proxy-key", platform],
-    queryFn: () => getRouteProxyKey(platform),
+    queryKey: ["route-proxy-key", DEFAULT_AGENT_PLATFORM],
+    queryFn: () => getRouteProxyKey(DEFAULT_AGENT_PLATFORM),
     enabled: routeServiceReady,
   });
   const directModesQuery = useQuery({
@@ -305,14 +322,14 @@ export function ClientSetupScreen({
     refetchOnWindowFocus: true,
   });
   const routePoolQuery = useQuery({
-    queryKey: ["route-pool", platform, "active"],
-    queryFn: () => getRoutePool(platform),
+    queryKey: ["route-pool", DEFAULT_AGENT_PLATFORM, "active"],
+    queryFn: () => getRoutePool(DEFAULT_AGENT_PLATFORM),
     placeholderData: keepPreviousData,
   });
   // 生图没有自己的平台：能否出图只能从账号映射里读出来。
   const allCredentialsQuery = useQuery<RouteCredential[]>({
-    queryKey: ["route-credentials-all", "codex"],
-    queryFn: () => listRouteCredentials("codex"),
+    queryKey: ["route-credentials-all", DEFAULT_AGENT_PLATFORM],
+    queryFn: () => listRouteCredentials(DEFAULT_AGENT_PLATFORM),
     staleTime: 0,
     refetchOnMount: "always",
   });
@@ -321,52 +338,49 @@ export function ClientSetupScreen({
     [allCredentialsQuery.data],
   );
   const claudeSlotPlanQuery = useQuery({
-    queryKey: ["claude-slot-plan"],
+    queryKey: ["claude-slot-plan", routePoolQuery.data?.model_mode ?? "precise"],
     queryFn: getClaudeSlotPlan,
-    enabled: platform === "claude",
+    enabled: slotDialogOpen,
   });
 
   const clients = clientsQuery.data ?? [];
   const clientByTargetKey = useMemo(() => {
     const map = new Map<string, ConfigWriteClientStatus>();
-    for (const client of clients) {
-      map.set(client.target_key, client);
-    }
+    for (const client of clients) map.set(client.target_key, client);
     return map;
   }, [clients]);
 
   const storedClientSelection = useMemo<string[] | null>(() => {
     const raw = settingsQuery.data?.config_write_clients_json;
-    if (!raw) {
-      return null;
-    }
+    if (!raw) return null;
     try {
       const parsed = JSON.parse(raw) as Record<string, string[]>;
-      const stored = parsed[platform];
-      return Array.isArray(stored) && stored.length > 0 ? stored : null;
+      const keys = [
+        ...(Array.isArray(parsed[DEFAULT_AGENT_PLATFORM]) ? parsed[DEFAULT_AGENT_PLATFORM] : []),
+        ...(Array.isArray(parsed[MESSAGES_AGENT_PLATFORM]) ? parsed[MESSAGES_AGENT_PLATFORM] : []),
+      ];
+      return keys.length ? [...new Set(keys)] : null;
     } catch {
-      // A corrupt preference must not block writing.
       return null;
     }
-  }, [settingsQuery.data?.config_write_clients_json, platform]);
+  }, [settingsQuery.data?.config_write_clients_json]);
 
-  /** `null` until the user picks, so the tab defaults to the native client. */
   const initialSelection = focusClientKey ? [focusClientKey] : storedClientSelection;
-  const selected = selectionByPlatform[platform] ?? initialSelection ?? nativeClientKeys(clients);
+  const selected = selection ?? initialSelection ?? defaultSelectedClientKeys(clients);
 
   const directClientKeys = useMemo(
     () => (directModesQuery.data ?? []).map((item) => item.client_key),
     [directModesQuery.data],
   );
 
-  // `null` rather than `""` so `EndpointRow` shows its "reading..." placeholder
-  // instead of an empty field before the proxy status arrives.
-  const httpEndpoint = routeProxyEndpointForPlatform(routeProxyQuery.data?.base_url ?? "", platform) || null;
-  const httpsEndpoint = routeProxyEndpointForPlatform(routeProxyQuery.data?.https_base_url ?? "", platform) || null;
-  // 只有池里真有账号声明了生图能力、且代理地址已就绪时才给这一行：摊一个调不通的
-  // 端点比不摊更糟。
+  const httpEndpoint =
+    routeProxyEndpointForPlatform(routeProxyQuery.data?.base_url ?? "", DEFAULT_AGENT_PLATFORM) ||
+    null;
+  const httpsEndpoint =
+    routeProxyEndpointForPlatform(routeProxyQuery.data?.https_base_url ?? "", DEFAULT_AGENT_PLATFORM) ||
+    null;
   const imageEndpoint = poolImageModels.length
-    ? imageGenerationEndpoint(routeProxyQuery.data?.base_url ?? "", platform)
+    ? imageGenerationEndpoint(routeProxyQuery.data?.base_url ?? "", DEFAULT_AGENT_PLATFORM)
     : "";
   const restartClients = clients.filter(
     (client) => client.restart_required && selected.includes(client.client_key),
@@ -374,72 +388,54 @@ export function ClientSetupScreen({
   const directSelectedClients = clients.filter(
     (client) => selected.includes(client.client_key) && directClientKeys.includes(client.client_key),
   );
-  const deepSeekHarnessSelected = selected.some((clientKey) => clientKey.startsWith("deepseek_harness"));
-  const deepSeekHarnessPath = deepSeekHarnessPathOverride ?? settingsQuery.data?.deepseek_harness_config_path ?? "";
+  const deepSeekHarnessSelected = selected.some((clientKey) =>
+    clientKey.startsWith("deepseek_harness"),
+  );
+  const deepSeekHarnessPath =
+    deepSeekHarnessPathOverride ?? settingsQuery.data?.deepseek_harness_config_path ?? "";
 
   const toggle = (clientKey: string) => {
-    setSelectionByPlatform((current) => {
-      const base = current[platform] ?? initialSelection ?? nativeClientKeys(clients);
-      const next = base.includes(clientKey)
+    setSelection((current) => {
+      const base = current ?? initialSelection ?? defaultSelectedClientKeys(clients);
+      return base.includes(clientKey)
         ? base.filter((key) => key !== clientKey)
         : [...base, clientKey];
-      return { ...current, [platform]: next };
     });
   };
 
-  // The pool's own `/v1/models` changes the moment this is saved, so it is its own
-  // mutation rather than a parameter of the write: a user whose clients discover
-  // models over HTTP never clicks 写入 at all.
   const setModelModeMutation = useMutation({
-    mutationFn: (mode: RoutePoolModelMode) => setRoutePoolModelMode({ platform, mode }),
+    mutationFn: (mode: RoutePoolModelMode) =>
+      setRoutePoolModelMode({ platform: DEFAULT_AGENT_PLATFORM, mode }),
     onSuccess: (state) => {
-      queryClient.setQueryData(["route-pool", platform, "active"], state);
-      // The rendered client config now differs from disk, which is exactly what
-      // the staleness hint is for.
+      queryClient.setQueryData(["route-pool", DEFAULT_AGENT_PLATFORM, "active"], state);
       void queryClient.invalidateQueries({ queryKey: ["route-config-stale"] });
+      void queryClient.invalidateQueries({ queryKey: ["claude-slot-plan"] });
     },
     onError: (error) => setWriteError(formatApiError(error, "切换模型清单模式失败。")),
   });
 
-  const saveClientConfigMutation = useMutation({
-    mutationFn: async (configJson: string | null) => {
+  const saveSlotSettingsMutation = useMutation({
+    mutationFn: async (payload: {
+      overridesJson: string;
+      clientConfigJson: string | null;
+    }) => {
       const settings = settingsQuery.data;
-      if (!settings) {
-        throw new Error("设置尚未加载完成。");
-      }
-      return saveSettings({ ...settings, claude_client_config_json: configJson });
+      if (!settings) throw new Error("设置尚未加载完成。");
+      return saveSettings({
+        ...settings,
+        claude_slot_overrides_json: payload.overridesJson,
+        claude_client_config_json: payload.clientConfigJson,
+      });
     },
     onSuccess: (settings) => {
       queryClient.setQueryData(["settings"], settings);
-      setClientConfigError(null);
+      setSlotSettingsError(null);
+      setSlotDialogOpen(false);
       void queryClient.invalidateQueries({ queryKey: ["route-config-stale"] });
+      void queryClient.invalidateQueries({ queryKey: ["claude-slot-plan"] });
     },
-    onError: (error) => setClientConfigError(formatApiError(error, "保存全局配置失败。")),
+    onError: (error) => setSlotSettingsError(formatApiError(error, "保存槽位设置失败。")),
   });
-
-  const submitClientConfig = () => {
-    const trimmed = clientConfigDraft.trim();
-    if (!trimmed) {
-      setClientConfigError(null);
-      saveClientConfigMutation.mutate(null);
-      return;
-    }
-    // Validate here rather than at write time: a malformed value is ignored by
-    // the writer, which would look like the setting silently doing nothing.
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch {
-      setClientConfigError("不是合法的 JSON。");
-      return;
-    }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      setClientConfigError("需要一个 JSON 对象，例如 {\"includeCoAuthoredBy\": false}。");
-      return;
-    }
-    setClientConfigError(null);
-    saveClientConfigMutation.mutate(trimmed);
-  };
 
   const writeConfigsMutation = useMutation({
     mutationFn: async ({
@@ -449,17 +445,13 @@ export function ClientSetupScreen({
       clientKeys: string[];
       deepSeekHarnessConfigPath: string | null;
     }) => {
-      if (!configWriteEnabled) {
-        throw new Error(configWriteReason);
-      }
+      if (!configWriteEnabled) throw new Error(configWriteReason);
       let settings = settingsQuery.data;
       if (
         deepSeekHarnessConfigPath !== (settings?.deepseek_harness_config_path ?? null) &&
         (settings || deepSeekHarnessConfigPath !== null)
       ) {
-        if (!settings) {
-          throw new Error("设置尚未加载，无法保存 DSH 配置路径。");
-        }
+        if (!settings) throw new Error("设置尚未加载，无法保存 DSH 配置路径。");
         const pathUpdated = await saveSettings({
           ...settings,
           deepseek_harness_config_path: deepSeekHarnessConfigPath,
@@ -467,13 +459,18 @@ export function ClientSetupScreen({
         queryClient.setQueryData(["settings"], pathUpdated);
         settings = pathUpdated;
       }
-      const writeOutcomes = await writeRouteProxyConfigs(
-        routeProxyQuery.data?.base_url ?? null,
-        platform,
-        clientKeys,
-      );
-      // Remember the choice so the next write does not need re-picking, and so
-      // the staleness nudge covers exactly the clients that were written.
+
+      const groups = groupsForClients(clients, clientKeys);
+      const writeOutcomes: ConfigWriteOutcome[] = [];
+      for (const group of groups) {
+        const results = await writeRouteProxyConfigs(
+          routeProxyQuery.data?.base_url ?? null,
+          group.platform,
+          group.clientKeys,
+        );
+        writeOutcomes.push(...results);
+      }
+
       if (settings) {
         let existing: Record<string, string[]> = {};
         try {
@@ -481,29 +478,25 @@ export function ClientSetupScreen({
             ? (JSON.parse(settings.config_write_clients_json) as Record<string, string[]>)
             : {};
         } catch {
-          // A corrupt preference must not block writing.
           existing = {};
         }
+        const byPlatform = new Map(groups.map((group) => [group.platform, group.clientKeys]));
         const updated = await saveSettings({
           ...settings,
           config_write_clients_json: JSON.stringify({
             ...existing,
-            [platform]: clientKeys,
+            [DEFAULT_AGENT_PLATFORM]: byPlatform.get(DEFAULT_AGENT_PLATFORM) ?? [],
+            [MESSAGES_AGENT_PLATFORM]: byPlatform.get(MESSAGES_AGENT_PLATFORM) ?? [],
           }),
         });
         queryClient.setQueryData(["settings"], updated);
       }
       return writeOutcomes;
     },
-    onMutate: () => {
-      setWriteError(null);
-    },
+    onMutate: () => setWriteError(null),
     onSuccess: (writeOutcomes) => {
       setOutcomes(writeOutcomes);
       setFocusClientKey(null);
-      // A group resolves as long as one client succeeded, so a partial failure
-      // arrives here rather than in `onError`. Without this the only trace is
-      // the result panel.
       const failed = writeOutcomes.filter((outcome) => outcome.status !== "succeeded");
       if (failed.length > 0) {
         const names = failed.map((outcome) => {
@@ -515,35 +508,37 @@ export function ClientSetupScreen({
       }
       void queryClient.invalidateQueries({ queryKey: ["client-direct-modes"] });
       void queryClient.invalidateQueries({ queryKey: ["route-config-stale"] });
-      void queryClient.invalidateQueries({ queryKey: ["config-write-clients", platform] });
+      void queryClient.invalidateQueries({ queryKey: ["config-write-clients-unified"] });
     },
     onError: (error) => {
       setWriteError(formatConfigWriteError(error));
-      // 配置可能已写成、但保存勾选偏好失败；模式以文件和后端状态为准。
       void queryClient.invalidateQueries({ queryKey: ["client-direct-modes"] });
     },
   });
 
-  // Config is written on demand, so mapping and client-config edits sit unapplied
-  // until the user asks for a write. The backend answers this by rendering through
-  // the real adapter and diffing against disk, so the hint cannot drift from what
-  // a write would actually produce.
   const configWriteStaleQuery = useQuery({
     queryKey: [
       "route-config-stale",
-      platform,
       routeProxyQuery.data?.base_url ?? null,
       allCredentialsQuery.dataUpdatedAt,
       settingsQuery.data?.claude_client_config_json ?? null,
+      settingsQuery.data?.claude_slot_overrides_json ?? null,
       storedClientSelection,
       routePoolQuery.data?.model_mode ?? null,
     ],
-    queryFn: () =>
-      routeConfigWriteIsStale(
-        routeProxyQuery.data?.base_url ?? null,
-        platform,
-        storedClientSelection,
-      ),
+    queryFn: async () => {
+      const groups = groupsForClients(clients, storedClientSelection);
+      const results = await Promise.all(
+        groups.map((group) =>
+          routeConfigWriteIsStale(
+            routeProxyQuery.data?.base_url ?? null,
+            group.platform,
+            group.clientKeys,
+          ),
+        ),
+      );
+      return results.some(Boolean);
+    },
     enabled: routeServiceReady && configWriteEnabled,
     staleTime: 0,
   });
@@ -551,11 +546,7 @@ export function ClientSetupScreen({
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    // An empty write would report success and change nothing.
-    if (!configWriteEnabled || writeConfigsMutation.isPending || selected.length === 0) {
-      return;
-    }
-    // Submit in list order so the result panel lists clients predictably.
+    if (!configWriteEnabled || writeConfigsMutation.isPending || selected.length === 0) return;
     const customDeepSeekHarnessPath = deepSeekHarnessPath.trim();
     writeConfigsMutation.mutate({
       clientKeys: clients
@@ -565,44 +556,14 @@ export function ClientSetupScreen({
     });
   };
 
-  const openClaudeSettings = () => {
-    setClientConfigDraft(settingsQuery.data?.claude_client_config_json ?? "");
-    setClientConfigError(null);
-    setSlotPanelOpen(true);
-  };
-
-  const slotPlan = claudeSlotPlanQuery.data;
-  const slotRows: { label: string; alias: string; model: string | null; display_name: string | null }[] =
-    slotPlan
-      ? [
-          ...slotPlan.slots.map((slot) => ({
-            label: claudeRoleForAlias(slot.alias)?.label ?? slot.alias,
-            alias: slot.alias,
-            model: slot.model,
-            display_name: slot.display_name,
-          })),
-          {
-            label: claudeRoleForAlias("claude-subagent")?.label ?? "Subagent",
-            alias: "claude-subagent",
-            model: slotPlan.subagent_model,
-            display_name: null,
-          },
-          {
-            label: claudeRoleForAlias("claude-model")?.label ?? "默认兜底模型",
-            alias: "claude-model",
-            model: slotPlan.fallback_model,
-            display_name: null,
-          },
-        ]
-      : [];
-
   const writing = writeConfigsMutation.isPending;
-  const hasSettingsButton = (client: ConfigWriteClientStatus) =>
-    client.client_key === "claude" || client.client_key.startsWith("deepseek_harness");
 
-  const renderClientCard = (client: ConfigWriteClientStatus): ReactNode => {
+  const renderClientCard = (client: UnifiedClient): ReactNode => {
     const checked = selected.includes(client.client_key);
     const direct = directClientKeys.includes(client.client_key);
+    const isClaudeCode =
+      client.interface_format === "messages" &&
+      (client.client_key === CLAUDE_CODE_CLIENT_KEY || client.client_key === "claude");
     return (
       <li
         className={`rounded-xl border bg-white p-3 ${
@@ -620,8 +581,8 @@ export function ClientSetupScreen({
             onChange={() => toggle(client.client_key)}
             type="checkbox"
           />
-          <ClientIcon clientKey={client.client_key} className="h-8 w-8 shrink-0" />
-          <div className="grid min-w-0 flex-1 gap-0.5">
+          <ClientIcon className="h-9 w-9 shrink-0" clientKey={client.client_key} />
+          <div className="grid min-w-0 flex-1 gap-1">
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="flex items-center gap-1.5 text-[13px] font-semibold text-stone-950">
                 {client.display_name}
@@ -634,6 +595,13 @@ export function ClientSetupScreen({
                     <HelpCircle aria-hidden="true" className="h-3.5 w-3.5 text-stone-400" />
                   </span>
                 ) : null}
+              </span>
+              <span
+                aria-label={`接口格式 ${interfaceFormatLabels[client.interface_format]}`}
+                className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-800"
+                title={interfaceFormatHints[client.interface_format]}
+              >
+                {interfaceFormatLabels[client.interface_format]}
               </span>
               <span
                 className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
@@ -666,100 +634,30 @@ export function ClientSetupScreen({
                 {client.config_path}
               </span>
             ) : null}
+            <span className="text-[10px] leading-4 text-stone-400">
+              {interfaceFormatHints[client.interface_format]}
+            </span>
             {client.error_code ? (
               <span className="font-mono text-[11px] text-red-700">{client.error_code}</span>
             ) : null}
           </div>
-          {client.client_key === "claude" ? (
+          {isClaudeCode ? (
             <button
-              aria-label="设置 Claude 槽位映射"
-              aria-expanded={slotPanelOpen}
+              aria-label="设置 Claude Code 槽位映射"
               className="shrink-0 rounded-md border border-stone-200 bg-white px-2.5 py-1.5 text-[12px] font-semibold text-stone-700 motion-control hover:bg-stone-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-              onClick={() => (slotPanelOpen ? setSlotPanelOpen(false) : openClaudeSettings())}
+              onClick={() => {
+                setSlotSettingsError(null);
+                setSlotDialogOpen(true);
+              }}
               type="button"
             >
               设置
             </button>
           ) : null}
         </div>
-        {client.client_key === "claude" && slotPanelOpen ? renderClaudeSlotPanel() : null}
       </li>
     );
   };
-
-  const renderClaudeSlotPanel = (): ReactNode => (
-    <div className="mt-3 grid gap-3 rounded-lg border border-stone-200 bg-stone-50 p-3">
-      <div className="grid gap-1">
-        <p className="text-[11px] font-semibold text-stone-600">模型槽位映射</p>
-        <p className="text-[11px] leading-5 text-stone-500">
-          槽位从池内 API 账号的模型映射别名自动解析；写入时落到 Claude Code
-          settings.json 的对应 env。没有映射的槽位会被清空。
-        </p>
-      </div>
-      {claudeSlotPlanQuery.isLoading ? (
-        <p className="text-[11px] text-stone-500">读取中...</p>
-      ) : claudeSlotPlanQuery.isError ? (
-        <p className="text-[11px] text-red-700" role="alert">
-          槽位信息读取失败。
-        </p>
-      ) : (
-        <ul className="grid list-none gap-1" data-testid="claude-slot-plan">
-          {slotRows.map((row) => (
-            <li
-              className="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-md bg-white px-2.5 py-1.5 text-[12px]"
-              key={row.alias}
-            >
-              <span className="font-semibold text-stone-950">{row.label}</span>
-              <span className="font-mono text-[11px] text-stone-400">{row.alias}</span>
-              <span aria-hidden="true" className="text-stone-300">
-                →
-              </span>
-              {row.model ? (
-                <span className="font-mono text-[11px] text-stone-800">{row.model}</span>
-              ) : (
-                <span className="text-[11px] text-stone-400">未映射（写入时清空）</span>
-              )}
-              {row.display_name ? (
-                <span className="text-[11px] text-stone-500">菜单显示「{row.display_name}」</span>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      )}
-      <button
-        className="w-fit rounded-md border border-stone-300 bg-white px-2.5 py-1.5 text-[12px] font-semibold text-stone-700 motion-control hover:bg-stone-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-        onClick={() => onOpenAccounts?.("claude")}
-        type="button"
-      >
-        去调整映射
-      </button>
-      <label className="grid gap-1.5">
-        <span className="text-[11px] font-semibold text-stone-600">
-          全局客户端配置（整池共用，写入配置时合并进 settings.json 根级）
-        </span>
-        <textarea
-          aria-label="全局客户端配置 JSON"
-          className="min-h-28 rounded-md border border-stone-200 bg-white px-2.5 py-2 font-mono text-[11px] leading-5 text-stone-800 outline-none focus:border-blue-400"
-          onChange={(event) => setClientConfigDraft(event.target.value)}
-          placeholder='{"includeCoAuthoredBy": false}'
-          value={clientConfigDraft}
-        />
-      </label>
-      {clientConfigError ? (
-        <p className="text-[11px] text-red-700" role="alert">
-          {clientConfigError}
-        </p>
-      ) : null}
-      <button
-        className="w-fit rounded-md bg-stone-900 px-2.5 py-1.5 text-[12px] font-semibold text-white motion-control hover:bg-stone-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
-        disabled={!settingsQuery.data || saveClientConfigMutation.isPending}
-        onClick={submitClientConfig}
-        type="button"
-      >
-        {saveClientConfigMutation.isPending ? "保存中..." : "保存全局配置"}
-      </button>
-    </div>
-  );
 
   return (
     <div className="mx-auto w-full max-w-4xl px-4 py-5">
@@ -772,7 +670,7 @@ export function ClientSetupScreen({
             客户端接入
           </h1>
           <p className="mt-1 text-[13px] leading-5 text-stone-600">
-            把算力池接入常用 Agent：勾选要写入的客户端一键写入；其他工具手动复制端点参数。
+            把同一个算力池接入常用 Agent：勾选要写入的客户端一键写入；其他工具手动复制端点参数。
           </p>
         </div>
       </header>
@@ -816,8 +714,6 @@ export function ClientSetupScreen({
               ) : null}
             </div>
           ))}
-          {/* The write page may be left afterwards, so the restart requirement has
-              to be repeated right here. */}
           {outcomes.some(
             (outcome) => clientByTargetKey.get(outcome.target_key)?.restart_required,
           ) ? (
@@ -857,33 +753,16 @@ export function ClientSetupScreen({
       <form className="mt-4 grid gap-4" onSubmit={submit}>
         <ModelModePicker
           disabled={writing || setModelModeMutation.isPending}
-          mode={routePoolQuery.data?.model_mode ?? "aggregate"}
+          mode={routePoolQuery.data?.model_mode ?? "precise"}
           onChange={(mode) => setModelModeMutation.mutate(mode)}
         />
 
-        <div
-          aria-label="写入平台"
-          className="flex w-fit flex-wrap items-center gap-1 rounded-lg bg-stone-100 p-1"
-          role="tablist"
-        >
-          {clientSetupPlatforms.map((item) => {
-            const active = platform === item;
-            return (
-              <button
-                aria-selected={active}
-                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-semibold motion-control focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                  active ? "bg-stone-900 text-white" : "text-stone-600 hover:text-stone-950"
-                }`}
-                key={item}
-                onClick={() => setPlatform(item)}
-                role="tab"
-                type="button"
-              >
-                <AgentIcon className="h-3.5 w-3.5" platform={item} />
-                {clientSetupPlatformLabels[item]}
-              </button>
-            );
-          })}
+        <div className="grid gap-1.5">
+          <span className="text-[11px] font-semibold text-stone-600">智能体接入目标</span>
+          <p className="text-[11px] leading-5 text-stone-500">
+            账号池始终只有同一个。卡片上的接口格式决定写入时走哪组适配器与哪把接入 Key；
+            Claude Code 只有固定的 /model 槽位，需要单独设置。
+          </p>
         </div>
 
         {capabilityDisabledReason ? (
@@ -899,10 +778,10 @@ export function ClientSetupScreen({
           <p className="text-[12px] text-stone-500">读取客户端列表中...</p>
         ) : clients.length === 0 ? (
           <p className="rounded-xl bg-stone-50 px-3.5 py-3 text-xs leading-5 text-stone-600">
-            该平台暂无可写入的客户端。
+            暂无可写入的客户端。
           </p>
         ) : (
-          <ul className="grid list-none gap-2">{clients.map(renderClientCard)}</ul>
+          <ul className="grid list-none gap-2 sm:grid-cols-2">{clients.map(renderClientCard)}</ul>
         )}
 
         {deepSeekHarnessSelected ? (
@@ -954,14 +833,8 @@ export function ClientSetupScreen({
             </p>
             <div className="grid gap-2.5 rounded-md bg-stone-50 px-3.5 py-3">
               <EndpointRow label="Base URL" value={httpEndpoint} />
-              {/* HTTPS has its own port and is never written into a config:
-                  clients that ship their own CA bundle (curl, Node-based CLIs)
-                  cannot see the local root certificate in the system trust store,
-                  so an https:// address would simply break them. Rendered only
-                  when it exists, so the row never sits empty. */}
               {httpsEndpoint ? <EndpointRow label="HTTPS Base URL" value={httpsEndpoint} /> : null}
               <EndpointRow label="API Key" secret value={routeServiceReady ? routeProxyKeyQuery.data ?? null : null} />
-              {/* 生图与文本共用这个池和这张 key，只是路径不同。 */}
               {imageEndpoint ? <EndpointRow label="图片端点" value={imageEndpoint} /> : null}
             </div>
             {imageEndpoint ? (
@@ -979,7 +852,8 @@ export function ClientSetupScreen({
                   : "正常情况用上面的 Base URL（HTTP）即可。需要 TLS 的特殊场景可在设置里开启 HTTPS，它会另占一个端口。"}
             </p>
             <p className="text-[11px] leading-5 text-amber-800">
-              {`注意：每个平台的算力池端点 API Key 都不一样。这里给出的是 ${clientSetupPlatformLabels[platform]} 平台的 Key，切换平台后要各自复制。`}
+              这里给出的是主接入 Key（Codex / Chat 协议族）。勾选写入时，网关会按每个客户端的接口格式自动填入对应的
+              Key；Anthropic Messages 客户端使用另一把 Key，已随配置一并写入，无需手工复制。
             </p>
           </div>
         </details>
@@ -997,6 +871,19 @@ export function ClientSetupScreen({
           </button>
         </div>
       </form>
+
+      {slotDialogOpen ? (
+        <ClaudeSlotSettingsDialog
+          clientConfigJson={settingsQuery.data?.claude_client_config_json}
+          error={slotSettingsError}
+          onClose={() => setSlotDialogOpen(false)}
+          onOpenAccounts={() => onOpenAccounts?.("claude")}
+          onSave={(payload) => saveSlotSettingsMutation.mutate(payload)}
+          overridesJson={settingsQuery.data?.claude_slot_overrides_json}
+          plan={claudeSlotPlanQuery.data}
+          saving={saveSlotSettingsMutation.isPending}
+        />
+      ) : null}
     </div>
   );
 }

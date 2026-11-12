@@ -5323,6 +5323,49 @@ describe("AccountsScreen", () => {
     expect(screen.queryByLabelText("Responses 明文推理兼容")).not.toBeInTheDocument();
   });
 
+  it("跨资源状态剥离自动匹配 agentrouter 备用域名且手动关闭优先", async () => {
+    vi.mocked(listRouteCredentials).mockResolvedValue([{
+      ...credentialsFixture[1],config_json:JSON.stringify({base_url:"https://ps.air-outer.com/v1",interface_format:"openai-responses",model_mappings:[],unrelated:"keep"}),
+    }]);
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button",{name:"编辑 API Account"}));
+    await openFormTab("高级");
+    expect(screen.getByLabelText("跨资源状态剥离")).toHaveValue("auto");
+    expect(screen.getByText(/自动：已开启，命中 ps\.air-outer\.com/)).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText("跨资源状态剥离"),"off");
+    await userEvent.click(screen.getByRole("button",{name:"保存修改"}));
+    await waitFor(()=>expect(updateRouteCredential).toHaveBeenCalled());
+    const config=JSON.parse(vi.mocked(updateRouteCredential).mock.calls[0][1].config_json);
+    expect(config.responses_cross_resource_strip).toBe("off");
+    expect(config.unrelated).toBe("keep");
+  });
+
+  it("跨资源状态剥离可为其他网站强制开启，创建后重置且 Chat 不展示", async () => {
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button",{name:"新增账号"}));
+    await userEvent.click(screen.getByRole("button",{name:"API 账号"}));
+    await userEvent.type(screen.getByLabelText("API 账号名称"),"Strip API");
+    await userEvent.type(screen.getByLabelText("API Key"),"sk-fixture");
+    await userEvent.clear(screen.getByLabelText("Base URL"));
+    await userEvent.type(screen.getByLabelText("Base URL"),"https://other.example/v1");
+    await userEvent.selectOptions(screen.getByLabelText("接口格式"),"openai-responses");
+    await openFormTab("高级");
+    expect(screen.getByLabelText("跨资源状态剥离")).toHaveValue("auto");
+    await userEvent.selectOptions(screen.getByLabelText("跨资源状态剥离"),"on");
+    await userEvent.click(screen.getByRole("button",{name:"保存账号"}));
+    await waitFor(()=>expect(createApiRouteCredential).toHaveBeenCalledWith(expect.objectContaining({responses_cross_resource_strip:"on"})));
+    await userEvent.click(await screen.findByRole("button",{name:"新增账号"}));
+    await userEvent.click(screen.getByRole("button",{name:"API 账号"}));
+    await userEvent.selectOptions(screen.getByLabelText("接口格式"),"openai-responses");
+    await openFormTab("高级");
+    expect(screen.getByLabelText("跨资源状态剥离")).toHaveValue("auto");
+    await openFormTab("基础");
+    await userEvent.selectOptions(screen.getByLabelText("接口格式"),"openai");
+    await openFormTab("高级");
+    expect(screen.queryByLabelText("跨资源状态剥离")).not.toBeInTheDocument();
+  });
+
+
   it("creates API accounts with manual Brotli request compression and resets the mode", async () => {
     renderScreen();
     await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
@@ -6103,6 +6146,201 @@ describe("AccountsScreen", () => {
     ).toHaveLength(2);
     expect(updateRouteCredential).not.toHaveBeenCalled();
   });
+
+  it("offers per-error-class retry budgets and a one-click 100-retry capacity preset", async () => {
+    renderScreen();
+
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 Team Account" }));
+    await openFormTab("故障处理");
+
+    expect(screen.getByLabelText("重试总时长上限（秒）")).toHaveValue(0);
+    expect(screen.getByLabelText("容量类重试间隔（毫秒）")).toHaveValue(0);
+    expect(screen.getByLabelText("容量不足 / 高负载的额外重试次数")).toHaveValue(null);
+    expect(screen.getByLabelText("网络连接 / 超时的额外重试次数")).toHaveValue(null);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "一键设为容量类重试100次、间隔5000毫秒" }),
+    );
+    expect(screen.getByLabelText("容量不足 / 高负载的额外重试次数")).toHaveValue(100);
+    expect(screen.getByLabelText("容量类重试间隔（毫秒）")).toHaveValue(5000);
+
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
+    const payload = vi.mocked(updateRouteCredential).mock.calls[0][1];
+    expect(JSON.parse(payload.config_json).failure_policy).toMatchObject({
+      retry_class_limits: {
+        transport: null,
+        server_error: null,
+        rate_limit: null,
+        capacity: 100,
+        semantic: null,
+      },
+      capacity_retry_interval_ms: 5000,
+      max_retry_elapsed_seconds: 0,
+    });
+  });
+
+  it("hydrates stored per-class retry limits without inventing values for the others", async () => {
+    const api = {
+      ...credentialsFixture[1],
+      config_json: JSON.stringify({
+        base_url: "https://api.example.com/v1",
+        interface_format: "openai",
+        model_mappings: [],
+        failure_policy: {
+          retry_count: 2,
+          retry_class_limits: { capacity: 100, rate_limit: 0 },
+          capacity_retry_interval_ms: 3000,
+          max_retry_elapsed_seconds: 900,
+        },
+      }),
+    };
+    vi.mocked(listRouteCredentials).mockResolvedValue([api]);
+    vi.mocked(updateRouteCredential).mockResolvedValue(api);
+
+    renderScreen();
+
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 API Account" }));
+    await openFormTab("故障处理");
+
+    expect(screen.getByLabelText("容量不足 / 高负载的额外重试次数")).toHaveValue(100);
+    expect(screen.getByLabelText("限流 429的额外重试次数")).toHaveValue(0);
+    expect(screen.getByLabelText("网络连接 / 超时的额外重试次数")).toHaveValue(null);
+    expect(screen.getByLabelText("容量类重试间隔（毫秒）")).toHaveValue(3000);
+    expect(screen.getByLabelText("重试总时长上限（秒）")).toHaveValue(900);
+  });
+
+  it("rejects a per-class retry limit above the safe ceiling", async () => {
+    renderScreen();
+
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 Team Account" }));
+    await openFormTab("故障处理");
+    fireEvent.change(screen.getByLabelText("容量不足 / 高负载的额外重试次数"), {
+      target: { value: "1001" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    expect(
+      await screen.findAllByText(
+        /「容量不足 \/ 高负载」的额外重试次数必须是 0-1000 的整数/,
+      ),
+    ).not.toHaveLength(0);
+    expect(updateRouteCredential).not.toHaveBeenCalled();
+  });
+
+  it("validates the capacity retry interval and the total elapsed ceiling", async () => {
+    renderScreen();
+
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 Team Account" }));
+    await openFormTab("故障处理");
+    fireEvent.change(screen.getByLabelText("容量类重试间隔（毫秒）"), {
+      target: { value: "60001" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    expect(
+      await screen.findAllByText("容量类重试间隔必须是 0-60000 毫秒的整数"),
+    ).not.toHaveLength(0);
+    expect(updateRouteCredential).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("容量类重试间隔（毫秒）"), {
+      target: { value: "5000" },
+    });
+    fireEvent.change(screen.getByLabelText("重试总时长上限（秒）"), {
+      target: { value: "86401" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    expect(
+      await screen.findAllByText("重试总时长上限必须是 0-86400 秒的整数"),
+    ).not.toHaveLength(0);
+    expect(updateRouteCredential).not.toHaveBeenCalled();
+  });
+
+  it("defaults the stream prelude window to 60s and writes a tuned value on save", async () => {
+    renderScreen();
+
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 Team Account" }));
+    await openFormTab("故障处理");
+    expect(screen.getByLabelText("建流等待窗口（毫秒）")).toHaveValue(60_000);
+
+    fireEvent.change(screen.getByLabelText("建流等待窗口（毫秒）"), {
+      target: { value: "120000" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
+    const payload = vi.mocked(updateRouteCredential).mock.calls[0][1];
+    expect(JSON.parse(payload.config_json).failure_policy).toMatchObject({
+      stream_prelude_wait_ms: 120_000,
+    });
+  });
+
+  it("hydrates a stored stream prelude window and rejects an oversized one", async () => {
+    const api = {
+      ...credentialsFixture[1],
+      config_json: JSON.stringify({
+        base_url: "https://api.example.com/v1",
+        interface_format: "openai",
+        model_mappings: [],
+        failure_policy: { retry_count: 2, stream_prelude_wait_ms: 0 },
+      }),
+    };
+    vi.mocked(listRouteCredentials).mockResolvedValue([api]);
+    vi.mocked(updateRouteCredential).mockResolvedValue(api);
+
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 API Account" }));
+    await openFormTab("故障处理");
+    expect(screen.getByLabelText("建流等待窗口（毫秒）")).toHaveValue(0);
+
+    fireEvent.change(screen.getByLabelText("建流等待窗口（毫秒）"), {
+      target: { value: "600001" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    expect(
+      await screen.findAllByText("建流等待窗口必须是 0-600000 毫秒的整数"),
+    ).not.toHaveLength(0);
+    expect(updateRouteCredential).not.toHaveBeenCalled();
+  });
+
+  it("keeps in-stream salvage off by default and writes the opt-in on save", async () => {
+    renderScreen();
+
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 Team Account" }));
+    await openFormTab("故障处理");
+    const toggle = screen.getByLabelText("流内失败时自动救回") as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+
+    await userEvent.click(toggle);
+    expect(toggle.checked).toBe(true);
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
+    const payload = vi.mocked(updateRouteCredential).mock.calls[0][1];
+    expect(JSON.parse(payload.config_json).failure_policy).toMatchObject({
+      stream_salvage_enabled: true,
+    });
+  });
+
+  it("hydrates a stored in-stream salvage opt-in", async () => {
+    const api = {
+      ...credentialsFixture[1],
+      config_json: JSON.stringify({
+        base_url: "https://api.example.com/v1",
+        interface_format: "openai",
+        model_mappings: [],
+        failure_policy: { retry_count: 2, stream_salvage_enabled: true },
+      }),
+    };
+    vi.mocked(listRouteCredentials).mockResolvedValue([api]);
+
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "编辑 API Account" }));
+    await openFormTab("故障处理");
+    expect((screen.getByLabelText("流内失败时自动救回") as HTMLInputElement).checked).toBe(true);
+  });
+
 
   it("recognizes an API key from a clipboard image while editing an API credential", async () => {
     const imageBlob = new Blob(["fake"], { type: "image/png" });

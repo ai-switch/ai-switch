@@ -35,6 +35,16 @@ pub struct AppSettings {
     /// on every config write.
     #[serde(default)]
     pub claude_client_config_json: Option<String>,
+    /// Per-model-mode Claude Code `/model` slot overrides, as
+    /// `{"aggregate":{...},"precise":{...}}`. Keyed by mode because the model
+    /// ids clients request differ: routing mode pins `<account>/<alias>` while
+    /// aggregate mode exposes the bare `<alias>`. A stored override for the
+    /// other mode must never silently leak into the active one.
+    ///
+    /// Absent / malformed / empty means every slot falls back to the automatic
+    /// consensus resolution from the pool's API account mappings.
+    #[serde(default)]
+    pub claude_slot_overrides_json: Option<String>,
     /// Which clients each platform writes config for, as
     /// `{"codex":["codex","zcode"]}`. Recorded per platform because the dialog
     /// always opens in one platform's context. Absent or empty means the
@@ -80,6 +90,7 @@ pub struct AppSettingsView {
     pub close_to_tray: bool,
     pub image_generation_enabled: bool,
     pub claude_client_config_json: Option<String>,
+    pub claude_slot_overrides_json: Option<String>,
     pub config_write_clients_json: Option<String>,
     pub deepseek_harness_config_path: Option<String>,
     pub notification_config_json: Option<String>,
@@ -103,6 +114,7 @@ impl AppSettingsView {
             close_to_tray: settings.close_to_tray,
             image_generation_enabled: settings.image_generation_enabled,
             claude_client_config_json: settings.claude_client_config_json,
+            claude_slot_overrides_json: settings.claude_slot_overrides_json,
             config_write_clients_json: settings.config_write_clients_json,
             deepseek_harness_config_path: settings.deepseek_harness_config_path,
             notification_config_json: settings.notification_config_json,
@@ -127,6 +139,7 @@ impl AppSettings {
             close_to_tray: true,
             image_generation_enabled: false,
             claude_client_config_json: None,
+            claude_slot_overrides_json: None,
             config_write_clients_json: None,
             deepseek_harness_config_path: None,
             notification_config_json: None,

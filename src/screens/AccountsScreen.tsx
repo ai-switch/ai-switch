@@ -75,7 +75,9 @@ import { CopyRouteCredentialDialog } from "../components/accounts/CopyRouteCrede
 import { RequestCompressionOption } from "../components/accounts/RequestCompressionOption";
 import { requestCompressionModeFromConfig, writeRequestCompressionMode, type RequestCompressionMode } from "../lib/requestCompression";
 import { ResponsesPlaintextReasoningOption } from "../components/accounts/ResponsesPlaintextReasoningOption";
+import { ResponsesCrossResourceStripOption } from "../components/accounts/ResponsesCrossResourceStripOption";
 import { plaintextReasoningModeFromConfig, writePlaintextReasoningMode, type ResponsesPlaintextReasoningMode } from "../lib/responsesPlaintextReasoning";
+import { crossResourceStripModeFromConfig, writeCrossResourceStripMode, type ResponsesCrossResourceStripMode } from "../lib/responsesCrossResourceStrip";
 import { QuickEditDialog } from "../components/accounts/QuickEditDialog";
 import { neighborsForDrop } from "../lib/accountReorder";
 import {
@@ -178,6 +180,8 @@ import type {
   RouteCredential,
   RouteCredentialActivityEvent,
   RouteCredentialFailurePolicy,
+  RouteRetryClassKey,
+  RouteRetryClassLimits,
   RouteCredentialModelState,
   RouteCredentialModelStatus,
   RouteCredentialPage,
@@ -296,6 +300,77 @@ const MAX_ROUTE_CREDENTIAL_COOLDOWN_SECONDS = 86_400;
 // 所以上限与 retry_count 同量级，不给放大空间。
 const DEFAULT_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX = 10;
 const MAX_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX = 10;
+// Per-class ceilings are intentionally far above the global one: a drained
+// upstream pool is not an account fault, so users may want to keep a task alive
+// through a hundred retries while ordinary errors stop after a handful.
+const MAX_ROUTE_CREDENTIAL_CLASS_RETRY_COUNT = 1_000;
+const MAX_ROUTE_CREDENTIAL_CAPACITY_RETRY_INTERVAL_MS = 60_000;
+const MAX_ROUTE_CREDENTIAL_MAX_RETRY_ELAPSED_SECONDS = 86_400;
+// A refusal can arrive many seconds after `response.created` (a real regional
+// token-rate-limit verdict took ~14s). The window must be longer than that, and
+// user-tunable: some upstreams legitimately sit on the opening frame while
+// thinking, in which case 0 restores the old "commit immediately" behaviour.
+const DEFAULT_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS = 60_000;
+const MAX_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS = 600_000;
+const EMPTY_RETRY_CLASS_LIMITS: RouteRetryClassLimits = {
+  transport: null,
+  server_error: null,
+  rate_limit: null,
+  capacity: null,
+  semantic: null,
+};
+const RETRY_CLASS_ROWS: Array<{
+  key: RouteRetryClassKey;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "transport",
+    label: "网络连接 / 超时",
+    description: "连不上、请求超时、响应读到一半断掉（没有 HTTP 响应）",
+  },
+  {
+    key: "server_error",
+    label: "上游 5xx / 408",
+    description: "网关错误、服务不可用、请求超时等服务端状态",
+  },
+  {
+    key: "rate_limit",
+    label: "限流 429",
+    description: "账号或渠道的固定窗口配额，等窗口过去才有意义",
+  },
+  {
+    key: "capacity",
+    label: "容量不足 / 高负载",
+    description:
+      "no_capacity、high demand、服务器过载、区域级 token rate limit（rate_limit_exceeded）；含 HTTP 200 流里先 response.created 再 response.failed",
+  },
+  {
+    key: "semantic",
+    label: "其它响应内错误",
+    description: "不属于上面几类的 response.failed / error 语义失败",
+  },
+];
+type RetryClassLimitInputs = Record<RouteRetryClassKey, string>;
+
+function emptyRetryClassLimitInputs(): RetryClassLimitInputs {
+  return {
+    transport: "",
+    server_error: "",
+    rate_limit: "",
+    capacity: "",
+    semantic: "",
+  };
+}
+
+function retryClassLimitInputs(limits: RouteRetryClassLimits): RetryClassLimitInputs {
+  const inputs = emptyRetryClassLimitInputs();
+  for (const row of RETRY_CLASS_ROWS) {
+    const value = limits[row.key];
+    inputs[row.key] = value === null ? "" : String(value);
+  }
+  return inputs;
+}
 // One-click steps offered by the cooldown dialog. Both directions, because the
 // interesting adjustment is usually "wait less" — a rate-limit window that turned
 // out to be shorter than the configured one.
@@ -354,6 +429,11 @@ const defaultRouteCredentialFailurePolicy: RouteCredentialFailurePolicy = {
   stream_continue_enabled: false,
   stream_continue_max: DEFAULT_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX,
   failover_enabled: true,
+  retry_class_limits: EMPTY_RETRY_CLASS_LIMITS,
+  capacity_retry_interval_ms: 0,
+  max_retry_elapsed_seconds: 0,
+  stream_prelude_wait_ms: DEFAULT_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS,
+  stream_salvage_enabled: false,
 };
 
 const createTabs: Array<FormTab<CreateTab>> = [
@@ -1279,7 +1359,8 @@ function failurePolicyFromConfig(config: Record<string, unknown>): RouteCredenti
       | "retry_interval_ms"
       | "semantic_error_threshold"
       | "cooldown_seconds"
-      | "stream_continue_max",
+      | "stream_continue_max"
+      | "stream_prelude_wait_ms",
   ) => {
     const value = record[key];
     return typeof value === "number" && Number.isInteger(value)
@@ -1287,11 +1368,35 @@ function failurePolicyFromConfig(config: Record<string, unknown>): RouteCredenti
       : defaultRouteCredentialFailurePolicy[key];
   };
   const booleanOrDefault = (
-    key: "cooldown_enabled" | "error_status_enabled" | "stream_continue_enabled" | "failover_enabled",
+    key:
+      | "cooldown_enabled"
+      | "error_status_enabled"
+      | "stream_continue_enabled"
+      | "failover_enabled"
+      | "stream_salvage_enabled",
   ) => {
     const value = record[key];
     return typeof value === "boolean" ? value : defaultRouteCredentialFailurePolicy[key];
   };
+  const rawClassLimits = record.retry_class_limits;
+  const classRecord =
+    rawClassLimits && typeof rawClassLimits === "object" && !Array.isArray(rawClassLimits)
+      ? (rawClassLimits as Record<string, unknown>)
+      : {};
+  const retry_class_limits = { ...EMPTY_RETRY_CLASS_LIMITS };
+  for (const row of RETRY_CLASS_ROWS) {
+    const value = classRecord[row.key];
+    retry_class_limits[row.key] =
+      typeof value === "number" &&
+      Number.isInteger(value) &&
+      value >= 0 &&
+      value <= MAX_ROUTE_CREDENTIAL_CLASS_RETRY_COUNT
+        ? value
+        : null;
+  }
+  const capacityInterval = record.capacity_retry_interval_ms;
+  const elapsedLimit = record.max_retry_elapsed_seconds;
+  const preludeWait = record.stream_prelude_wait_ms;
   return {
     retry_count: integerOrDefault("retry_count"),
     retry_interval_ms: integerOrDefault("retry_interval_ms"),
@@ -1302,6 +1407,29 @@ function failurePolicyFromConfig(config: Record<string, unknown>): RouteCredenti
     stream_continue_enabled: booleanOrDefault("stream_continue_enabled"),
     stream_continue_max: integerOrDefault("stream_continue_max"),
     failover_enabled: booleanOrDefault("failover_enabled"),
+    retry_class_limits,
+    capacity_retry_interval_ms:
+      typeof capacityInterval === "number" &&
+      Number.isInteger(capacityInterval) &&
+      capacityInterval >= 0 &&
+      capacityInterval <= MAX_ROUTE_CREDENTIAL_CAPACITY_RETRY_INTERVAL_MS
+        ? capacityInterval
+        : 0,
+    max_retry_elapsed_seconds:
+      typeof elapsedLimit === "number" &&
+      Number.isInteger(elapsedLimit) &&
+      elapsedLimit >= 0 &&
+      elapsedLimit <= MAX_ROUTE_CREDENTIAL_MAX_RETRY_ELAPSED_SECONDS
+        ? elapsedLimit
+        : 0,
+    stream_prelude_wait_ms:
+      typeof preludeWait === "number" &&
+      Number.isInteger(preludeWait) &&
+      preludeWait >= 0 &&
+      preludeWait <= MAX_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS
+        ? preludeWait
+        : DEFAULT_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS,
+    stream_salvage_enabled: booleanOrDefault("stream_salvage_enabled"),
   };
 }
 
@@ -1838,6 +1966,7 @@ function apiConfigJsonWithFields(
   responsesEncryptedContentAggressiveStrip = false,
   forceReasoningContent = false,
   plaintextReasoningMode: ResponsesPlaintextReasoningMode = plaintextReasoningModeFromConfig(parseJsonObject(configJson)),
+  crossResourceStripMode: ResponsesCrossResourceStripMode = crossResourceStripModeFromConfig(parseJsonObject(configJson)),
   requestCompressionMode: RequestCompressionMode = requestCompressionModeFromConfig(parseJsonObject(configJson)),
   contentRejectionCompat = false,
   imageLimitCompat = false,
@@ -1848,6 +1977,7 @@ function apiConfigJsonWithFields(
   config.model_mappings = mappings;
   config.responses_custom_tool_compat = responsesCustomToolCompat;
   writePlaintextReasoningMode(config, plaintextReasoningMode);
+  writeCrossResourceStripMode(config, crossResourceStripMode);
   writeRequestCompressionMode(config, requestCompressionMode);
   writeContentRejectionCompat(config, contentRejectionCompat);
   writeImageLimitCompat(config, imageLimitCompat);
@@ -3523,6 +3653,7 @@ export function AccountsScreen({
   const [apiForceReasoningContent, setApiForceReasoningContent] = useState(false);
   const [apiResponsesEncryptedContentCleanup, setApiResponsesEncryptedContentCleanup] = useState(false);
   const [apiPlaintextReasoningMode, setApiPlaintextReasoningMode] = useState<ResponsesPlaintextReasoningMode>("auto");
+  const [apiCrossResourceStripMode, setApiCrossResourceStripMode] = useState<ResponsesCrossResourceStripMode>("auto");
   const [apiRequestCompressionMode, setApiRequestCompressionMode] = useState<RequestCompressionMode>("auto");
   const [apiContentRejectionCompat, setApiContentRejectionCompat] = useState(false);
   const [apiResponsesEncryptedContentAggressiveStrip, setApiResponsesEncryptedContentAggressiveStrip] = useState(false);
@@ -3563,6 +3694,15 @@ export function AccountsScreen({
     String(DEFAULT_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX),
   );
   const [editFailoverEnabled, setEditFailoverEnabled] = useState(true);
+  const [editClassRetryLimits, setEditClassRetryLimits] = useState<RetryClassLimitInputs>(
+    emptyRetryClassLimitInputs,
+  );
+  const [editCapacityRetryIntervalMs, setEditCapacityRetryIntervalMs] = useState("0");
+  const [editMaxRetryElapsedSeconds, setEditMaxRetryElapsedSeconds] = useState("0");
+  const [editStreamPreludeWaitMs, setEditStreamPreludeWaitMs] = useState(
+    String(DEFAULT_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS),
+  );
+  const [editStreamSalvageEnabled, setEditStreamSalvageEnabled] = useState(false);
   const [editFailurePolicyError, setEditFailurePolicyError] = useState<string | null>(null);
   const [editRecoveryMode, setEditRecoveryMode] = useState<RecoveryMode>("off");
   const [editRecoveryTimes, setEditRecoveryTimes] = useState<string[]>([]);
@@ -3579,6 +3719,7 @@ export function AccountsScreen({
   const [editForceReasoningContent, setEditForceReasoningContent] = useState(false);
   const [editResponsesEncryptedContentCleanup, setEditResponsesEncryptedContentCleanup] = useState(false);
   const [editPlaintextReasoningMode, setEditPlaintextReasoningMode] = useState<ResponsesPlaintextReasoningMode>("auto");
+  const [editCrossResourceStripMode, setEditCrossResourceStripMode] = useState<ResponsesCrossResourceStripMode>("auto");
   const [editRequestCompressionMode, setEditRequestCompressionMode] = useState<RequestCompressionMode>("auto");
   const [editContentRejectionCompat, setEditContentRejectionCompat] = useState(false);
   const [editImageLimitCompat, setEditImageLimitCompat] = useState(false);
@@ -4245,6 +4386,7 @@ export function AccountsScreen({
     setApiResponsesCustomToolCompat(false);
     setApiForceReasoningContent(false);
     setApiPlaintextReasoningMode("auto");
+    setApiCrossResourceStripMode("auto");
     setApiRequestCompressionMode("auto");
     setApiContentRejectionCompat(false);
     setApiResponsesEncryptedContentCleanup(false);
@@ -4298,6 +4440,11 @@ export function AccountsScreen({
     setEditStreamContinueEnabled(failurePolicy.stream_continue_enabled);
     setEditStreamContinueMax(String(failurePolicy.stream_continue_max));
     setEditFailoverEnabled(failurePolicy.failover_enabled);
+    setEditClassRetryLimits(retryClassLimitInputs(failurePolicy.retry_class_limits));
+    setEditCapacityRetryIntervalMs(String(failurePolicy.capacity_retry_interval_ms));
+    setEditMaxRetryElapsedSeconds(String(failurePolicy.max_retry_elapsed_seconds));
+    setEditStreamPreludeWaitMs(String(failurePolicy.stream_prelude_wait_ms));
+    setEditStreamSalvageEnabled(failurePolicy.stream_salvage_enabled);
     setEditFailurePolicyError(null);
     setEditSecretJson(parseJsonPreview(editingCredential.secret_payload_json, editingCredential.secret_payload_json));
     setEditConfigJson(parseJsonPreview(editingCredential.config_json, editingCredential.config_json));
@@ -4314,6 +4461,7 @@ export function AccountsScreen({
       setEditResponsesCustomToolCompat(responsesCustomToolCompatFromConfig(config));
       setEditForceReasoningContent(forceReasoningContentFromConfig(config));
       setEditPlaintextReasoningMode(plaintextReasoningModeFromConfig(config));
+      setEditCrossResourceStripMode(crossResourceStripModeFromConfig(config));
       setEditRequestCompressionMode(requestCompressionModeFromConfig(config));
       setEditContentRejectionCompat(contentRejectionCompatFromConfig(config));
       setEditImageLimitCompat(imageLimitCompatFromConfig(config));
@@ -4337,6 +4485,7 @@ export function AccountsScreen({
       setEditResponsesCustomToolCompat(false);
       setEditForceReasoningContent(false);
       setEditPlaintextReasoningMode("auto");
+      setEditCrossResourceStripMode("auto");
       setEditRequestCompressionMode("auto");
       setEditContentRejectionCompat(false);
       setEditImageLimitCompat(false);
@@ -4841,6 +4990,7 @@ export function AccountsScreen({
             responses_custom_tool_compat: apiResponsesCustomToolCompat,
             ...(apiForceReasoningContent ? { force_reasoning_content: true } : {}),
             ...(apiPlaintextReasoningMode !== "auto" ? { responses_plaintext_reasoning_compat: apiPlaintextReasoningMode } : {}),
+            ...(apiCrossResourceStripMode !== "auto" ? { responses_cross_resource_strip: apiCrossResourceStripMode } : {}),
             ...(apiRequestCompressionMode !== "auto" ? { request_brotli_compression: apiRequestCompressionMode } : {}),
             ...(apiContentRejectionCompat ? { content_rejection_compat: "trim_old_tool_outputs" as const } : {}),
             ...(apiResponsesEncryptedContentCleanup ? { responses_encrypted_content_cleanup: true } : {}),
@@ -5328,6 +5478,9 @@ export function AccountsScreen({
       const semanticErrorThreshold = Number(editSemanticErrorThreshold);
       const cooldownSeconds = Number(editCooldownSeconds);
       const streamContinueMax = Number(editStreamContinueMax);
+      const capacityRetryIntervalMs = Number(editCapacityRetryIntervalMs);
+      const maxRetryElapsedSeconds = Number(editMaxRetryElapsedSeconds);
+      const streamPreludeWaitMs = Number(editStreamPreludeWaitMs);
       let failurePolicyError: string | null = null;
       if (!Number.isInteger(retryCount) || retryCount < 0 || retryCount > 10) {
         failurePolicyError = "额外重试次数必须是 0-10 的整数";
@@ -5355,6 +5508,43 @@ export function AccountsScreen({
         streamContinueMax > MAX_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX
       ) {
         failurePolicyError = `最多续写轮次必须是 0-${MAX_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX} 的整数`;
+      } else if (
+        !Number.isInteger(capacityRetryIntervalMs) ||
+        capacityRetryIntervalMs < 0 ||
+        capacityRetryIntervalMs > MAX_ROUTE_CREDENTIAL_CAPACITY_RETRY_INTERVAL_MS
+      ) {
+        failurePolicyError = `容量类重试间隔必须是 0-${MAX_ROUTE_CREDENTIAL_CAPACITY_RETRY_INTERVAL_MS} 毫秒的整数`;
+      } else if (
+        !Number.isInteger(maxRetryElapsedSeconds) ||
+        maxRetryElapsedSeconds < 0 ||
+        maxRetryElapsedSeconds > MAX_ROUTE_CREDENTIAL_MAX_RETRY_ELAPSED_SECONDS
+      ) {
+        failurePolicyError = `重试总时长上限必须是 0-${MAX_ROUTE_CREDENTIAL_MAX_RETRY_ELAPSED_SECONDS} 秒的整数`;
+      } else if (
+        !Number.isInteger(streamPreludeWaitMs) ||
+        streamPreludeWaitMs < 0 ||
+        streamPreludeWaitMs > MAX_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS
+      ) {
+        failurePolicyError = `建流等待窗口必须是 0-${MAX_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS} 毫秒的整数`;
+      }
+      const retryClassLimits: RouteRetryClassLimits = { ...EMPTY_RETRY_CLASS_LIMITS };
+      if (!failurePolicyError) {
+        for (const row of RETRY_CLASS_ROWS) {
+          const raw = editClassRetryLimits[row.key].trim();
+          if (raw === "") {
+            continue;
+          }
+          const value = Number(raw);
+          if (
+            !Number.isInteger(value) ||
+            value < 0 ||
+            value > MAX_ROUTE_CREDENTIAL_CLASS_RETRY_COUNT
+          ) {
+            failurePolicyError = `「${row.label}」的额外重试次数必须是 0-${MAX_ROUTE_CREDENTIAL_CLASS_RETRY_COUNT} 的整数，留空表示跟随通用`;
+            break;
+          }
+          retryClassLimits[row.key] = value;
+        }
       }
       if (failurePolicyError) {
         setEditFailurePolicyError(failurePolicyError);
@@ -5371,6 +5561,11 @@ export function AccountsScreen({
         stream_continue_enabled: editStreamContinueEnabled,
         stream_continue_max: streamContinueMax,
         failover_enabled: editFailoverEnabled,
+        retry_class_limits: retryClassLimits,
+        capacity_retry_interval_ms: capacityRetryIntervalMs,
+        max_retry_elapsed_seconds: maxRetryElapsedSeconds,
+        stream_prelude_wait_ms: streamPreludeWaitMs,
+        stream_salvage_enabled: editStreamSalvageEnabled,
       };
       setEditFailurePolicyError(null);
       setEditModelMappingsError(null);
@@ -5413,6 +5608,7 @@ export function AccountsScreen({
                 editResponsesEncryptedContentAggressiveStrip,
                 editForceReasoningContent,
                 editPlaintextReasoningMode,
+                editCrossResourceStripMode,
                 editRequestCompressionMode,
                 editContentRejectionCompat,
                 editImageLimitCompat,
@@ -5428,7 +5624,7 @@ export function AccountsScreen({
       if (mediaView && editingCredential.kind === "api") {
         // Settings hidden in this modality must not be silently changed by its form.
         const previous = parseJsonObject(editConfigJson.trim() || "{}");
-        for (const key of ["request_brotli_compression", "content_rejection_compat", "force_reasoning_content", "responses_custom_tool_compat", "responses_plaintext_reasoning_compat", "responses_encrypted_content_cleanup", "responses_encrypted_content_aggressive_strip", "inline_remote_images", "image_limit_compat", "turn_reminder", "turn_reminder_text"]) {
+        for (const key of ["request_brotli_compression", "content_rejection_compat", "force_reasoning_content", "responses_custom_tool_compat", "responses_plaintext_reasoning_compat", "responses_cross_resource_strip", "responses_encrypted_content_cleanup", "responses_encrypted_content_aggressive_strip", "inline_remote_images", "image_limit_compat", "turn_reminder", "turn_reminder_text"]) {
           if (Object.prototype.hasOwnProperty.call(previous, key)) baseConfig[key] = previous[key];
           else delete baseConfig[key];
         }
@@ -9391,6 +9587,9 @@ export function AccountsScreen({
                       <ResponsesPlaintextReasoningOption mode={apiPlaintextReasoningMode} baseUrl={apiBaseUrl} onChange={setApiPlaintextReasoningMode} />
                     ) : null}
                     {!mediaView && shouldShowResponsesCustomToolCompatForFormat(activePlatform, apiInterfaceFormat) ? (
+                      <ResponsesCrossResourceStripOption mode={apiCrossResourceStripMode} baseUrl={apiBaseUrl} onChange={setApiCrossResourceStripMode} />
+                    ) : null}
+                    {!mediaView && shouldShowResponsesCustomToolCompatForFormat(activePlatform, apiInterfaceFormat) ? (
                       <ResponsesEncryptedContentCleanupOption
                         aggressiveStrip={apiResponsesEncryptedContentAggressiveStrip}
                         checked={apiResponsesEncryptedContentCleanup}
@@ -9807,16 +10006,16 @@ export function AccountsScreen({
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div>
-                        <p className="text-[13px] font-semibold text-stone-900">失败处理策略</p>
+                        <p className="text-[13px] font-semibold text-stone-900">① 通用重试</p>
                         <p className="mt-0.5 text-[11px] font-medium text-stone-500">
-                          此账号在代理请求和模型测试中共用以下规则。
+                          所有可重试错误默认共用这个次数与等待节奏。想让某一类错误重试更多次，到「② 按错误类型」单独设置。
                         </p>
                       </div>
                       <span className="shrink-0 rounded-full bg-white px-2 py-1 text-[10px] font-semibold text-blue-700">
                         按账号生效
                       </span>
                     </div>
-                    <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                       <label className={labelClass}>
                         额外重试次数
                         <input
@@ -9850,6 +10049,137 @@ export function AccountsScreen({
                         />
                       </label>
                       <label className={labelClass}>
+                        重试总时长上限（秒）
+                        <input
+                          aria-label="重试总时长上限（秒）"
+                          className={fieldClass}
+                          max={MAX_ROUTE_CREDENTIAL_MAX_RETRY_ELAPSED_SECONDS}
+                          min={0}
+                          onChange={(event) => {
+                            setEditMaxRetryElapsedSeconds(event.target.value);
+                            setEditFailurePolicyError(null);
+                          }}
+                          step={1}
+                          type="number"
+                          value={editMaxRetryElapsedSeconds}
+                        />
+                      </label>
+                    </div>
+                    <p className="mt-2 text-[11px] leading-5 text-stone-600">
+                      通用次数上限 10 次，只适合普通抖动。总时长上限填 0 表示只按次数收手；填了秒数后，无论哪一类重试，整次请求累计耗时超过它就会停止重试。
+                    </p>
+                    {editFailurePolicyError && (
+                      <p className="mt-2 text-[12px] font-semibold text-red-700">
+                        {editFailurePolicyError}
+                      </p>
+                    )}
+                  </section>
+
+                  <section
+                    aria-label="按错误类型设置重试次数"
+                    className="rounded-xl border border-indigo-100 bg-indigo-50/50 p-3"
+                  >
+                    <div>
+                      <p className="text-[13px] font-semibold text-stone-900">
+                        ② 按错误类型单独设置
+                      </p>
+                      <p className="mt-0.5 text-[11px] font-medium text-stone-500">
+                        留空 = 跟随「① 通用重试」；填数字则单独覆盖这一类，范围 0-1000 次。
+                      </p>
+                    </div>
+                    <div className="mt-3 grid gap-2">
+                      {RETRY_CLASS_ROWS.map((row) => (
+                        <div
+                          key={row.key}
+                          className={
+                            row.key === "capacity"
+                              ? "rounded-lg border border-amber-200 bg-amber-50/80 p-2.5"
+                              : "rounded-lg border border-stone-200 bg-white/80 p-2.5"
+                          }
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="min-w-0 flex-1">
+                              <p className="text-[12px] font-semibold text-stone-900">
+                                {row.label}
+                              </p>
+                              <p className="mt-0.5 text-[11px] leading-4 text-stone-600">
+                                {row.description}
+                              </p>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-1.5">
+                              <input
+                                aria-label={`${row.label}的额外重试次数`}
+                                className={`${fieldClass} w-24`}
+                                max={MAX_ROUTE_CREDENTIAL_CLASS_RETRY_COUNT}
+                                min={0}
+                                onChange={(event) => {
+                                  setEditClassRetryLimits((previous) => ({
+                                    ...previous,
+                                    [row.key]: event.target.value,
+                                  }));
+                                  setEditFailurePolicyError(null);
+                                }}
+                                placeholder="跟随"
+                                step={1}
+                                type="number"
+                                value={editClassRetryLimits[row.key]}
+                              />
+                              <span className="text-[11px] text-stone-500">次</span>
+                            </div>
+                          </div>
+                          {row.key === "capacity" ? (
+                            <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-amber-200 pt-2">
+                              <button
+                                aria-label="一键设为容量类重试100次、间隔5000毫秒"
+                                className="rounded-md border border-amber-300 bg-white px-2 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100"
+                                onClick={() => {
+                                  setEditClassRetryLimits((previous) => ({
+                                    ...previous,
+                                    capacity: "100",
+                                  }));
+                                  setEditCapacityRetryIntervalMs("5000");
+                                  setEditFailurePolicyError(null);
+                                }}
+                                type="button"
+                              >
+                                一键设为 100 次 / 5 秒
+                              </button>
+                              <label className="flex items-center gap-1.5 text-[11px] font-medium text-stone-700">
+                                容量类重试间隔（毫秒）
+                                <input
+                                  aria-label="容量类重试间隔（毫秒）"
+                                  className={`${fieldClass} w-28`}
+                                  max={MAX_ROUTE_CREDENTIAL_CAPACITY_RETRY_INTERVAL_MS}
+                                  min={0}
+                                  onChange={(event) => {
+                                    setEditCapacityRetryIntervalMs(event.target.value);
+                                    setEditFailurePolicyError(null);
+                                  }}
+                                  step={1}
+                                  type="number"
+                                  value={editCapacityRetryIntervalMs}
+                                />
+                              </label>
+                            </div>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                    <p className="mt-2.5 text-[11px] leading-5 text-stone-600">
+                      「容量不足 / 高负载」包括 no_capacity、high demand、服务器过载类提示，以及区域级吞吐限流（code 是 rate_limit_exceeded 但消息写的是「exceeded token rate limit」这类上游区域/部署的 token 预算，不是账号配额），也覆盖 HTTP 200 流里先 response.created 再 response.failed 的情况。这类失败是上游暂时没余量，不是账号坏了，所以给再多次重试也不会让账号进入冷却或异常状态。容量类间隔填 0 表示沿用「① 通用重试」的间隔；要等 100 次时建议单独调大，别用 200 毫秒连续打爆上游。注意：开启「④ 失败后切换到池内其它账号」时，换号后次数会从 0 重新算，想给整次请求封顶请同时设置「重试总时长上限（秒）」。容量与限流类失败会按本类间隔等待，不再套用流式断流的固定 500 毫秒。
+                    </p>
+                  </section>
+
+                  <section
+                    aria-label="账号状态与冷却"
+                    className="rounded-xl border border-stone-200 bg-white p-3"
+                  >
+                    <p className="text-[13px] font-semibold text-stone-900">③ 账号状态与冷却</p>
+                    <p className="mt-0.5 text-[11px] font-medium text-stone-500">
+                      只有看起来是账号本身的问题才动状态。手动「模型测试」只使用「① 通用重试」的次数，不受 ② 的分类上限影响。
+                    </p>
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                      <label className={labelClass}>
                         异常触发次数
                         <input
                           aria-label="异常触发次数"
@@ -9882,11 +10212,6 @@ export function AccountsScreen({
                         />
                       </label>
                     </div>
-                    {editFailurePolicyError && (
-                      <p className="mt-2 text-[12px] font-semibold text-red-700">
-                        {editFailurePolicyError}
-                      </p>
-                    )}
                     <div className="mt-3 grid gap-2">
                       <label className="flex items-start gap-2 text-[12px] leading-5 text-stone-700">
                         <input
@@ -9920,70 +10245,125 @@ export function AccountsScreen({
                         </span>
                       </label>
                     </div>
-                    <div className="mt-3 rounded-lg border border-stone-200 bg-white/70 p-3">
-                      <p className="text-[12px] font-semibold text-stone-900">流式断流</p>
-                      <p className="mt-0.5 text-[11px] text-stone-500">
-                        上游已经吐出内容却没发出收尾标记时出现（客户端看到 stream disconnected before
-                        completion）。
-                      </p>
-                      <div className="mt-2.5 grid gap-2">
-                        <label className="flex items-start gap-2 text-[12px] leading-5 text-stone-700">
-                          <input
-                            aria-label="断流后自动续写"
-                            checked={editStreamContinueEnabled}
-                            className="mt-0.5"
-                            onChange={(event) => {
-                              setEditStreamContinueEnabled(event.target.checked);
-                              setEditFailurePolicyError(null);
-                            }}
-                            type="checkbox"
-                          />
-                          <span>
-                            <span className="font-semibold">断流后自动续写</span>
-                            <span className="block text-[11px] text-stone-600">
-                              字节已经发给客户端、无法回滚重试，所以由网关拿着「原会话 + 半截回答 +
-                              继续指令」再问一次，把结果接回同一条响应，客户端只看到一轮正常完成的回答。默认关闭：续写是一次完整的计费请求，且交给客户端的是模型并非一次写成的答案，是否值得按渠道自己定。
-                            </span>
+                  </section>
+
+                  <section
+                    aria-label="流式断流与账号切换"
+                    className="rounded-xl border border-stone-200 bg-white p-3"
+                  >
+                    <p className="text-[12px] font-semibold text-stone-900">
+                      ④ 流式断流与账号切换
+                    </p>
+                    <p className="mt-0.5 text-[11px] text-stone-500">
+                      分三个阶段：响应开头只有建流帧、失败帧迟到时的等待窗口；正文已经发出但上游在流内报错时是否救回；以及上游吐出内容却没发收尾标记时的断流续写。
+                    </p>
+                    <label className={`${labelClass} mt-2.5`}>
+                      建流等待窗口（毫秒）
+                      <input
+                        aria-label="建流等待窗口（毫秒）"
+                        className={fieldClass}
+                        max={MAX_ROUTE_CREDENTIAL_STREAM_PRELUDE_WAIT_MS}
+                        min={0}
+                        onChange={(event) => {
+                          setEditStreamPreludeWaitMs(event.target.value);
+                          setEditFailurePolicyError(null);
+                        }}
+                        step={1000}
+                        type="number"
+                        value={editStreamPreludeWaitMs}
+                      />
+                    </label>
+                    <p className="text-[11px] leading-5 text-stone-600">
+                      Responses 上游常先发 <code>response.created</code>（没有任何输出），隔十几秒才发{" "}
+                      <code>error</code> / <code>response.failed</code>。在这段窗口内网关会扣住建流帧，
+                      等到真正的输出或失败帧：失败帧仍在窗口内就能自动重试，超过窗口才把 200 提交给客户端、失败帧只能透传。
+                      默认 60000（60 秒），覆盖已观测到的 14 秒迟到拒绝；最大 600000。填 0
+                      表示收到建流帧立刻提交，适合上游确实会长时间停在 <code>response.created</code> 上思考的情况——代价是迟到的失败不会再重试。
+                      窗口从第一条建流帧开始计时，不受上游持续发心跳帧影响。
+                    </p>
+                    <div className="mt-2.5 grid gap-2">
+                      <label className="flex items-start gap-2 text-[12px] leading-5 text-stone-700">
+                        <input
+                          aria-label="流内失败时自动救回"
+                          checked={editStreamSalvageEnabled}
+                          className="mt-0.5"
+                          onChange={(event) => {
+                            setEditStreamSalvageEnabled(event.target.checked);
+                            setEditFailurePolicyError(null);
+                          }}
+                          type="checkbox"
+                        />
+                        <span>
+                          <span className="font-semibold">流内失败时自动救回</span>
+                          <span className="block text-[11px] text-stone-600">
+                            正文已经发给客户端后，上游才在 SSE 流里报「容量不足 / 区域级 token rate
+                            limit / 限流 / 5xx」时，网关扣住这条失败帧，用「原会话 + 已写出的半截回答」再问一次，把答案接回同一条响应，客户端看不到中断。重试次数取第 ② 组里该错误类别的上限，间隔也走该类别的专用间隔。默认关闭：每轮救回都是一次完整计费请求。额度耗尽、内容审核、上下文超长、图片过多、权限不足这类硬判决永不救回，照常把错误透传给客户端。仅对 Responses 协议生效。
                           </span>
-                        </label>
-                        <label className={labelClass}>
-                          最多续写轮次
-                          <input
-                            aria-label="最多续写轮次"
-                            className={fieldClass}
-                            disabled={!editStreamContinueEnabled}
-                            max={MAX_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX}
-                            min={0}
-                            onChange={(event) => {
-                              setEditStreamContinueMax(event.target.value);
-                              setEditFailurePolicyError(null);
-                            }}
-                            step={1}
-                            type="number"
-                            value={editStreamContinueMax}
-                          />
-                        </label>
-                        <label className="flex items-start gap-2 text-[12px] leading-5 text-stone-700">
-                          <input
-                            aria-label="失败后切换到池内其它账号"
-                            checked={editFailoverEnabled}
-                            className="mt-0.5"
-                            onChange={(event) => setEditFailoverEnabled(event.target.checked)}
-                            type="checkbox"
-                          />
-                          <span>
-                            <span className="font-semibold">失败后切换到池内其它账号</span>
-                            <span className="block text-[11px] text-stone-600">
-                              重试次数用尽、或续写仍然断流时，是否换池里的下一个账号继续。默认开启——这正是池的价值。关闭后客户端拿到的是本账号自己的错误，而不是一句聚合的「所有凭据都失败」。仅聚合模式有效；精确模式下请求本来就钉在这个账号上。
-                            </span>
+                        </span>
+                      </label>
+                      <label className="flex items-start gap-2 text-[12px] leading-5 text-stone-700">
+                        <input
+                          aria-label="断流后自动续写"
+                          checked={editStreamContinueEnabled}
+                          className="mt-0.5"
+                          onChange={(event) => {
+                            setEditStreamContinueEnabled(event.target.checked);
+                            setEditFailurePolicyError(null);
+                          }}
+                          type="checkbox"
+                        />
+                        <span>
+                          <span className="font-semibold">断流后自动续写</span>
+                          <span className="block text-[11px] text-stone-600">
+                            字节已经发给客户端、无法回滚重试，所以由网关拿着「原会话 + 半截回答 +
+                            继续指令」再问一次，把结果接回同一条响应，客户端只看到一轮正常完成的回答。默认关闭：续写是一次完整的计费请求，且交给客户端的是模型并非一次写成的答案，是否值得按渠道自己定。
                           </span>
-                        </label>
-                      </div>
+                        </span>
+                      </label>
+                      <label className={labelClass}>
+                        最多续写轮次
+                        <input
+                          aria-label="最多续写轮次"
+                          className={fieldClass}
+                          disabled={!editStreamContinueEnabled}
+                          max={MAX_ROUTE_CREDENTIAL_STREAM_CONTINUE_MAX}
+                          min={0}
+                          onChange={(event) => {
+                            setEditStreamContinueMax(event.target.value);
+                            setEditFailurePolicyError(null);
+                          }}
+                          step={1}
+                          type="number"
+                          value={editStreamContinueMax}
+                        />
+                      </label>
+                      <label className="flex items-start gap-2 text-[12px] leading-5 text-stone-700">
+                        <input
+                          aria-label="失败后切换到池内其它账号"
+                          checked={editFailoverEnabled}
+                          className="mt-0.5"
+                          onChange={(event) => setEditFailoverEnabled(event.target.checked)}
+                          type="checkbox"
+                        />
+                        <span>
+                          <span className="font-semibold">失败后切换到池内其它账号</span>
+                          <span className="block text-[11px] text-stone-600">
+                            重试次数用尽、或续写仍然断流时，是否换池里的下一个账号继续。默认开启——这正是池的价值。关闭后客户端拿到的是本账号自己的错误，而不是一句聚合的「所有凭据都失败」。仅聚合模式有效；精确模式下请求本来就钉在这个账号上。
+                          </span>
+                        </span>
+                      </label>
                     </div>
-                    <div className="mt-3 grid gap-2 text-[11px] leading-5 text-stone-600">
+                  </section>
+
+                  <section
+                    aria-label="失败判定规则"
+                    className="rounded-xl border border-stone-200 bg-stone-50 p-3"
+                  >
+                    <p className="text-[12px] font-semibold text-stone-900">⑤ 判定规则</p>
+                    <div className="mt-2 grid gap-2 text-[11px] leading-5 text-stone-600">
                       <p>
                         <span className="font-semibold text-emerald-700">会自动重试：</span>
-                        网络连接失败、请求超时、响应读取失败、HTTP 408 / 429 / 5xx，以及 Codex“服务器当前过载”。
+                        网络连接失败、请求超时、响应读取失败、HTTP 408 / 429 / 5xx，以及 Codex“服务器当前过载”。“容量不足 / 高负载”单独归为第 ② 类，可按自己的次数上限一直重试，直到次数或总时长用尽。HTTP 200 流内的 response.failed：输出尚未发出且在「④ 建流等待窗口」内 → 直接回滚重试；正文已发出且开启「流内失败时自动救回」→ 扣住失败帧并续写接完；两者都不满足 → 只能透传。
                       </p>
                       <p>
                         <span className="font-semibold text-amber-700">会累计为异常：</span>
@@ -10392,6 +10772,9 @@ export function AccountsScreen({
                   ) : null}
                   {shouldShowResponsesCustomToolCompatForFormat(activePlatform, editApiInterfaceFormat) ? (
                     <ResponsesPlaintextReasoningOption mode={editPlaintextReasoningMode} baseUrl={editApiBaseUrl} onChange={setEditPlaintextReasoningMode} />
+                  ) : null}
+                  {shouldShowResponsesCustomToolCompatForFormat(activePlatform, editApiInterfaceFormat) ? (
+                    <ResponsesCrossResourceStripOption mode={editCrossResourceStripMode} baseUrl={editApiBaseUrl} onChange={setEditCrossResourceStripMode} />
                   ) : null}
                   {shouldShowResponsesCustomToolCompatForFormat(activePlatform, editApiInterfaceFormat) ? (
                     <ResponsesEncryptedContentCleanupOption
