@@ -8,16 +8,16 @@ const HOSTNAME = "https://ai-switch.github.io/ai-switch/";
 
 /* ----------------------------- 简体中文 ----------------------------- */
 
+// The top bar is the marketing site's primary navigation. Developer docs,
+// relay integration and sponsorship links live in the home page sitemap footer.
 const zhNav: DefaultTheme.NavItem[] = [
-  { text: "指南", link: "/guide/introduction", activeMatch: "^/guide/" },
   { text: "功能", link: "/features/vibe", activeMatch: "^/features/" },
   // Directory link: normalizeLink leaves trailing-slash paths untouched, and
-  // GitHub Pages serves /relay/ from relay/index.html.
-  { text: "中转站", link: "/relay/", activeMatch: "^/relay/" },
+  // GitHub Pages serves /tutorials/ from tutorials/index.html.
+  { text: "教程", link: "/tutorials/", activeMatch: "^/tutorials/" },
+  { text: "指南", link: "/guide/introduction", activeMatch: "^/guide/" },
   { text: "部署", link: "/deploy/desktop", activeMatch: "^/deploy/" },
-  { text: "开发", link: "/dev/architecture", activeMatch: "^/dev/" },
   { text: "FAQ", link: "/faq" },
-  { text: "赞助", link: "/sponsor" },
   { text: "下载", link: RELEASES },
 ];
 
@@ -42,6 +42,21 @@ const zhSidebar: DefaultTheme.Sidebar = {
         { text: "模型连通性测试", link: "/guide/model-test" },
         { text: "用量与请求统计", link: "/guide/usage-stats" },
         { text: "稳定性与自动恢复", link: "/guide/reliability" },
+      ],
+    },
+  ],
+  "/tutorials/": [
+    {
+      text: "实战教程",
+      collapsed: false,
+      items: [
+        { text: "教程中心", link: "/tutorials/" },
+        { text: "跑通第一条请求", link: "/tutorials/first-request" },
+        { text: "Codex + Chat 中转", link: "/tutorials/codex-with-chat-relay" },
+        { text: "不会断的算力池", link: "/tutorials/failover-pool" },
+        { text: "Claude Code 接任意上游", link: "/tutorials/claude-with-any-upstream" },
+        { text: "用量与费用对账", link: "/tutorials/usage-and-cost" },
+        { text: "手机访问与团队自建", link: "/tutorials/remote-and-team" },
       ],
     },
   ],
@@ -87,13 +102,11 @@ const zhSidebar: DefaultTheme.Sidebar = {
 /* ------------------------------ English ------------------------------ */
 
 const enNav: DefaultTheme.NavItem[] = [
-  { text: "Guide", link: "/en/guide/introduction", activeMatch: "^/en/guide/" },
   { text: "Features", link: "/en/features/vibe", activeMatch: "^/en/features/" },
-  { text: "Relays", link: "/en/relay/", activeMatch: "^/en/relay/" },
+  { text: "Tutorials", link: "/en/tutorials/", activeMatch: "^/en/tutorials/" },
+  { text: "Guide", link: "/en/guide/introduction", activeMatch: "^/en/guide/" },
   { text: "Deploy", link: "/en/deploy/desktop", activeMatch: "^/en/deploy/" },
-  { text: "Develop", link: "/en/dev/architecture", activeMatch: "^/en/dev/" },
   { text: "FAQ", link: "/en/faq" },
-  { text: "Sponsor", link: "/en/sponsor" },
   { text: "Download", link: RELEASES },
 ];
 
@@ -121,6 +134,21 @@ const enSidebar: DefaultTheme.Sidebar = {
         { text: "Model Connectivity Tests", link: "/en/guide/model-test" },
         { text: "Usage and Request Stats", link: "/en/guide/usage-stats" },
         { text: "Reliability and Auto Recovery", link: "/en/guide/reliability" },
+      ],
+    },
+  ],
+  "/en/tutorials/": [
+    {
+      text: "Hands-on Guides",
+      collapsed: false,
+      items: [
+        { text: "Tutorial hub", link: "/en/tutorials/" },
+        { text: "Your first request", link: "/en/tutorials/first-request" },
+        { text: "Codex on a Chat relay", link: "/en/tutorials/codex-with-chat-relay" },
+        { text: "A pool that never stalls", link: "/en/tutorials/failover-pool" },
+        { text: "Any upstream for Claude Code", link: "/en/tutorials/claude-with-any-upstream" },
+        { text: "Usage and cost", link: "/en/tutorials/usage-and-cost" },
+        { text: "Remote and team setup", link: "/en/tutorials/remote-and-team" },
       ],
     },
   ],

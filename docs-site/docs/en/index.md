@@ -1,5 +1,5 @@
 ---
 layout: home
-title: One shell for every AI API
-description: AI Switch is an open-source desktop and self-hosted web app for AI provider and account switching, with pool scheduling, four upstream protocol bridges, and support for Codex, Claude Code, Gemini CLI, Grok and more.
+title: AI Switch — One entry point for every AI CLI
+description: AI Switch is an open-source tool for AI provider and account switching, with one local proxy, pool scheduling and failover, four upstream protocol bridges, usage stats, tutorials and a self-hosted web service.
 ---

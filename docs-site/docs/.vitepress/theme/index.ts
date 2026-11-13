@@ -1,7 +1,7 @@
 import DefaultTheme from "vitepress/theme";
 import type { Theme } from "vitepress";
 import { h } from "vue";
-import HomePage from "./HomePage.vue";
+import HomePage from "./site/HomePage.vue";
 import RelayPage from "./RelayPage.vue";
 import RelaySpecPage from "./RelaySpecPage.vue";
 import "./style.css";

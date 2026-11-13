@@ -54,10 +54,151 @@
    between the full-bleed closing section and the footer. */
 .VPHome {
   margin-bottom: 0 !important;
+  padding-bottom: 0 !important;
+}
+
+/* The marketing home page renders its own dark, full-width sitemap footer.
+   Keep VitePress's own legal footer visually continuous with it. */
+body:has(.hp-home) .VPFooter {
+  padding-top: 20px;
+  padding-bottom: 22px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: #060d0a;
+}
+
+body:has(.hp-home) .VPFooter .message,
+body:has(.hp-home) .VPFooter .copyright {
+  color: #718b7e;
+}
+
+html {
+  scroll-behavior: smooth;
 }
 
 /* Chinese body copy reads better with slightly looser leading. */
 html[lang="zh-CN"] .vp-doc p,
 html[lang="zh-CN"] .vp-doc li {
   line-height: 1.8;
+}
+
+/* ---------------------------------------------------------------------------
+   Tutorial hub cards. Plain HTML in the markdown page, styled here so both
+   locales and both themes share one implementation.
+--------------------------------------------------------------------------- */
+
+.tutorial-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+  margin: 24px 0 32px;
+}
+
+.tutorial-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 18px 18px 16px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 14px;
+  background: var(--vp-c-bg-soft);
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.tutorial-card:hover {
+  border-color: var(--vp-c-brand-2);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 28px rgba(16, 185, 129, 0.14);
+}
+
+.tutorial-card .tc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tutorial-card .tc-tag {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--vp-c-brand-soft);
+  color: var(--vp-c-brand-1);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.7;
+}
+
+.tutorial-card .tc-time {
+  color: var(--vp-c-text-3);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.tutorial-card .tc-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.45;
+  color: var(--vp-c-text-1);
+  text-decoration: none;
+}
+
+.tutorial-card .tc-desc {
+  margin: 0;
+  flex: 1;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--vp-c-text-2);
+}
+
+.tutorial-card .tc-more {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--vp-c-brand-1);
+}
+
+.vp-doc .tutorial-card,
+.vp-doc .tutorial-card .tc-title {
+  text-decoration: none;
+}
+
+.vp-doc .tutorial-card:hover .tc-title {
+  color: var(--vp-c-brand-1);
+}
+
+.tutorial-steps {
+  counter-reset: tutorial-step;
+  list-style: none;
+  padding-left: 0;
+}
+
+.tutorial-steps > li {
+  counter-increment: tutorial-step;
+  position: relative;
+  padding-left: 38px;
+  margin-bottom: 14px;
+}
+
+.tutorial-steps > li::before {
+  content: counter(tutorial-step);
+  position: absolute;
+  left: 0;
+  top: 1px;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--vp-c-brand-soft);
+  color: var(--vp-c-brand-1);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+  line-height: 26px;
+}
+
+@media (max-width: 640px) {
+  .tutorial-grid {
+    grid-template-columns: 1fr;
+  }
 }
