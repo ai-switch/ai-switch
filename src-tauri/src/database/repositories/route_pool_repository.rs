@@ -225,36 +225,46 @@ impl RoutePoolRepository {
                     )
                 })?;
         if pending > 0 {
-            // SaaS 迁移链可能尚未执行（全新库）：表不存在 = 从无 SaaS 引用，
-            // 所有旧平台组直接收敛。
-            let saas_tables: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'                    AND name IN ('saas_api_keys', 'saas_group_settings')",
-            )
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|error| {
-                super::route_credential_repository::database_error(
-                    "database.legacy_pool_converge",
-                    "Could not check SaaS table availability",
-                    error,
+            // SaaS 表由独立迁移链创建：只查询已存在的表，并保护所有父组引用。
+            // 模型/同步记录即使没有销售配置也会存在，历史与预留同样不能丢失。
+            let mut referenced = HashSet::new();
+            for table in [
+                "saas_api_keys",
+                "saas_group_settings",
+                "saas_group_models",
+                "saas_group_model_sync",
+                "saas_billing_reservations",
+                "saas_usage_hourly",
+            ] {
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
                 )
-            })?;
-            let referenced: Vec<String> = if saas_tables == 0 {
-                Vec::new()
-            } else {
-                sqlx::query_scalar(
-                    "SELECT group_id FROM saas_api_keys                      UNION SELECT group_id FROM saas_group_settings",
-                )
-                .fetch_all(&mut *tx)
+                .bind(table)
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(|error| {
                     super::route_credential_repository::database_error(
                         "database.legacy_pool_converge",
-                        "Could not list SaaS-referenced groups",
+                        "Could not check SaaS table availability",
                         error,
                     )
-                })?
-            };
+                })?;
+                if !exists {
+                    continue;
+                }
+                let groups: Vec<String> =
+                    sqlx::query_scalar(&format!("SELECT DISTINCT group_id FROM {table}"))
+                        .fetch_all(&mut *tx)
+                        .await
+                        .map_err(|error| {
+                            super::route_credential_repository::database_error(
+                                "database.legacy_pool_converge",
+                                "Could not list SaaS-referenced groups",
+                                error,
+                            )
+                        })?;
+                referenced.extend(groups);
+            }
             let now = crate::saas::repository::now();
 
             // 无 SaaS 引用的旧平台组：成员并入 codex 同类视图组（out/archived 保持

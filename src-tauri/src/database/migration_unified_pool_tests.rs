@@ -291,3 +291,483 @@ async fn legacy_pool_convergence_deletes_unreferenced_groups_and_preserves_saas(
     .unwrap();
     assert_eq!(saas_keys, 1);
 }
+
+const SAAS_GROUP_REFERENCE_CASES: &[(&str, &str)] = &[
+    (
+        "saas_api_keys",
+        "INSERT INTO saas_api_keys (id,user_id,group_id,name,token_hash,prefix,suffix,created_at,updated_at) \
+         VALUES ('preserved-key','su-1',?,'fixture','preserved-hash','sk-','test',1,1)",
+    ),
+    (
+        "saas_group_settings",
+        "INSERT INTO saas_group_settings (group_id,multiplier_micros,max_output_tokens,timeout_seconds,max_concurrency,created_at,updated_at) \
+         VALUES (?,1234567,8192,180,3,1,1)",
+    ),
+    (
+        "saas_group_models",
+        "INSERT INTO saas_group_models (group_id,model,upstream_model,input_price_micros,cache_price_micros,output_price_micros,version) \
+         VALUES (?,'fixture-model','fixture-upstream',123,45,678,9)",
+    ),
+    (
+        "saas_group_model_sync",
+        "INSERT INTO saas_group_model_sync (group_id,source_fingerprint,last_success_at,last_error,updated_at) \
+         VALUES (?,'fixture-fingerprint',123,'preserve sync state',456)",
+    ),
+    (
+        "saas_billing_reservations",
+        "INSERT INTO saas_billing_reservations (request_id,user_id,key_id,group_id,platform,model,price_json,reserved_micros,status,created_at,updated_at) \
+         VALUES ('preserved-request','su-1','sak-1',?,'claude','fixture-model','{\"price\":123}',12345,'pending_review',1,2)",
+    ),
+    (
+        "saas_usage_hourly",
+        "INSERT INTO saas_usage_hourly (user_id,key_id,group_id,model,hour,request_count,input_tokens,output_tokens,cost_micros) \
+         VALUES ('su-1','sak-1',?,'fixture-model',123,7,456,89,12345)",
+    ),
+];
+
+async fn table_snapshot(pool: &sqlx::SqlitePool, table: &str) -> Vec<String> {
+    let columns: Vec<String> = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| format!("\"{}\"", row.get::<String, _>("name")))
+        .collect();
+    sqlx::query_scalar(&format!(
+        "SELECT json_array({}) FROM {table} ORDER BY 1",
+        columns.join(",")
+    ))
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn assert_foreign_keys_valid(pool: &sqlx::SqlitePool) {
+    let violations = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(pool)
+        .await
+        .unwrap();
+    assert!(violations.is_empty(), "group convergence must preserve foreign keys");
+}
+
+async fn assert_reference_preserved(table: &str, insert: &str) {
+    use super::repositories::route_pool_repository::RoutePoolRepository;
+
+    let pool = create_memory_pool().await.expect("pool");
+    run_migrations_until(&pool, PREVIOUS_MIGRATION).await;
+    seed_legacy_pools(&pool).await;
+    RoutePoolRepository::migrate_legacy_pool_views(&pool).await.unwrap();
+    // The existing fixture protects claude-default with keys/settings. Use a
+    // different group so no other table can hide a missing reference check.
+    sqlx::query("UPDATE route_pool_members SET group_id='claude-out', enabled=0 WHERE id='m4'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(insert).bind("claude-out").execute(&pool).await.unwrap();
+    if table == "saas_billing_reservations" {
+        pool.execute(
+            "INSERT INTO saas_wallet_ledger (id,user_id,kind,amount_micros,balance_after_micros,source_id,request_id,idempotency_key,actor,created_at) \
+             VALUES ('preserved-ledger','su-1','usage',-12345,0,'fixture','preserved-request','fixture-ledger','fixture',1)",
+        )
+        .await
+        .unwrap();
+    }
+    apply_remaining_migrations(&pool).await;
+    let accounts = table_snapshot(&pool, "route_credentials").await;
+    let referenced_rows = table_snapshot(&pool, table).await;
+    let ledger = table_snapshot(&pool, "saas_wallet_ledger").await;
+    let before_members: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), SUM(enabled) FROM route_pool_members",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // The SQL migration has already committed, matching the failed upgrade's
+    // next startup. Both calls use the real production migration entry point.
+    for _ in 0..2 {
+        super::run_migrations(&pool).await.unwrap_or_else(|error| {
+            panic!("convergence must preserve a group referenced only by {table}: {error:?}")
+        });
+        assert_eq!(table_snapshot(&pool, "route_credentials").await, accounts);
+        assert_eq!(table_snapshot(&pool, table).await, referenced_rows);
+        assert_eq!(table_snapshot(&pool, "saas_wallet_ledger").await, ledger);
+        let group: (i64, i64) = sqlx::query_as(
+            "SELECT legacy_group, serves_local FROM route_pool_groups WHERE id='claude-out'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(group, (0, 0));
+        let membership: (String, i64) = sqlx::query_as(
+            "SELECT group_id, enabled FROM route_pool_members WHERE id='m4'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(membership, ("claude-out".to_string(), 0));
+        let after_members: (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), SUM(enabled) FROM route_pool_members",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after_members, before_members);
+        assert_foreign_keys_valid(&pool).await;
+    }
+}
+
+#[tokio::test]
+async fn legacy_pool_convergence_preserves_api_key_only_group() {
+    let (table, insert) = SAAS_GROUP_REFERENCE_CASES[0];
+    assert_reference_preserved(table, insert).await;
+}
+
+#[tokio::test]
+async fn legacy_pool_convergence_preserves_settings_only_group() {
+    let (table, insert) = SAAS_GROUP_REFERENCE_CASES[1];
+    assert_reference_preserved(table, insert).await;
+}
+
+#[tokio::test]
+async fn legacy_pool_convergence_preserves_models_only_group() {
+    let (table, insert) = SAAS_GROUP_REFERENCE_CASES[2];
+    assert_reference_preserved(table, insert).await;
+}
+
+#[tokio::test]
+async fn legacy_pool_convergence_preserves_model_sync_only_group() {
+    let (table, insert) = SAAS_GROUP_REFERENCE_CASES[3];
+    assert_reference_preserved(table, insert).await;
+}
+
+#[tokio::test]
+async fn legacy_pool_convergence_preserves_reservations_only_group() {
+    let (table, insert) = SAAS_GROUP_REFERENCE_CASES[4];
+    assert_reference_preserved(table, insert).await;
+}
+
+#[tokio::test]
+async fn legacy_pool_convergence_preserves_usage_only_group() {
+    let (table, insert) = SAAS_GROUP_REFERENCE_CASES[5];
+    assert_reference_preserved(table, insert).await;
+}
+
+// Reuse the real CREATE TABLE statements without installing the rest of the
+// independent SaaS schema. A partially initialized schema must be safe too.
+async fn create_saas_table(pool: &sqlx::SqlitePool, table: &str) {
+    let source = if table == "saas_group_model_sync" {
+        include_str!("../saas/migrations/0006_claude_model_sync.sql")
+    } else {
+        include_str!("../saas/migrations/0001_saas.sql")
+    };
+    let start = source.find(&format!("CREATE TABLE {table} (")).unwrap();
+    let statement = &source[start..];
+    let end = statement.find(");").unwrap() + 2;
+    sqlx::raw_sql(&statement[..end]).execute(pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_pool_convergence_supports_partial_saas_schema() {
+    use super::repositories::route_pool_repository::RoutePoolRepository;
+
+    for &(table, insert) in SAAS_GROUP_REFERENCE_CASES {
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations_until(&pool, PREVIOUS_MIGRATION).await;
+        pool.execute(
+            "INSERT INTO route_credentials (id,platform,kind,display_name,status,secret_payload_json,config_json,archived_at,created_at,updated_at) \
+             VALUES ('archived-account','claude','api','fixture','ok','{}','{}','2026-01-01','2026-01-01','2026-01-01'); \
+             INSERT INTO route_pool_members (id,platform,route_credential_id,enabled,group_id,created_at,updated_at) \
+             VALUES ('archived-member','claude','archived-account',0,'claude-archived','2026-01-01','2026-01-01')",
+        )
+        .await
+        .unwrap();
+        if matches!(table, "saas_api_keys" | "saas_billing_reservations" | "saas_usage_hourly") {
+            create_saas_table(&pool, "saas_users").await;
+            pool.execute(
+                "INSERT INTO saas_users (id,github_id,login,github_created_at,created_at,updated_at) \
+                 VALUES ('su-1','fixture','fixture','2020-01-01',1,1)",
+            )
+            .await
+            .unwrap();
+        }
+        if matches!(table, "saas_billing_reservations" | "saas_usage_hourly") {
+            create_saas_table(&pool, "saas_api_keys").await;
+            pool.execute(
+                "INSERT INTO saas_api_keys (id,user_id,group_id,name,token_hash,prefix,suffix,created_at,updated_at) \
+                 VALUES ('sak-1','su-1','codex-default','fixture','fixture-hash','sk-','test',1,1)",
+            )
+            .await
+            .unwrap();
+        }
+        create_saas_table(&pool, table).await;
+        sqlx::query(insert).bind("claude-archived").execute(&pool).await.unwrap();
+        apply_remaining_migrations(&pool).await;
+        let rows = table_snapshot(&pool, table).await;
+        for _ in 0..2 {
+            RoutePoolRepository::converge_legacy_pool_groups(&pool)
+                .await
+                .unwrap_or_else(|error| panic!("partial {table} schema: {error:?}"));
+            let groups: Vec<String> = sqlx::query_scalar(
+                "SELECT id FROM route_pool_groups ORDER BY id",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(groups, ["claude-archived", "codex-archived", "codex-default", "codex-out"]);
+            let membership: (String, i64) = sqlx::query_as(
+                "SELECT group_id, enabled FROM route_pool_members WHERE id='archived-member'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(membership, ("claude-archived".to_string(), 0));
+            assert_eq!(table_snapshot(&pool, table).await, rows);
+            assert_foreign_keys_valid(&pool).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn legacy_pool_convergence_without_saas_references_removes_old_groups() {
+    use super::repositories::route_pool_repository::RoutePoolRepository;
+
+    for with_saas_schema in [false, true] {
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations_until(&pool, PREVIOUS_MIGRATION).await;
+        if with_saas_schema {
+            crate::saas::repository::migrate(&pool).await.unwrap();
+        }
+        pool.execute(
+            "INSERT INTO route_credentials (id,platform,kind,display_name,status,secret_payload_json,config_json,archived_at,created_at,updated_at) \
+             VALUES ('out-account','claude','api','fixture-out','ok','{}','{}',NULL,'2026-01-01','2026-01-01'), \
+                    ('archived-account','claude','api','fixture-archived','ok','{}','{}','2026-01-01','2026-01-01','2026-01-01'); \
+             INSERT INTO route_pool_members (id,platform,route_credential_id,enabled,group_id,created_at,updated_at) \
+             VALUES ('out-member','claude','out-account',0,'claude-out','2026-01-01','2026-01-01'), \
+                    ('archived-member','claude','archived-account',0,'claude-archived','2026-01-01','2026-01-01')",
+        )
+        .await
+        .unwrap();
+        apply_remaining_migrations(&pool).await;
+        for _ in 0..2 {
+            RoutePoolRepository::converge_legacy_pool_groups(&pool).await.unwrap();
+            let groups: Vec<String> = sqlx::query_scalar(
+                "SELECT id FROM route_pool_groups ORDER BY id",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(groups, ["codex-archived", "codex-default", "codex-out"]);
+            let memberships: Vec<(String, String, i64)> = sqlx::query_as(
+                "SELECT id, group_id, enabled FROM route_pool_members ORDER BY id",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                memberships,
+                [
+                    ("archived-member".to_string(), "codex-archived".to_string(), 0),
+                    ("out-member".to_string(), "codex-out".to_string(), 0),
+                ],
+            );
+            assert_foreign_keys_valid(&pool).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn upgrade_from_v0171_preserves_model_sync_without_saas_configuration() {
+    use super::repositories::route_pool_repository::RoutePoolRepository;
+
+    let pool = create_memory_pool().await.expect("pool");
+    run_migrations_until(&pool, 202610060001).await;
+    seed_legacy_pools(&pool).await;
+    // v0.17.1 has already performed the old Rust membership migration.
+    RoutePoolRepository::migrate_legacy_pool_views(&pool).await.unwrap();
+    sqlx::query(SAAS_GROUP_REFERENCE_CASES[3].1)
+        .bind("claude-archived")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let credentials: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT id, secret_payload_json, config_json FROM route_credentials ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let sync = table_snapshot(&pool, "saas_group_model_sync").await;
+    for _ in 0..2 {
+        super::run_migrations(&pool).await.expect("upgrade must succeed");
+        let after: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT id, secret_payload_json, config_json FROM route_credentials ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after, credentials);
+        assert_eq!(table_snapshot(&pool, "saas_group_model_sync").await, sync);
+        assert_foreign_keys_valid(&pool).await;
+    }
+}
+
+fn validate_isolated_upgrade_copy(database: &std::path::Path) {
+    let resolved = database.canonicalize().expect("existing temporary copy");
+    let temporary_root = std::env::temp_dir().canonicalize().unwrap();
+    let resolved_parent = resolved.parent().expect("temporary directory");
+    assert_eq!(resolved.file_name().unwrap(), "upgrade-copy.db");
+    assert_eq!(resolved_parent.parent().unwrap(), temporary_root);
+    assert!(resolved_parent.file_name().unwrap().to_string_lossy().starts_with("ai-switch-upgrade-fix-"));
+    assert_eq!(
+        database.parent().unwrap().canonicalize().unwrap(),
+        resolved_parent,
+        "diagnostic backups must stay in the validated temporary copy directory",
+    );
+}
+
+/// A file alias outside the validated directory must not redirect diagnostic
+/// backups outside the temporary fixture, even if its target is a valid copy.
+#[cfg(any(unix, windows))]
+#[test]
+fn isolated_upgrade_copy_rejects_external_file_aliases() {
+    let allowed = tempfile::Builder::new()
+        .prefix("ai-switch-upgrade-fix-")
+        .tempdir()
+        .unwrap();
+    let copy = allowed.path().join("upgrade-copy.db");
+    std::fs::write(&copy, b"fixture").unwrap();
+    validate_isolated_upgrade_copy(&copy);
+    let outside = tempfile::tempdir().unwrap();
+    let alias = outside.path().join("upgrade-copy.db");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&copy, &alias).unwrap();
+    #[cfg(windows)]
+    if let Err(error) = std::os::windows::fs::symlink_file(&copy, &alias) {
+        if error.raw_os_error() == Some(1314) {
+            eprintln!("Skipping file-alias case: Windows symlink privilege is unavailable");
+            return;
+        }
+        panic!("could not create diagnostic file alias: {error}");
+    }
+    assert!(
+        std::panic::catch_unwind(|| validate_isolated_upgrade_copy(&alias)).is_err(),
+        "an alias outside the validated copy directory must be rejected",
+    );
+}
+
+/// Diagnostic verification only: the path must be a new temporary SQLite
+/// backup, never the installed application's live database or a backup in it.
+#[tokio::test]
+#[ignore = "requires AI_SWITCH_UPGRADE_TEST_DB pointing to an isolated temporary database copy"]
+async fn isolated_upgrade_database_copy_reopens_without_data_loss() {
+    use sha2::{Digest, Sha256};
+
+    let database = std::path::PathBuf::from(
+        std::env::var_os("AI_SWITCH_UPGRADE_TEST_DB").expect("explicit temporary database copy"),
+    );
+    validate_isolated_upgrade_copy(&database);
+    // Windows canonicalization adds the extended \\?\ path prefix. Validate with
+    // that resolved path, but keep the ordinary path for the SQLite URL parser.
+    let parent = database.parent().expect("temporary directory");
+
+    let tables = [
+        "route_credentials",
+        "saas_users",
+        "saas_api_keys",
+        "saas_group_settings",
+        "saas_group_models",
+        "saas_group_model_sync",
+        "saas_billing_reservations",
+        "saas_usage_hourly",
+        "saas_wallet_ledger",
+        "saas_recharge_orders",
+    ];
+    let before_pool = super::create_pool(&database).await.unwrap();
+    let mut before = Vec::new();
+    for table in tables {
+        let rows = table_snapshot(&before_pool, table).await;
+        let digest = Sha256::digest(serde_json::to_vec(&rows).unwrap()).to_vec();
+        before.push((table, rows.len(), digest));
+    }
+    let before_members: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT id, route_credential_id, enabled FROM route_pool_members ORDER BY id",
+    )
+    .fetch_all(&before_pool)
+    .await
+    .unwrap();
+    let before_protected_members: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, group_id FROM route_pool_members WHERE group_id IN \
+         (SELECT group_id FROM saas_api_keys UNION SELECT group_id FROM saas_group_settings \
+          UNION SELECT group_id FROM saas_group_models UNION SELECT group_id FROM saas_group_model_sync \
+          UNION SELECT group_id FROM saas_billing_reservations UNION SELECT group_id FROM saas_usage_hourly) \
+         ORDER BY id",
+    )
+    .fetch_all(&before_pool)
+    .await
+    .unwrap();
+    let before_groups: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM route_pool_groups WHERE id IN \
+         (SELECT group_id FROM saas_api_keys UNION SELECT group_id FROM saas_group_settings \
+          UNION SELECT group_id FROM saas_group_models UNION SELECT group_id FROM saas_group_model_sync \
+          UNION SELECT group_id FROM saas_billing_reservations UNION SELECT group_id FROM saas_usage_hourly) \
+         ORDER BY id",
+    )
+    .fetch_all(&before_pool)
+    .await
+    .unwrap();
+    before_pool.close().await;
+
+    for _ in 0..2 {
+        let pool = super::open_migrated_pool(&database, &parent.join("backups"))
+            .await
+            .expect("isolated upgrade must complete");
+        for (table, count, digest) in &before {
+            let rows = table_snapshot(&pool, table).await;
+            assert_eq!(rows.len(), *count, "row count changed in {table}");
+            assert_eq!(
+                Sha256::digest(serde_json::to_vec(&rows).unwrap()).as_slice(),
+                digest.as_slice(),
+                "contents changed in {table}",
+            );
+        }
+        let members: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT id, route_credential_id, enabled FROM route_pool_members ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(members, before_members);
+        let protected_members: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, group_id FROM route_pool_members WHERE group_id IN \
+             (SELECT group_id FROM saas_api_keys UNION SELECT group_id FROM saas_group_settings \
+              UNION SELECT group_id FROM saas_group_models UNION SELECT group_id FROM saas_group_model_sync \
+              UNION SELECT group_id FROM saas_billing_reservations UNION SELECT group_id FROM saas_usage_hourly) \
+             ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(protected_members, before_protected_members);
+        let protected_groups: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM route_pool_groups WHERE id IN \
+             (SELECT group_id FROM saas_api_keys UNION SELECT group_id FROM saas_group_settings \
+              UNION SELECT group_id FROM saas_group_models UNION SELECT group_id FROM saas_group_model_sync \
+              UNION SELECT group_id FROM saas_billing_reservations UNION SELECT group_id FROM saas_usage_hourly) \
+             ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(protected_groups, before_groups);
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM route_pool_groups WHERE legacy_group=1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, 0);
+        assert_foreign_keys_valid(&pool).await;
+        pool.close().await;
+    }
+    println!("Verified both isolated database opens; preserved {} accounts and all model, sync, key and billing rows.", before[0].1);
+}
