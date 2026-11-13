@@ -2555,6 +2555,54 @@ describe("AccountsScreen", () => {
     expect(within(screen.getByTestId("pool-status-strip")).getByRole("button", { name: "配置 Codex 基线模型" })).toBeInTheDocument();
   });
 
+  it.each([
+    ["general", true], ["image", true], ["video", true], ["audio", true],
+    ["general", false], ["image", false], ["video", false], ["audio", false],
+  ] as const)("keeps %s account workspace filling the page when segment tabs are hidden: %s", async (modality, hideSegmentTabs) => {
+    vi.mocked(listRouteCredentials).mockResolvedValue([]);
+    render(
+      <QueryClientProvider client={createQueryClient()}>
+        <I18nProvider initialLanguage="zh-CN">
+          <CodexChannelsScreen modality={modality} hideSegmentTabs={hideSegmentTabs} />
+        </I18nProvider>
+      </QueryClientProvider>,
+    );
+    const emptyState = await screen.findByTestId("account-empty-state");
+    const workspace = screen.getByTestId("account-workspace");
+    const accountScreen = workspace.parentElement!;
+    const modalityShell = accountScreen.parentElement!;
+    expect(modalityShell).toHaveClass("flex", "h-full", "min-h-0", "flex-col");
+    expect(accountScreen).toHaveClass("flex-1", "min-h-0");
+    expect(screen.getByTestId("account-workspace-scroll-region")).toHaveClass("flex", "flex-col");
+    expect(emptyState.parentElement!.parentElement!).toHaveClass("flex-1", "flex-col");
+    expect(screen.getByTestId("account-list")).toHaveClass("hidden");
+    expect(workspace.lastElementChild).toBe(screen.getByTestId("account-workspace-status-bar"));
+    if (!hideSegmentTabs) expect(screen.getByRole("tablist")).toHaveClass("shrink-0");
+  });
+
+  it("lets the sticky filter container grow with a long account list", async () => {
+    vi.mocked(listRouteCredentials).mockResolvedValue(
+      Array.from({ length: 40 }, (_, index) => ({
+        ...credentialsFixture[1],
+        id: `long-list-${index}`,
+        display_name: `Long list account ${index}`,
+      })),
+    );
+    renderScreen();
+    await screen.findByText("Long list account 0");
+    const body = screen.getByTestId("account-list").parentElement!;
+    const stickyContainer = body.parentElement!;
+    const animatedView = stickyContainer.parentElement!;
+    expect(stickyContainer).toHaveClass("min-h-min", "flex-1");
+    expect(animatedView).toHaveClass("min-h-min", "flex-1");
+  });
+
+  it("keeps card rows compact while their list fills the remaining space", async () => {
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "卡片模式" }));
+    expect(screen.getByTestId("account-list")).toHaveClass("grid", "flex-1", "content-start");
+  });
+
   it("fills the account list area and centers the empty state when no accounts exist", async () => {
     vi.mocked(listRouteCredentials).mockResolvedValue([]);
 

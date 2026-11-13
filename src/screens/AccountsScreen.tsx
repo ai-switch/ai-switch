@@ -6651,7 +6651,7 @@ export function AccountsScreen({
   };
 
   return (
-    <section className="accounts-screen flex h-full min-h-0 flex-col overflow-hidden">
+    <section className="accounts-screen flex h-full min-h-0 flex-1 flex-col overflow-hidden">
       <div
         className="account-workspace grid h-full min-h-0 overflow-hidden rounded-lg bg-transparent motion-layout duration-300 ease-out"
         data-testid="account-workspace"
@@ -7114,7 +7114,7 @@ export function AccountsScreen({
         {mediaModality ? <ModalityAccessPanel modality={mediaModality} /> : null}
 
         <div
-          className="min-h-0 overflow-x-hidden overflow-y-auto overscroll-contain bg-transparent"
+          className="flex min-h-0 flex-col overflow-x-hidden overflow-y-auto overscroll-contain bg-transparent"
           data-testid="account-workspace-scroll-region"
           ref={accountScrollRef}
         >
@@ -7295,13 +7295,13 @@ export function AccountsScreen({
       <>
           <motion.div
             key={accountView}
-            className="account-view-motion min-h-full"
+            className="account-view-motion flex min-h-min flex-1 flex-col"
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
           >
-      <section className="flex min-h-full flex-col border-t border-stone-300/80 bg-transparent pt-2">
+      <section className="flex min-h-min flex-1 flex-col border-t border-stone-300/80 bg-transparent pt-2">
         <div className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-2 border-y border-stone-300/80 bg-stone-100/90 px-2 py-1.5 backdrop-blur-sm">
           <div className="min-w-0 flex-1">
             <div aria-label="账号筛选条件" className="flex min-w-0 items-center justify-end gap-2" role="group">
@@ -7544,12 +7544,13 @@ export function AccountsScreen({
           )}
           <div
             className={
-              cardLayout
-                ? // min(...) rather than a bare 272px: below one card's width the
-                  // track has to shrink with the container instead of overflowing it.
-                  "grid flex-1 grid-cols-[repeat(auto-fill,minmax(min(272px,100%),1fr))] gap-2 px-1"
-                : // flex-1: 列表不满一屏时也撑到分页底边，和空状态的行为保持一致。
-                  "flex-1"
+              credentials.length === 0
+                ? "hidden"
+                : cardLayout
+                  ? // Compact rows fill the available width without stretching tall.
+                    "grid flex-1 content-start grid-cols-[repeat(auto-fill,minmax(min(272px,100%),1fr))] gap-2 px-1"
+                  : // flex-1: 列表不满一屏时也撑到分页底边，和空状态的行为保持一致。
+                    "flex-1"
             }
             data-account-layout={accountLayout}
             data-testid="account-list"

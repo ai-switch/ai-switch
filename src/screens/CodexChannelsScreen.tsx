@@ -112,10 +112,10 @@ export function CodexChannelsScreen({
   };
 
   return (
-    <div className="space-y-3">
+    <div className="flex h-full min-h-0 flex-col gap-3">
       {!hideSegmentTabs && <div
         aria-label={t("codex.segments")}
-        className="flex flex-wrap items-center gap-1 border-b border-stone-200 px-1 pb-2"
+        className="flex shrink-0 flex-wrap items-center gap-1 border-b border-stone-200 px-1 pb-2"
         role="tablist"
       >
         {SEGMENTS.map((item) => (
