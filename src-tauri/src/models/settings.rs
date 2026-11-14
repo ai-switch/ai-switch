@@ -75,6 +75,11 @@ pub struct AppSettings {
     /// it removes `experimental_bearer_token` from the provider table.
     #[serde(default)]
     pub codex_keep_login_state: bool,
+    /// Opt into the beta update channel: checks a manifest that also carries
+    /// release candidates instead of the stable-only `/releases/latest`.
+    /// Off by default, so ordinary users only ever see stable releases.
+    #[serde(default)]
+    pub beta_updates_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -98,6 +103,7 @@ pub struct AppSettingsView {
     pub proxy_url: Option<String>,
     pub route_proxy_request_body_limit_mib: u32,
     pub codex_keep_login_state: bool,
+    pub beta_updates_enabled: bool,
 }
 
 impl AppSettingsView {
@@ -122,6 +128,7 @@ impl AppSettingsView {
             proxy_url: settings.proxy_url,
             route_proxy_request_body_limit_mib: settings.route_proxy_request_body_limit_mib,
             codex_keep_login_state: settings.codex_keep_login_state,
+            beta_updates_enabled: settings.beta_updates_enabled,
         }
     }
 }
@@ -147,6 +154,7 @@ impl AppSettings {
             proxy_url: None,
             route_proxy_request_body_limit_mib: DEFAULT_ROUTE_PROXY_REQUEST_BODY_LIMIT_MIB,
             codex_keep_login_state: false,
+            beta_updates_enabled: false,
         }
     }
 }
@@ -183,6 +191,13 @@ mod tests {
         // Keeping the ChatGPT login is opt-in: a settings file from before the
         // switch existed must not silently start writing auth-free providers.
         assert!(!settings.codex_keep_login_state);
+        // Beta updates are opt-in: a settings file from before the switch
+        // existed must not start checking the prerelease channel.
+        assert!(!settings.beta_updates_enabled);
+        assert_eq!(
+            serde_json::to_value(&view).unwrap()["beta_updates_enabled"],
+            false,
+        );
         assert_eq!(
             serde_json::to_value(&view).unwrap()["codex_keep_login_state"],
             false,

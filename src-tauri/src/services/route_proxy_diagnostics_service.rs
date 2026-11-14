@@ -551,6 +551,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: None,
             codex_keep_login_state: false,
+            beta_updates_enabled: false,
         };
         settings.notification_config_json = Some(
             json!({

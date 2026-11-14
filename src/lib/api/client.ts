@@ -1,3 +1,4 @@
+import { Update } from "@tauri-apps/plugin-updater";
 import { getTransport } from "../transport";
 import type {
   AccountStatus,
@@ -348,6 +349,14 @@ export function getSettings(): Promise<AppSettingsView> {
 
 export function saveSettings(settings: AppSettings): Promise<AppSettingsView> {
   return invoke("save_settings", { settings });
+}
+
+type UpdateMetadata = ConstructorParameters<typeof Update>[0];
+
+/** Keep the plugin's download/install resource protocol after a channel-aware check. */
+export async function checkUpdate(): Promise<Update | null> {
+  const metadata = await invoke<UpdateMetadata | null>("check_update");
+  return metadata ? new Update(metadata) : null;
 }
 
 /**

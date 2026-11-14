@@ -46,4 +46,5 @@ export const settingsFixture: AppSettings = {
   claude_client_config_json: null,
   proxy_enabled: false,
   proxy_url: null,
+  beta_updates_enabled: false,
 };

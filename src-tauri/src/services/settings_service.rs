@@ -72,6 +72,7 @@ mod tests {
             proxy_enabled: true,
             proxy_url: Some("http://127.0.0.1:7890".to_string()),
             codex_keep_login_state: true,
+            beta_updates_enabled: true,
         };
 
         SettingsService::save(&paths, &settings)
@@ -99,6 +100,7 @@ mod tests {
         // Opt-in switch, so a round trip that lost it would read back as the
         // default and quietly rewrite Codex with a bearer token again.
         assert!(loaded.codex_keep_login_state);
+        assert!(loaded.beta_updates_enabled);
         assert_eq!(
             loaded.proxy_url.as_deref(),
             Some("http://127.0.0.1:7890")

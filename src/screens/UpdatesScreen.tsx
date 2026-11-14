@@ -1,10 +1,14 @@
 import { relaunch } from "@tauri-apps/plugin-process";
-import { check, type Update } from "@tauri-apps/plugin-updater";
+import type { Update } from "@tauri-apps/plugin-updater";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Download, RefreshCw, RotateCcw, ShieldAlert } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { checkUpdate, getSettings, saveSettings } from "../lib/api/client";
 import { useI18n, type Language } from "../lib/i18n";
 import { isDesktop } from "../lib/transport";
+import { BETA_UPDATE_ENDPOINT, STABLE_UPDATE_ENDPOINT, UPDATE_CHANNEL_CHANGED_EVENT } from "../lib/updateChannel";
 import { ReleaseNotes } from "../components/updates/ReleaseNotes";
+import { useUpdateResource } from "../components/updates/useUpdateResource";
 
 type DownloadState = {
   downloaded: number;
@@ -44,45 +48,111 @@ export function UpdatesScreen() {
   // calls throw a bare "Cannot read properties of undefined", which is worse
   // than useless in an error banner.
   const desktop = isDesktop();
-  const [update, setUpdate] = useState<Update | null>(null);
+  const [update, setUpdate] = useUpdateResource();
   const [checking, setChecking] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [download, setDownload] = useState<DownloadState>({ downloaded: 0 });
   const [status, setStatus] = useState<UpdateStatus>("updates.statusInitial");
   const [error, setError] = useState<string | null>(null);
   const [installed, setInstalled] = useState(false);
+  const queryClient = useQueryClient();
+  const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getSettings, enabled: desktop });
+  const betaEnabled = settingsQuery.data?.beta_updates_enabled ?? false;
+  const requestVersion = useRef(0);
+  const checkInProgress = useRef(false);
+  const checkRequired = useRef(false);
+  const installingRef = useRef(false);
+  const installedRef = useRef(false);
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      requestVersion.current += 1;
+    };
+  }, []);
+
+  const releaseEndpoints = betaEnabled
+    ? [BETA_UPDATE_ENDPOINT, STABLE_UPDATE_ENDPOINT]
+    : [STABLE_UPDATE_ENDPOINT];
 
   const progress = download.total ? Math.min(100, Math.round((download.downloaded / download.total) * 100)) : 0;
   const statusText = status === "updates.statusAvailable" && update
     ? t(status, { version: update.version })
     : t(status);
 
-  const handleCheck = async () => {
-    if (!desktop) {
-      return;
-    }
+  const handleCheck = useCallback(async function runCheck() {
+    if (!desktop || !mounted.current || checkInProgress.current || installingRef.current || installedRef.current) return;
 
+    const request = ++requestVersion.current;
+    checkInProgress.current = true;
     setChecking(true);
+    setUpdate(null);
     setError(null);
     setInstalled(false);
     setStatus("updates.statusChecking");
     try {
-      const nextUpdate = await check();
+      const nextUpdate = await checkUpdate();
+      if (!mounted.current || request !== requestVersion.current) {
+        if (nextUpdate) void nextUpdate.close().catch(() => {});
+        return;
+      }
       setUpdate(nextUpdate);
       setStatus(nextUpdate ? "updates.statusAvailable" : "updates.statusLatest");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-      setStatus("updates.statusCheckFailed");
+      if (mounted.current && request === requestVersion.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        setStatus("updates.statusCheckFailed");
+      }
     } finally {
-      setChecking(false);
+      checkInProgress.current = false;
+      if (mounted.current) {
+        setChecking(false);
+        if (checkRequired.current && !installingRef.current && !installedRef.current) {
+          checkRequired.current = false;
+          void runCheck();
+        }
+      }
     }
-  };
+  }, [desktop, setUpdate]);
+
+  useEffect(() => {
+    const onChannelChanged = () => {
+      if (installedRef.current) return;
+      requestVersion.current += 1;
+      checkRequired.current = true;
+      if (installingRef.current) return;
+      setUpdate(null);
+      if (!checkInProgress.current) {
+        checkRequired.current = false;
+        void handleCheck();
+      }
+    };
+    window.addEventListener(UPDATE_CHANNEL_CHANGED_EVENT, onChannelChanged);
+    return () => window.removeEventListener(UPDATE_CHANNEL_CHANGED_EVENT, onChannelChanged);
+  }, [handleCheck, setUpdate]);
+
+  const channelMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const settings = await getSettings();
+      return saveSettings({ ...settings, beta_updates_enabled: enabled });
+    },
+    onSuccess: (saved) => {
+      queryClient.setQueryData(["settings"], saved);
+      window.dispatchEvent(new Event(UPDATE_CHANNEL_CHANGED_EVENT));
+    },
+    onError: (cause) => {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    },
+  });
 
   const handleInstall = async () => {
-    if (!update) {
+    if (!update || checking || channelMutation.isPending || installing) {
       return;
     }
 
+    installingRef.current = true;
     setInstalling(true);
     setError(null);
     setInstalled(false);
@@ -109,13 +179,20 @@ export function UpdatesScreen() {
           setDownload((current) => ({ ...current, downloaded: current.total ?? current.downloaded }));
         }
       });
+      installedRef.current = true;
       setInstalled(true);
       setStatus("updates.statusInstalled");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
       setStatus("updates.statusInstallFailed");
     } finally {
+      installingRef.current = false;
       setInstalling(false);
+      if (checkRequired.current && !installedRef.current) {
+        checkRequired.current = false;
+        setUpdate(null);
+        void handleCheck();
+      }
     }
   };
 
@@ -152,7 +229,7 @@ export function UpdatesScreen() {
               </div>
               <button
                 className="inline-flex items-center gap-2 rounded-xl bg-stone-900 px-3 py-2 text-[13px] font-semibold text-white motion-control hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-400"
-                disabled={!desktop || checking || installing}
+                disabled={!desktop || checking || installing || installed || channelMutation.isPending}
                 onClick={handleCheck}
                 title={desktop ? undefined : t("common.desktopOnly")}
                 type="button"
@@ -185,7 +262,7 @@ export function UpdatesScreen() {
                   </div>
                   <button
                     className="inline-flex items-center gap-2 rounded-xl bg-stone-900 px-3 py-2 text-[13px] font-semibold text-white motion-control hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-400"
-                    disabled={installing || installed}
+                    disabled={checking || channelMutation.isPending || installing || installed}
                     onClick={handleInstall}
                     type="button"
                   >
@@ -229,10 +306,25 @@ export function UpdatesScreen() {
           <aside className="space-y-3 rounded-2xl border border-stone-200 bg-stone-50 p-4">
             <div>
               <p className="text-[13px] font-semibold text-stone-950">{t("updates.releaseSource")}</p>
-              <p className="mt-1 break-all text-[12px] text-stone-500">
-                https://github.com/ai-switch/ai-switch/releases/latest/download/latest.json
-              </p>
+              {releaseEndpoints.map((endpoint) => (
+                <p className="mt-1 break-all text-[12px] text-stone-500" key={endpoint}>{endpoint}</p>
+              ))}
             </div>
+            {desktop && settingsQuery.isSuccess && (
+              <label className="flex items-start gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12px] text-stone-700">
+                <input
+                  checked={betaEnabled}
+                  className="mt-0.5"
+                  disabled={checking || installing || installed || channelMutation.isPending}
+                  onChange={(event) => channelMutation.mutate(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>
+                  <span className="font-semibold text-stone-900">{t("updates.betaChannel")}</span>
+                  <span className="mt-0.5 block text-stone-500">{t("updates.betaChannelHint")}</span>
+                </span>
+              </label>
+            )}
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] leading-5 text-amber-900">
               {t("updates.requirements")}
             </div>

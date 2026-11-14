@@ -439,6 +439,18 @@ jobs:
           artifactErrorsFailBuild: true
           artifacts: "release-assets/**/*.*"
 
+      - name: Publish the beta manifest
+        # Stable releases do not touch beta. The opt-in client compares both
+        # feeds so testers still receive a newer stable release after the RC.
+        if: contains(github.ref_name, '-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          node scripts/publish-beta-manifest.mjs \
+            --manifest release-assets/latest.json \
+            --tag "$GITHUB_REF_NAME"
+
       - name: Hand the release to the package managers
         # package-managers.yml also listens for `release: published`, but that
         # event never fires for a release published here: GitHub does not start

@@ -23,6 +23,14 @@ Alongside the desktop installers, each release attaches the `ai-switch-server` a
 
 To pick the right installer and get through first-run setup, start with [Installation](/en/guide/installation) and [Quick Start](/en/guide/quick-start).
 
+## Desktop updates and Beta testing
+
+The desktop checks for updates on startup and hourly while running. You can also check and install manually from **Settings → Updates**. Downloads and installation retain the Tauri updater's signature verification.
+
+**Beta update channel** is off by default and stored as `beta_updates_enabled` in `settings.json`. When off, the app discovers only stable releases. When on, it chooses the newer installable release from the stable and Beta feeds, including `-rc.N`, `-beta.N` and `-alpha.N` candidates. A successful channel change triggers another check; it never automatically downgrades. Browsers and standalone servers do not offer this desktop updater switch.
+
+To test an upgrade yourself before announcing it to everyone, enable Beta only on your test devices and publish an RC first. Once it passes testing, publish a stable release with the application version synchronized and the prerelease suffix removed; default stable clients discover it then. See [Release Process](/en/dev/release#test-a-candidate-before-announcing-it-to-stable-users). Beta is an opt-in channel, not an account allowlist, and public prerelease installers remain downloadable.
+
 ## What happens on first launch
 
 On first launch the app creates the data directory `~/.ai-switch` in your home directory, opens the SQLite database, and runs the bundled migrations in order (currently 23, in `src-tauri/migrations`). Migrations are idempotent, so later upgrades only apply the new ones.

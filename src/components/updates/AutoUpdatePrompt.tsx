@@ -1,11 +1,13 @@
-import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { checkUpdate } from "../../lib/api/client";
 import { Download, RefreshCw, RotateCcw, ShieldAlert, X } from "lucide-react";
 import { motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../../lib/i18n";
 import { isDesktop } from "../../lib/transport";
 import { ReleaseNotes } from "./ReleaseNotes";
+import { useUpdateResource } from "./useUpdateResource";
+import { UPDATE_CHANNEL_CHANGED_EVENT } from "../../lib/updateChannel";
 
 const AUTO_UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -26,36 +28,58 @@ function formatBytes(value: number) {
 
 export function AutoUpdatePrompt() {
   const { t } = useI18n();
-  const [update, setUpdate] = useState<Update | null>(null);
+  const [update, setUpdate] = useUpdateResource();
   const [installing, setInstalling] = useState(false);
   const [installed, setInstalled] = useState(false);
   const [download, setDownload] = useState<DownloadState>({ downloaded: 0 });
   const [error, setError] = useState<string | null>(null);
   const checkInProgressRef = useRef(false);
+  const installingRef = useRef(false);
+  const installedRef = useRef(false);
+  const deferredChannelChange = useRef(false);
 
   useEffect(() => {
-    if (!isDesktop() || typeof window === "undefined") {
-      return;
-    }
+    if (!isDesktop() || typeof window === "undefined") return;
 
     let cancelled = false;
+    let revision = 0;
+    let checkRequired = false;
     const checkForUpdate = async () => {
-      if (checkInProgressRef.current) {
-        return;
-      }
+      if (checkInProgressRef.current || installingRef.current || installedRef.current) return;
 
       checkInProgressRef.current = true;
+      const request = revision;
       try {
-        const nextUpdate = await check();
-        if (!cancelled && nextUpdate) {
-          setUpdate(nextUpdate);
+        const nextUpdate = await checkUpdate();
+        if (cancelled || request !== revision || installingRef.current || installedRef.current) {
+          if (nextUpdate) void nextUpdate.close().catch(() => {});
+          return;
         }
+        setUpdate(nextUpdate);
       } catch {
       } finally {
         checkInProgressRef.current = false;
+        if (!cancelled && checkRequired) {
+          checkRequired = false;
+          void checkForUpdate();
+        }
       }
     };
 
+    const onChannelChanged = () => {
+      if (installedRef.current) return;
+      revision += 1;
+      if (installingRef.current) {
+        deferredChannelChange.current = true;
+        return;
+      }
+      deferredChannelChange.current = false;
+      setUpdate(null);
+      setError(null);
+      if (checkInProgressRef.current) checkRequired = true;
+      else void checkForUpdate();
+    };
+    window.addEventListener(UPDATE_CHANNEL_CHANGED_EVENT, onChannelChanged);
     void checkForUpdate();
     const intervalId = window.setInterval(() => {
       void checkForUpdate();
@@ -64,8 +88,9 @@ export function AutoUpdatePrompt() {
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
+      window.removeEventListener(UPDATE_CHANNEL_CHANGED_EVENT, onChannelChanged);
     };
-  }, []);
+  }, [setUpdate]);
 
   const progress = download.total
     ? Math.min(100, Math.round((download.downloaded / download.total) * 100))
@@ -76,6 +101,7 @@ export function AutoUpdatePrompt() {
       return;
     }
 
+    installingRef.current = true;
     setInstalling(true);
     setError(null);
     setDownload({ downloaded: 0 });
@@ -101,11 +127,17 @@ export function AutoUpdatePrompt() {
           }));
         }
       });
+      installedRef.current = true;
       setInstalled(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      installingRef.current = false;
       setInstalling(false);
+      if (deferredChannelChange.current && !installedRef.current) {
+        deferredChannelChange.current = false;
+        window.dispatchEvent(new Event(UPDATE_CHANNEL_CHANGED_EVENT));
+      }
     }
   };
 

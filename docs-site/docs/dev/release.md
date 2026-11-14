@@ -177,6 +177,28 @@ https://github.com/ai-switch/ai-switch/releases/latest/download/latest.json
 
 7. **转为正式发布** —— 再次调用 `ncipollo/release-action`，`draft: false`、`bodyFile: release-body.md`、`replacesArtifacts: true`、`artifactErrorsFailBuild: true`，上传 `release-assets/**/*.*` 下的全部文件（含 `latest.json`）。
 
+## 先自行验证，再向稳定频道发布
+
+桌面「更新」页提供默认关闭的 **Beta 更新频道**。默认关闭时，客户端只检查 GitHub 的稳定 `latest.json`；开启时独立检查稳定源与下面的 Beta 清单，按 SemVer 取更高的可安装版本。因此测试者装过 RC 后，仍能收到后续正式版，不会停留在旧 RC。
+
+```text
+https://raw.githubusercontent.com/ai-switch/ai-switch/beta/beta.json
+```
+
+建议流程：
+
+1. 在自己的设备上安装包含 Beta 频道功能的版本，然后到「更新」开启 Beta。旧版客户端没有开关，首次接入需要正常升级或手动安装。
+2. 按仓库发布规则同步完整的预发布版本号，例如 `0.19.0-rc.1`，把双语更新说明与版本配置一起提交为 `Release v0.19.0-rc.1`，tag 落在该提交上；完成检查后再推送。
+3. RC 构建与发布完成后，publish 作业运行 `scripts/publish-beta-manifest.mjs`，将同一份 `latest.json` 原样发布到专用 `beta` 分支的 `beta.json`。它保留更新器签名和中英说明，下载仍指向该 RC 的签名资产。
+4. 仅开启 Beta 的客户端会检测此 RC。默认稳定频道不收 RC；Homebrew / WinGet 也跳过预发布。
+5. 验证通过后同步为正式版 `0.19.0`，创建对应的双语 `Release v0.19.0` 提交和 annotated tag，再发布。普通用户此时才从稳定源检测到更新。不能只取消 RC 的 prerelease 标记而不改应用版本。
+
+脚本不会切换代码工作区的 main 分支：它使用临时 Git 仓库，首次创建单文件 beta 分支，后续只快进推送。重跑旧 RC 不会把清单退回旧版本；正式发布不写 beta 分支。需要工作流 `GITHUB_TOKEN` 具备写入该分支的权限；组织策略或分支保护拒绝时会给出 warning，修复后可重跑对应发布作业。清单交接失败不会把已经发布的 Release 标红。
+
+::: warning 这是 opt-in 频道，不是私密发布或账号白名单
+Beta 开关由每个客户端自己选择，任何主动开启的人都能收到预发布版本，公开的 GitHub prerelease 也能手动下载。「只让自己先测」通过只在自己的测试设备上开启实现。raw 地址可能有几分钟的缓存延迟；没有候选且某个源无法访问时，应用会报告检查失败而不是声称已是最新。关闭 Beta 后稳定检查不受影响。
+:::
+
 ## 发布操作示例
 
 ### 正式版

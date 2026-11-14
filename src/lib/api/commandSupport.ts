@@ -12,6 +12,9 @@ export const desktopOnlyCommands = [
   // Reads local settings + pool mappings through the desktop paths; the write it
   // previews (`write_route_proxy_configs`) is desktop-only as well.
   "get_claude_slot_plan",
+  // The updater plugin only exists inside the desktop shell; standalone servers
+  // and browsers have no update mechanism to check.
+  "check_update",
 ] as const;
 
 export function isDesktopOnlyCommand(command: string) {

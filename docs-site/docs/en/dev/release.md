@@ -167,6 +167,28 @@ https://github.com/ai-switch/ai-switch/releases/latest/download/latest.json
 
 7. **Promote to a real release.** `ncipollo/release-action` runs again with `draft: false`, `bodyFile: release-body.md`, `replacesArtifacts: true`, and `artifactErrorsFailBuild: true`, uploading everything under `release-assets/**/*.*` including `latest.json`.
 
+## Test a candidate before announcing it to stable users
+
+The desktop **Updates** page has an opt-in **Beta update channel**, disabled by default. Stable clients check only GitHub's stable `latest.json`. Beta clients independently check that source and the manifest below, then choose the newer installable release using SemVer. Testers therefore still receive the stable release after installing its RC.
+
+```text
+https://raw.githubusercontent.com/ai-switch/ai-switch/beta/beta.json
+```
+
+Recommended sequence:
+
+1. Install a build that includes the Beta switch on your own test machine, then enable it in **Updates**. Older clients need a normal update or a manual installation to gain this capability.
+2. Follow the repository release rules: synchronize a complete prerelease version such as `0.19.0-rc.1`, commit the version settings and bilingual notes as `Release v0.19.0-rc.1`, and put the annotated tag on that commit. Push only after the checks pass.
+3. After the RC assets are published, the publish job runs `scripts/publish-beta-manifest.mjs` to copy that release's `latest.json` unchanged to `beta.json` on the dedicated `beta` branch. It keeps the signatures and bilingual notes; downloads still reference the signed RC assets.
+4. Only clients with Beta enabled discover the RC. Default stable clients do not; Homebrew and WinGet also skip prereleases.
+5. Once testing succeeds, synchronize the application version to `0.19.0`, create the corresponding bilingual `Release v0.19.0` commit and annotated tag, then publish. Stable users discover the update at that point. Merely unchecking the RC's prerelease flag does not turn its embedded version into a stable build.
+
+Publication uses a temporary Git repository rather than switching the source checkout away from main. It creates a single-file beta branch on the first run and uses only fast-forward pushes afterwards. Rerunning an older RC cannot roll the feed backwards; stable releases leave the beta branch alone. The workflow's `GITHUB_TOKEN` must be permitted to write the branch. A policy or branch-protection rejection emits a warning; fix the cause and rerun the publish job. A failed beta handoff does not fail the release that has already been published.
+
+::: warning Opt-in is not private publication or an account allowlist
+Any client that enables Beta can discover candidates, and public GitHub prereleases remain manually downloadable. Enable it only on your own test devices to test first. The raw URL may be cached for several minutes. If there is no candidate and an endpoint cannot be checked, the app reports a failed check rather than claiming to be up to date. Disabling Beta restores stable-only checking.
+:::
+
 ## Cutting a release
 
 ### Stable

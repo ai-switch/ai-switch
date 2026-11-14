@@ -1283,11 +1283,14 @@ export type AppSettings = {
    * provider entry.
    */
   codex_keep_login_state?: boolean;
+  /** Opt into the beta update channel (release candidates included). */
+  beta_updates_enabled?: boolean;
 };
 
 export type AppSettingsView = AppSettings & {
   ccswitch_deeplink_compat_supported?: boolean;
 };
+
 
 /**
  * Whether `codex_keep_login_state` can work on this machine.

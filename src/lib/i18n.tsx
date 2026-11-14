@@ -361,6 +361,9 @@ const en = {
   "updates.noSelection": "No update selected",
   "updates.noSelectionBody": "Run a check to compare this build with the release endpoint.",
   "updates.releaseSource": "Release source",
+  "updates.betaChannel": "Beta update channel",
+  "updates.betaChannelHint":
+    "Check release candidates as well as stable releases. Leave this off unless you are testing a prerelease.",
   "updates.requirements": "Updates require a signed bundle and a valid updater manifest. Development builds may report an endpoint or signature error until release assets exist.",
   "updates.relaunch": "Relaunch now",
   "updates.promptTitle": "A new version is available",
@@ -1338,6 +1341,9 @@ const zh = {
   "updates.noSelection": "尚未选择更新",
   "updates.noSelectionBody": "检查更新以与发布地址中的版本进行比较。",
   "updates.releaseSource": "发布来源",
+  "updates.betaChannel": "Beta 更新频道",
+  "updates.betaChannelHint":
+    "除正式版外，还检查预发布版本。除非你正在测试 RC，否则保持关闭。",
   "updates.requirements": "更新需要已签名的安装包和有效的更新清单。在发布资源就绪前，开发版可能显示地址或签名错误。",
   "updates.relaunch": "立即重启",
   "updates.promptTitle": "发现新版本",
