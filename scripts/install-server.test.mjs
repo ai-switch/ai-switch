@@ -52,8 +52,10 @@ test("only the Linux server archive receives installer and service unit", () => 
   assert.match(workflow, /Copy-Item deploy\/ai-switch-server\.service/);
   assert.match(workflow, /aarch64-unknown-linux-gnu/);
   assert.match(workflow, /gcc-aarch64-linux-gnu/);
-  assert.match(workflow, /GOARCH=arm64/);
   assert.match(workflow, /linux-aarch64/);
+  // No Go toolchain is involved any more: public access drives the system
+  // `tailscale` CLI, so the release ships no Go sidecar to cross-compile.
+  assert.doesNotMatch(workflow, /GOARCH=|^\s*go (build|test)/m);
 
   const packageJson = fs.readFileSync(new URL("../package.json", import.meta.url), "utf8");
   assert.match(packageJson, /release:manifest:test[^\n]*install-server\.test\.mjs/);

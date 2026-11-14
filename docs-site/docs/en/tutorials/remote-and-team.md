@@ -1,6 +1,6 @@
 ---
 title: Phone Access and Team Servers
-description: "Four remote paths for AI Switch with step-by-step setup and security boundaries: desktop Web service, Tailscale private net, standalone server one-line install and Docker deployment, plus env vars and troubleshooting."
+description: "Four remote paths for AI Switch with step-by-step setup and security boundaries: desktop Web service, Tailscale Funnel public access, standalone server one-line install and Docker deployment, plus env vars and troubleshooting."
 ---
 
 # Phone Access and Team Servers
@@ -18,7 +18,7 @@ Desktop and browser use the **same React UI**; only the transport differs — Ta
 | Path | Best for | Exposure | Ops cost |
 | --- | --- | --- | --- |
 | **A Desktop Web service** | Temporarily switching an account from a phone on the same Wi-Fi | LAN, localhost only by default | Lowest, a few clicks on desktop |
-| **B Tailscale private net** | Reaching your own machine from outside without opening a public port | Private net / optional Funnel | Low, needs a Tailscale account |
+| **B Tailscale Funnel** | Reaching your own machine from outside without configuring ports and certificates | Public HTTPS provided by Tailscale | Low, needs Tailscale installed here and an account |
 | **C Standalone server** | Headless server, a team sharing one long-running instance | Decided by an Nginx / Caddy reverse proxy | Medium, needs supervision and HTTPS |
 | **D Docker** | A machine with only Docker; server plus log services in one command | Decided by compose / reverse proxy | Medium, one command but more knobs |
 
@@ -56,23 +56,27 @@ curl -X POST http://127.0.0.1:19527/api/list_accounts \
 With `0.0.0.0`, every Web command — terminal, credential export, proxy keys, MCP and skill installs — is reachable over **plaintext HTTP**, with the token as the only protection. Only do this on a trusted LAN and configure a firewall yourself; across untrusted networks use path B or terminate HTTPS at a reverse proxy. This relaxation applies to the desktop build only — the standalone server still refuses non-loopback plaintext HTTP by default.
 :::
 
-Config lives at `~/.ai-switch/web-service.json` with fields `host`, `port`, `token`, `routeAccessEnabled`, `tailscaleEnabled`, `tailscaleExposureMode`, and `tlsEnabled` / `tlsCertPath` / `tlsKeyPath` (the last three have no UI controls and must be edited in the file; cert and key must be supplied together). Restart the Web service after editing the file.
+Config lives at `~/.ai-switch/web-service.json` with fields `host`, `port`, `token`, `routeAccessEnabled`, and `tlsEnabled` / `tlsCertPath` / `tlsKeyPath` (the last three have no UI controls and must be edited in the file; cert and key must be supplied together). The legacy `tailscaleEnabled` / `tailscaleExposureMode` fields are no longer used. Restart the Web service after editing the file.
 
 **Three desktop-only commands**: open the certificate directory, pull a session into the system terminal app, and export credentials through the system save dialog. Browser calls return "Desktop only".
 
-## Path B — Tailscale private net (recommended for outside access)
+## Path B — Tailscale Funnel public access (recommended for outside access)
 
-If you do not want a public port or certificates to manage, enable **secure networking** (Tailscale) in Settings and set **access mode** to "Private only". Choose "Public access" (Funnel) only when you genuinely need to share a public URL.
+If you would rather not configure certificates and a public port yourself, use Tailscale Funnel: Tailscale handles the TLS for you. First **install Tailscale on this machine** (<https://tailscale.com/download>), then in **Settings → Web Service → Tailscale public access** click **Enable public access**:
 
-When the desktop build keeps its loopback listener and exposes through Tailscale, the sensitive-command gate follows the external link state: loopback HTTP is usable while Tailscale is off, usable again after public-mode HTTPS exposure completes, and temporarily closed (404 "Web command is not available") while no usable external link exists.
+1. The app starts the Web service as needed, runs `tailscale up`, shows the `login.tailscale.com` authorization URL and opens it in your browser; for a headless machine you can instead use an **auth key**, which is used once and never written to disk.
+2. On success you get a public address shaped like `https://<machine>.<tailnet>.ts.net` that any device can open in a browser — **your phone does not need Tailscale**.
+3. It requires the tailnet to have **MagicDNS** and **HTTPS certificates** enabled and to allow **Funnel**; a missing MagicDNS certificate prompts you to enable it, and an unapproved device prompts you to ask your administrator.
+
+The app only removes the Funnel mapping it created itself: if 443 already carries a mapping you configured outside the app, it reports a **conflict** instead of overwriting it.
 
 ::: tip Token checks are never skipped
-Whether over Tailscale private net or Funnel, AI Switch's own token validation still applies. Tailscale solves "how do I connect", not "who is allowed to act".
+Whether over public Tailscale Funnel or plaintext on the LAN, AI Switch's own token validation still applies. Tailscale solves "how do I connect", not "who is allowed to act".
 :::
 
-On a standalone server this path needs the Tailscale sidecar: place `ai-switch-tsnet` next to the binary, or point `AI_SWITCH_TSNET_PATH` at it.
+On a standalone server this path also means installing the `tailscale` CLI on that machine first (the server no longer carries any sidecar).
 
-> ✅ **Checkpoint**: on another device in the same tailnet, open the Tailscale hostname/IP, enter the token and see the same account list as on the host.
+> ✅ **Checkpoint**: open the Funnel address from another device (a phone on cellular data works too), enter the token and see the same account list as on the host.
 
 ## Path C — Standalone server (team self-hosting)
 
@@ -102,8 +106,9 @@ All runtime parameters come from environment variables — there are no CLI flag
 | `AI_SWITCH_TOKEN` | none | **Required, at least 16 chars**; missing or short values refuse startup |
 | `AI_SWITCH_STATIC_DIR` | none | Frontend `dist` directory, must contain `index.html` |
 | `AI_SWITCH_TLS_CERT_PATH` / `AI_SWITCH_TLS_KEY_PATH` | none | Cert chain / private key PEM, must be supplied together |
-| `AI_SWITCH_TSNET_PATH` | none | Tailscale sidecar path |
 | `AI_SWITCH_ALLOW_INSECURE_HTTP` | none | Set to `1` explicitly when a trusted HTTPS reverse proxy is in front |
+
+The server itself has no Tailscale variables anymore; for remote access, install the `tailscale` CLI on the machine yourself (see path B).
 
 ```bash
 export AI_SWITCH_HOST=127.0.0.1
@@ -150,6 +155,7 @@ docker compose -f deploy/docker-compose.yml up -d
 ```
 
 - `AI_SWITCH_SAAS_ENABLE=0`: start only the standalone server; Redis / PostgreSQL are no longer needed.
+- The image installs Tailscale and starts `tailscaled --tun=userspace-networking` in the entrypoint, so public access works inside the container too (requires the tailnet to have MagicDNS and HTTPS certificates enabled); it no longer ships a bundled sidecar.
 - If `AI_SWITCH_TOKEN` is unset, the entrypoint generates one and prints it to the container log: `docker logs <container> | grep AI_SWITCH_TOKEN`. **Set it explicitly if it must survive restarts.**
 - Other variables (`AI_SWITCH_HOST`, TLS, static asset directory, …) behave exactly as on the standalone server.
 
@@ -172,7 +178,7 @@ They are not interchangeable. On a standalone server, disabling "route proxy acc
 - Token rotation is manual: restart the service after changing it, and every browser must enter the new token.
 - On shared or public devices, log out and clear site data (the token lives in `localStorage`).
 - Loopback `127.0.0.1` is the default; verify firewall and network trust before binding `0.0.0.0`.
-- Prefer a Tailscale private net for outside access; if public exposure is unavoidable, terminate HTTPS — never expose raw HTTP directly.
+- For public exposure, Tailscale Funnel is enough — Tailscale provides the TLS. If you do not use it and put the service on the internet directly, terminate HTTPS yourself rather than exposing raw HTTP.
 - The SQLite database inside `~/.ai-switch` holds API keys and account credentials: tighten permissions, encrypt backups, and keep it out of public repos and plaintext sync folders.
 
 ## Troubleshooting
@@ -185,7 +191,10 @@ They are not interchangeable. On a standalone server, disabling "route proxy acc
 | Non-loopback address fails | Standalone server refuses plaintext HTTP by default | Put an HTTPS proxy in front, or set `AI_SWITCH_ALLOW_INSECURE_HTTP=1` inside a trusted boundary |
 | Blank page / static 404 | No `index.html` found | Set `AI_SWITCH_STATIC_DIR`, or put frontend assets in `web/` next to the binary |
 | "Desktop only" for a command | A desktop-only command was called | Run it on desktop, or use the equivalent Web command |
-| Sensitive commands 404 under Tailscale | No usable external link yet | Wait for the link; loopback direct access still works |
+| Public access stuck at sign-in | Tailscale not signed in on this machine | Complete the browser authorization, or connect with an auth key |
+| "Tailscale is not installed" | No `tailscale` CLI on this machine | Install it from <https://tailscale.com/download>, then refresh |
+| Public access reports a conflict | A Funnel mapping on 443 configured outside the app | Resolve that mapping in Tailscale, then retry |
+| Sensitive commands 404 after enabling | Funnel link not ready yet | Wait for the link; loopback direct access still works |
 | Forgot the Docker token | Generated by the entrypoint when unset | `docker logs <container> \| grep AI_SWITCH_TOKEN` |
 | Forgot the systemd token | Stored in the env file | `sudo cat /etc/ai-switch/server.env` |
 | Data directory override did nothing | `AI_SWITCH_DATA_DIR` is not implemented | Control it via the service account's home directory or a container volume |

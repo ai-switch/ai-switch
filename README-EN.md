@@ -15,7 +15,7 @@ Current foundation includes:
 - Account, session, terminal, and route-proxy workflows
 - Settings stored in `~/.ai-switch/settings.json`
 - Web Service settings with token-protected HTTP access
-- Tailscale login entry for private remote access, with MagicDNS HTTPS and mobile pairing
+- Public HTTPS entry published over the host's Tailscale Funnel, with mobile pairing
 
 ## Platform Support
 
@@ -102,7 +102,7 @@ git push origin v0.4.2-rc.1
 
 The tag version without the `v` prefix must exactly match both `package.json` and `src-tauri/tauri.conf.json`, including any prerelease suffix. The tagged commit must belong to the repository's default branch.
 
-The workflow builds signed Tauri desktop bundles, `ai-switch-server`, `ai-switch-tsnet`, and `latest.json` updater metadata for GitHub Releases.
+The workflow builds signed Tauri desktop bundles, `ai-switch-server`, and `latest.json` updater metadata for GitHub Releases.
 
 ### Package Managers
 
@@ -129,7 +129,7 @@ Desktop and browser share one React UI. Desktop uses Tauri IPC. Browser mode use
 2. Choose **Web Service**
 3. Set host, service port, and access token
 4. Click **Save**, then start the **shared service port** when needed
-5. Optionally enable Tailscale, choose private or public access, and click **Login with Tailscale**
+5. Optionally expand **Tailscale public access** under **Web Service** and click **Enable public access** (it walks you through sign-in; an auth key also works)
 
 Like the standalone server, the GUI hosts Web pages, SaaS (when enabled), and compute-pool model APIs on one listener. Settings only manage the **Shared service port** bind address, port, TLS, and listener lifecycle; compute-pool routing is managed from the pool toolbar. When routing is enabled but the shared port is stopped, the pool shows a start button. Desktop dev mode defaults to port `10086` and uses a separate `web-service-dev.json`, so it never changes the installed release configuration; installed and standalone-server configurations default to service port `19527`. A successfully started shared listener takes over any legacy independent pool listeners instead of leaving a second set of ports running.
 
@@ -139,9 +139,9 @@ Configure HTTPS under **Web Service → TLS**, not on the legacy independent poo
 
 The desktop defaults to `127.0.0.1:19527`, and Settings can select `0.0.0.0` for direct LAN access without TLS. In that mode every Web command, including terminal, credential, skill, and MCP operations, is callable over plaintext HTTP; the access token is the only protection. Use it only on a trusted network. The standalone server's non-loopback plaintext restrictions remain unchanged.
 
-For private access, the desktop publishes `https://<magicdns-name>:<port>` through Tailscale `ListenTLS`. Enable MagicDNS and HTTPS certificates in the Tailscale admin console; do not use the `100.x.y.z` IP as the mobile URL because the certificate is issued for the MagicDNS name. The phone must have the official Tailscale App signed in to the same tailnet. The uni-app client does not embed a Tailscale SDK.
+Public access comes from the **Tailscale already installed on this machine**: AI Switch bundles no Tailscale component and instead calls the system `tailscale` command, publishing the shared port over Funnel as `https://<machine>.<tailnet>.ts.net`. Install Tailscale on this computer first ([download](https://tailscale.com/download)), then enable **MagicDNS** and **HTTPS certificates** for the tailnet in the Tailscale admin console and allow the Funnel policy. The address is public HTTPS: anyone with the link reaches the sign-in page, and the access token stays the only gate — do not share it casually. Click **Enable public access** to sign in through the browser, or paste a Tailscale auth key on a machine with no browser (used once, never written to disk). The app only removes the mapping it created itself; a 443 mapping you configured by hand in Tailscale is reported as a conflict and left untouched.
 
-For H5 and mini-program clients, use the public HTTPS URL as the default cross-platform endpoint. H5 needs CORS and a mini-program needs the hostname on its allowed request-domain list. The secure-network panel can show a short-lived, single-use mobile pairing QR: it contains the URL and pairing code, never the long-lived Web Service token. Scanning fills the form only; mobile users can still enter or edit the URL and token manually.
+For H5 and mini-program clients, use the public HTTPS URL as the default cross-platform endpoint. H5 needs CORS and a mini-program needs the hostname on its allowed request-domain list. Once public access is enabled, you can generate a short-lived, single-use mobile pairing QR: it contains the URL and pairing code, never the long-lived Web Service token. Scanning fills the form only; mobile users can still enter or edit the URL and token manually.
 
 ### Standalone server
 
@@ -175,7 +175,7 @@ Optional environment variables:
 - `AI_SWITCH_TOKEN` required for API and WebSocket access, at least 16 characters; the server refuses to start without it
 - `AI_SWITCH_STATIC_DIR` frontend `dist` directory for browser UI (only needed if you moved it)
 
-The release archive `ai-switch-server_<tag>_<platform>.zip` already contains the binary, the Tailscale sidecar and a sibling `web/` directory, so unzip-and-run serves the browser UI with no extra configuration. Installed desktop builds ship the same assets under `web/` next to the executable.
+The release archive `ai-switch-server_<tag>_<platform>.zip` already contains the binary and a sibling `web/` directory, so unzip-and-run serves the browser UI with no extra configuration. Installed desktop builds ship the same assets under `web/` next to the executable.
 
 ### Shared port and one-click Linux installation
 
@@ -224,7 +224,7 @@ docker build --build-arg AI_SWITCH_VERSION=v0.9.0 .
 ### Security notes
 
 - Every `/api/*` and `/ws/events` request requires the access token
-- Tailscale login is manual; the app does not auto-login on startup
+- Tailscale sign-in is manual; the app does not auto-login on startup
 - Web access still requires the AI Switch token even over Tailscale
 - Mobile pairing creates an independent mobile token; pairing codes are single-use and expire
 

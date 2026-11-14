@@ -34,7 +34,7 @@ v1.0.0-alpha.2
 | 作业 | 运行环境 | 职责 |
 | --- | --- | --- |
 | `prepare` | `ubuntu-latest` | 校验 tag 与版本一致性、校验 tag 归属分支、从 tag 提交信息取发布说明并创建草稿 Release |
-| `build` | 矩阵：`windows-latest` / `macos-latest` / `macos-15-intel` / `ubuntu-latest` | 跑全量检查、构建 sidecar、打包 Tauri 安装包与独立服务器、上传产物 |
+| `build` | 矩阵：`windows-latest` / `macos-latest` ×2 / `ubuntu-latest` | 跑全量检查、打包 Tauri 安装包与独立服务器、上传产物 |
 | `publish` | `ubuntu-latest` | 汇总产物、生成并校验 `latest.json`、把草稿 Release 转为正式发布 |
 
 依赖关系是 `prepare` → `build`（矩阵并行）→ `publish`。`build` 设置了 `fail-fast: false`，某个目标失败时其余目标仍会跑完，方便一次看清所有问题。
@@ -95,28 +95,27 @@ prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-
 | --- | --- | --- |
 | Windows | `windows-latest` | `nsis` |
 | macOS (Apple Silicon) | `macos-latest` | `app`、`dmg` |
-| macOS (Intel) | `macos-15-intel` | `app`、`dmg` |
+| macOS (Intel) | `macos-latest` | `app`、`dmg` |
 | Linux | `ubuntu-latest` | `deb`、`appimage` |
 
-macOS 两行是两次独立的原生构建，不是一个 universal 包：arm64 的 dmg 在 Intel Mac 上完全跑不起来，Rosetta 也不管这个方向。`macos-15-intel` 是 GitHub 下线 `macos-13` 之后给 x86_64 留的标签，官方公告说它是 Actions 最后一个 Intel 镜像，可用到 2027 年 8 月；那之后要继续发 Intel 包，就得改成在 arm runner 上交叉编译 `x86_64-apple-darwin`。选原生而不是现在就交叉编译，是为了让 `go test`、`cargo test` 和前端测试跑在真正会发出去的那个架构上。
+macOS 两行是两次独立的构建，不是一个 universal 包：arm64 的 dmg 在 Intel Mac 上完全跑不起来，Rosetta 也不管这个方向。Apple Silicon 行原生构建 `aarch64-apple-darwin`；Intel 行在同一个 `macos-latest`（arm64）镜像上交叉编译 `x86_64-apple-darwin`。之所以不再用专用的 Intel runner，是因为 GitHub 的 `macos-15-intel` 是它最后一个 x86_64 镜像、迟早要下线，而 arm64 镜像又不提供 Rosetta 来跑 x64 测试二进制。因此这一行里的测试跑在 arm64 主机上，交叉构建只证明 x64 目标能编译和链接；真正的原生验证放在后续的 `package-managers.yml`，它在真实的 Intel runner 上安装并运行这个产物。
 
 每个目标的步骤顺序：
 
 1. **校验签名密钥** —— 如果 `TAURI_SIGNING_PRIVATE_KEY` 为空直接抛错，绝不产出未签名的更新器资源。
 2. **Linux 系统依赖** —— 仅 Linux 执行 `apt-get install`（`libwebkit2gtk-4.1-dev`、`libayatana-appindicator3-dev`、`librsvg2-dev`、`patchelf`、`libgtk-3-dev`、`gcc-aarch64-linux-gnu`）。
-3. **工具链** —— pnpm 10.12.4、Node 22（带 pnpm 缓存）、stable Rust、stable Go（按 `sidecar/ai-switch-tsnet/go.sum` 缓存）。
+3. **工具链** —— pnpm 10.12.4、Node 22（带 pnpm 缓存）、stable Rust。
 4. **安装依赖** —— `pnpm install --frozen-lockfile`。
-5. **计算平台变量** —— 从 `rustc -vV` 取 host 三元组，推导出更新器平台标识（`windows-x86_64` / `darwin-aarch64` / `darwin-x86_64` / `linux-x86_64`）、`APP_VERSION`，以及 sidecar 与服务器二进制路径。整个 job 里没有一处写死架构：两个 macOS 目标共用同一份步骤，靠 `RUNNER_ARCH` 分流。
+5. **计算平台变量** —— 从 `rustc -vV` 取 host 三元组，推导出更新器平台标识（`windows-x86_64` / `darwin-aarch64` / `darwin-x86_64` / `linux-x86_64`）、`APP_VERSION`，以及服务器二进制路径。整个 job 里没有一处写死架构：两个 macOS 目标共用同一份步骤，靠 matrix 里的 `target` 分流。
 6. **前端检查** —— `pnpm typecheck`、`pnpm test:run`、`pnpm release:manifest:test`。
 7. **构建前端** —— `pnpm build`。
-8. **sidecar 测试与构建** —— `go test ./...`，然后 `go build -trimpath -ldflags="-s -w"` 输出到 `src-tauri/binaries/ai-switch-tsnet-<三元组><后缀>`，并校验文件确实存在。
-9. **Rust 检查** —— `pnpm rust:check`、`pnpm rust:test`。
-10. **打包 Tauri** —— `pnpm tauri build --ci --bundles <该平台的格式>`。
-11. **构建独立服务器** —— `pnpm server:build:release`。
-12. **归集产物** —— 运行 `scripts/stage-release-assets.mjs`，把 `src-tauri/target/release/bundle` 下的安装包重命名为 `ai-switch-<版本>-<平台>`（`.exe` 统一带 `-setup` 后缀），只有更新器会下载的 `.app.tar.gz` / `.nsis.zip` 命名为 `ai-switch-updater-<版本>-<平台>`，`.sig` 跟随它签名的那个文件。deb 的中间产物（`control.tar.gz`、`data.tar.gz`、`debian-binary`）与 `.app` 目录内部一律跳过。没有安装包或没有 `.sig` 就直接报错。另外把服务器与 sidecar 二进制分别压成 `ai-switch-server_<tag>_<平台>.zip` 与 `ai-switch-tsnet_<tag>_<平台>.zip`。
+8. **Rust 检查** —— `pnpm rust:check`、`pnpm rust:test`。
+9. **打包 Tauri** —— `pnpm tauri build --ci --bundles <该平台的格式>`。
+10. **构建独立服务器** —— `pnpm server:build:release`。
+11. **归集产物** —— 运行 `scripts/stage-release-assets.mjs`，把 `src-tauri/target/release/bundle` 下的安装包重命名为 `ai-switch-<版本>-<平台>`（`.exe` 统一带 `-setup` 后缀），只有更新器会下载的 `.app.tar.gz` / `.nsis.zip` 命名为 `ai-switch-updater-<版本>-<平台>`，`.sig` 跟随它签名的那个文件。deb 的中间产物（`control.tar.gz`、`data.tar.gz`、`debian-binary`）与 `.app` 目录内部一律跳过。没有安装包或没有 `.sig` 就直接报错。另外把服务器二进制压成 `ai-switch-server_<tag>_<平台>.zip`。
 
-    命名不是随手取的：GitHub Release 页面按文件名排序，只展开前几个，其余折进「Show all N assets」。版本号紧跟 `ai-switch-` 能让安装包排在 `ai-switch-server_`、`ai-switch-tsnet_` 之前，用户要的 Windows `.exe` 和 macOS `.dmg` 才不会被折起来。`<平台>` 沿用更新器平台标识而不是更友好的 `windows-x64`，因为包管理器上架靠这个 token 挑安装包（见下文）。
-13. **上传产物** —— 以更新器平台标识为 artifact 名上传，`if-no-files-found: error`。
+    命名不是随手取的：GitHub Release 页面按文件名排序，只展开前几个，其余折进「Show all N assets」。版本号紧跟 `ai-switch-` 能让安装包排在 `ai-switch-server_` 之前，用户要的 Windows `.exe` 和 macOS `.dmg` 才不会被折起来。`<平台>` 沿用更新器平台标识而不是更友好的 `windows-x64`，因为包管理器上架靠这个 token 挑安装包（见下文）。
+12. **上传产物** —— 以更新器平台标识为 artifact 名上传，`if-no-files-found: error`。
 
 注意 CI 会在每个目标上重跑全部检查。这意味着一次发布相当于跑四遍完整测试套件，任何平台或架构相关的问题都会在这里暴露。
 
@@ -225,9 +224,8 @@ git tag -d v0.6.8
 - **Windows**：`ai-switch-<版本>-windows-x86_64-setup.exe`
 - **macOS**：`ai-switch-<版本>-darwin-aarch64.dmg`（Apple Silicon）与 `ai-switch-<版本>-darwin-x86_64.dmg`（Intel）
 - **Linux**：`ai-switch-<版本>-linux-x86_64.AppImage` 与 `ai-switch-<版本>-linux-x86_64.deb`
-- **Linux ARM64 独立服务器**：`ai-switch-server_<tag>_linux-aarch64.zip` 与对应 sidecar 归档
+- **Linux ARM64 独立服务器**：`ai-switch-server_<tag>_linux-aarch64.zip`
 - **每个目标**：`ai-switch-server_<tag>_<平台>.zip`（独立服务器）
-- **每个目标**：`ai-switch-tsnet_<tag>_<平台>.zip`（Tailscale sidecar）
 - **macOS**：`ai-switch-updater-<版本>-darwin-aarch64.app.tar.gz` 与 `ai-switch-updater-<版本>-darwin-x86_64.app.tar.gz`（只有自动更新会下载）
 - **`latest.json`**：Tauri 更新器清单，桌面端自动更新的数据源
 - **Docker Hub**：`ijry/ai-switch:<版本>`、`ijry/ai-switch:<major>.<minor>`，正式版另有 `latest`（预发布不打 `latest`）

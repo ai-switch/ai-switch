@@ -19,7 +19,7 @@ description: AI Switch 桌面端基于 Tauri 2，通过 IPC 直连 Rust 核心�
 
 每个平台的产物同时包含 Tauri 更新器所需的签名文件（`.sig`）与 `latest.json` 元数据，应用内更新依赖它们校验签名。发布流程的完整细节见 [发布流程](/dev/release)。
 
-除桌面安装包之外，同一次发布还会附带 `ai-switch-server`（独立服务器二进制）和 `ai-switch-tsnet`（Tailscale sidecar）两个压缩包。前者见 [独立服务器](/deploy/standalone-server)，后者见 [远程访问与 HTTPS](/deploy/remote-access)。
+除桌面安装包之外，同一次发布还会附带 `ai-switch-server`（独立服务器二进制）压缩包，见 [独立服务器](/deploy/standalone-server)。远程访问不再有单独的组件，详见 [远程访问与 HTTPS](/deploy/remote-access)。
 
 按平台挑选安装包并完成首次配置，请从 [安装](/guide/installation) 和 [快速开始](/guide/quick-start) 开始。
 
@@ -38,10 +38,9 @@ description: AI Switch 桌面端基于 Tauri 2，通过 IPC 直连 Rust 核心�
 | `~/.ai-switch/settings.json` | 应用级设置（语言、主题等） |
 | `~/.ai-switch/ai-switch.db` | SQLite 主库：账号、算力池、会话、用量、MCP、技能等 |
 | `~/.ai-switch/ai-switch-dev.db` | 开发构建（`pnpm tauri:dev`）使用的独立库，不会污染正式库 |
-| `~/.ai-switch/web-service.json` | Web 服务配置（host、port、访问令牌、Tailscale 开关） |
+| `~/.ai-switch/web-service.json` | Web 服务配置（host、port、访问令牌等） |
 | `~/.ai-switch/route-proxy-https.json` | 本地算力池 HTTPS 的启用与自启状态 |
 | `~/.ai-switch/certs/route-proxy/` | 本地算力池 HTTPS 的自签根证书与服务器证书 |
-| `~/.ai-switch/tailscale/` | Tailscale sidecar 的状态目录 |
 | `~/.ai-switch/backups/` | 备份目录；`backups/config-snapshots` 保存写入原生配置前的快照（Unix 下权限 0700） |
 | `~/.ai-switch/imports/` | 导入操作的中转目录 |
 | `~/.ai-switch/logs/` | 运行日志 |

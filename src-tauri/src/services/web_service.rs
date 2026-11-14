@@ -10,9 +10,9 @@ use crate::services::mobile_pairing::{
 use crate::services::remote_probe::{probe_access_url, should_probe_access_url};
 use crate::services::route_proxy_https_service::RouteProxyHttpsService;
 use crate::services::route_proxy_service::RouteProxyService;
-use crate::services::tailscale_service::{TailscaleLogin, TailscaleService, TailscaleStatus};
 use crate::web::router::build_router_with_sensitive_command_gate;
 use crate::web::static_assets::resolve_static_dir;
+use crate::web::tailscale_funnel::{self, FunnelStatus};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -35,14 +35,6 @@ pub struct WebServiceConfig {
     pub token: Option<String>,
     #[serde(rename = "routeAccessEnabled", alias = "autoStart", default)]
     pub route_access_enabled: bool,
-    pub tailscale_enabled: bool,
-    #[serde(default)]
-    pub tailscale_hostname: Option<String>,
-    #[serde(default)]
-    pub tailscale_auth_key_present: bool,
-    /// private = tailnet only; public = Tailscale Funnel internet access
-    #[serde(default = "default_exposure_mode")]
-    pub tailscale_exposure_mode: String,
     /// One-time upgrade marker: legacy Web-only ports are reset to the shared
     /// service port, while later user changes are preserved.
     #[serde(default)]
@@ -66,28 +58,17 @@ pub struct WebServerStatus {
 
 #[derive(Clone, Default)]
 pub struct WebServiceRuntimeState {
-    inner: Arc<Mutex<WebServiceRuntimeInner>>,
-    config_reconciliation_lock: Arc<Mutex<()>>,
+    pub(crate) inner: Arc<Mutex<WebServiceRuntimeInner>>,
+    pub(crate) config_reconciliation_lock: Arc<Mutex<()>>,
     mobile_pairing: MobilePairingStore,
 }
 
 #[derive(Default)]
-struct WebServiceRuntimeInner {
-    status: Option<WebServerStatus>,
+pub(crate) struct WebServiceRuntimeInner {
+    pub(crate) status: Option<WebServerStatus>,
     shutdown: Option<oneshot::Sender<()>>,
     join_handle: Option<JoinHandle<()>>,
     sensitive_command_gate: Option<Arc<AtomicBool>>,
-}
-
-fn default_exposure_mode() -> String {
-    "private".to_string()
-}
-
-fn normalize_exposure_mode(value: &str) -> String {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "public" => "public".to_string(),
-        _ => "private".to_string(),
-    }
 }
 
 pub struct WebService;
@@ -119,27 +100,19 @@ impl WebService {
                 recoverable: true,
             });
         }
-        let tailscale =
-            TailscaleService::status(&state.tailscale, &state.paths, &config, Some(&web_status))
-                .await;
-        if tailscale.state != "connected" || !tailscale.serving {
+        let funnel = tailscale_funnel::status_locked(state).await?;
+        if funnel.state != "enabled" || funnel.url.is_none() {
             return Err(AppError::Validation {
                 code: "mobile_pairing.remote_access_not_ready",
-                message: "Secure network remote access is not ready".to_string(),
-                details: tailscale.message.clone(),
+                message: "Public access over Tailscale Funnel is not enabled".to_string(),
+                details: funnel.error.clone(),
                 recoverable: true,
             });
         }
-        let access_url =
-            preferred_access_url(&tailscale.access_urls).ok_or_else(|| AppError::Validation {
-                code: "mobile_pairing.remote_url_missing",
-                message: "No remote access URL is available".to_string(),
-                details: None,
-                recoverable: true,
-            })?;
+        let access_url = funnel.url.expect("enabled funnel carries its public URL");
         // A blocked Funnel ingress still resolves and accepts TCP, so the phone
         // only learns it is unusable after scanning. Probe the same path first.
-        if should_probe_access_url(tailscale.public, force) {
+        if should_probe_access_url(true, force) {
             if let Err(reason) = probe_access_url(&access_url).await {
                 return Err(AppError::Validation {
                     code: "mobile_pairing.remote_url_unreachable",
@@ -149,17 +122,12 @@ impl WebService {
                 });
             }
         }
-        let (public_url, private_url) = if tailscale.public {
-            (Some(access_url), None)
-        } else {
-            (None, Some(access_url))
-        };
         state
             .web_service
             .mobile_pairing
             .create(
-                public_url,
-                private_url,
+                Some(access_url),
+                None,
                 SystemTime::now(),
                 Duration::from_secs(5 * 60),
             )
@@ -281,6 +249,9 @@ impl WebService {
             )
             .await;
             let status = Self::start_server_locked(Arc::clone(&state), config.clone()).await?;
+            // Re-publish the funnel if the persisted preference still asks for
+            // it; the task waits for this lock, so ordering stays serialized.
+            tailscale_funnel::restore(Arc::clone(&state));
             Self::reconcile_sensitive_command_policy_locked(&state, &config).await;
             Ok(status)
         })
@@ -419,9 +390,13 @@ impl WebService {
         Ok(status)
     }
 
-    pub async fn stop(state: &AppState) -> WebServerStatus {
+    pub async fn stop(state: &AppState) -> Result<WebServerStatus, AppError> {
         let _guard = state.web_service.config_reconciliation_lock.lock().await;
         Self::set_sensitive_command_policy(&state.web_service, false).await;
+        // Undo the funnel mapping while the proxy target is still alive; a
+        // failure aborts the stop so the UI can reconcile instead of leaving a
+        // public URL pointed at a dead port.
+        tailscale_funnel::shutdown_locked(state).await?;
         let config = Self::load_config(&state.paths).await.unwrap_or_default();
         RouteProxyService::set_route_access_enabled(
             &state.route_proxy,
@@ -457,32 +432,12 @@ impl WebService {
             }
         }
 
-        let _ = TailscaleService::disconnect(&state.tailscale, &state.paths, &config).await;
-
-        WebServerStatus {
+        Ok(WebServerStatus {
             running: false,
             host: config.host,
             port: None,
             base_url: None,
-        }
-    }
-
-    pub async fn tailscale_status(state: &AppState) -> Result<TailscaleStatus, AppError> {
-        let _guard = state.web_service.config_reconciliation_lock.lock().await;
-        Self::set_sensitive_command_policy(&state.web_service, false).await;
-        let config = Self::load_config(&state.paths).await?;
-        let web_status = Self::status(&state.web_service, &config).await;
-        let tailscale_status =
-            TailscaleService::status(&state.tailscale, &state.paths, &config, Some(&web_status))
-                .await;
-        Self::apply_observed_tailscale_status_locked(
-            &state.web_service,
-            &config,
-            &web_status,
-            &tailscale_status,
-        )
-        .await;
-        Ok(tailscale_status)
+        })
     }
 
     pub async fn set_route_access(
@@ -516,82 +471,43 @@ impl WebService {
         });
     }
 
-    pub async fn start_tailscale_login(state: &AppState) -> Result<TailscaleLogin, AppError> {
-        let _guard = state.web_service.config_reconciliation_lock.lock().await;
-        Self::set_sensitive_command_policy(&state.web_service, false).await;
-        let config = Self::load_config(&state.paths).await?;
-        let web_status = Self::ensure_web_running_locked(state, &config).await?;
-        Ok(TailscaleService::start_login(
-            &state.tailscale,
-            &state.paths,
-            &config,
-            Some(&web_status),
-        )
-        .await)
+    pub async fn get_tailscale_funnel_status(state: &AppState) -> Result<FunnelStatus, AppError> {
+        tailscale_funnel::status_core(state).await
+    }
+
+    pub async fn start_tailscale_login(state: Arc<AppState>) -> Result<FunnelStatus, AppError> {
+        tailscale_funnel::login_core(state).await
     }
 
     pub async fn start_tailscale_with_auth_key(
-        state: &AppState,
+        state: Arc<AppState>,
         auth_key: String,
-    ) -> Result<TailscaleStatus, AppError> {
-        let _guard = state.web_service.config_reconciliation_lock.lock().await;
-        Self::set_sensitive_command_policy(&state.web_service, false).await;
-        let mut config = Self::load_config(&state.paths).await?;
-        let web_status = Self::ensure_web_running_locked(state, &config).await?;
-        let auth_key_was_present = config.tailscale_auth_key_present;
-        let tailscale_status = TailscaleService::start_with_auth_key(
-            &state.tailscale,
-            &state.paths,
-            &mut config,
-            Some(&web_status),
-            auth_key,
-        )
-        .await;
-        if config.tailscale_auth_key_present != auth_key_was_present {
-            config = Self::save_config(&state.paths, &config).await?;
-        }
-        let tailscale_status = tailscale_status.map_err(|message| AppError::Validation {
-            code: "tailscale.auth_key",
-            message,
-            details: None,
-            recoverable: true,
-        })?;
-        Self::apply_observed_tailscale_status_locked(
-            &state.web_service,
-            &config,
-            &web_status,
-            &tailscale_status,
-        )
-        .await;
-        Ok(tailscale_status)
+    ) -> Result<FunnelStatus, AppError> {
+        tailscale_funnel::login_with_auth_key_core(state, auth_key).await
     }
 
-    pub async fn disconnect_tailscale(state: &AppState) -> Result<TailscaleStatus, AppError> {
-        let _guard = state.web_service.config_reconciliation_lock.lock().await;
-        Self::set_sensitive_command_policy(&state.web_service, false).await;
-        let config = Self::load_config(&state.paths).await?;
-        let web_status = Self::status(&state.web_service, &config).await;
-        let tailscale_status =
-            TailscaleService::disconnect(&state.tailscale, &state.paths, &config).await;
-        Self::apply_observed_tailscale_status_locked(
-            &state.web_service,
-            &config,
-            &web_status,
-            &tailscale_status,
-        )
-        .await;
-        Ok(tailscale_status)
+    pub async fn enable_tailscale_funnel(state: Arc<AppState>) -> Result<FunnelStatus, AppError> {
+        tailscale_funnel::enable_core(state).await
     }
 
-    async fn ensure_web_running_locked(
+    pub async fn disable_tailscale_funnel(state: &AppState) -> Result<FunnelStatus, AppError> {
+        tailscale_funnel::disable_core(state).await
+    }
+
+    pub async fn cancel_tailscale_funnel_operation(
         state: &AppState,
-        config: &WebServiceConfig,
-    ) -> Result<WebServerStatus, AppError> {
-        let status = Self::status(&state.web_service, config).await;
-        if status.running {
-            return Ok(status);
-        }
-        Self::start_server_locked(Arc::new(state.clone()), config.clone()).await
+    ) -> Result<FunnelStatus, AppError> {
+        tailscale_funnel::cancel_core(state).await
+    }
+
+    /// Re-apply the sensitive-command gate from a funnel status observation.
+    /// The funnel module calls this whenever a status lands; callers already
+    /// hold the Web service lifecycle lock, so this must not take it.
+    pub(crate) async fn apply_funnel_gate_locked(state: &AppState, funnel: &FunnelStatus) {
+        let config = Self::load_config(&state.paths).await.unwrap_or_default();
+        let status = Self::status(&state.web_service, &config).await;
+        let enabled = sensitive_commands_enabled_for_runtime(&config, &status, Some(funnel));
+        Self::set_sensitive_command_policy(&state.web_service, enabled).await;
     }
 
     async fn reconcile_sensitive_command_policy_locked(
@@ -604,45 +520,13 @@ impl WebService {
             return;
         }
 
-        Self::reconcile_sensitive_command_gate(&state.web_service, config, &status, async {
-            if config.tailscale_enabled {
-                TailscaleService::ensure_started(
-                    &state.tailscale,
-                    &state.paths,
-                    config,
-                    Some(&status),
-                )
-                .await
-            } else {
-                TailscaleService::disconnect(&state.tailscale, &state.paths, config).await
-            }
-        })
-        .await;
-    }
-
-    async fn apply_observed_tailscale_status_locked(
-        runtime: &WebServiceRuntimeState,
-        config: &WebServiceConfig,
-        web_status: &WebServerStatus,
-        tailscale_status: &TailscaleStatus,
-    ) {
-        let enabled =
-            sensitive_commands_enabled_for_runtime(config, web_status, Some(tailscale_status));
-        Self::set_sensitive_command_policy(runtime, enabled).await;
-    }
-
-    async fn reconcile_sensitive_command_gate<F>(
-        runtime: &WebServiceRuntimeState,
-        config: &WebServiceConfig,
-        status: &WebServerStatus,
-        tailscale_status: F,
-    ) where
-        F: std::future::Future<Output = TailscaleStatus>,
-    {
-        Self::set_sensitive_command_policy(runtime, false).await;
-        let tailscale_status = tailscale_status.await;
-        Self::apply_observed_tailscale_status_locked(runtime, config, status, &tailscale_status)
-            .await;
+        // Funnel operations re-apply the gate whenever a status observation
+        // lands. Until one does, only a funnel the user never asked for leaves
+        // the plain-HTTP gate open.
+        if !tailscale_funnel::desired_enabled(state) {
+            let enabled = sensitive_commands_enabled_for_runtime(config, &status, None);
+            Self::set_sensitive_command_policy(&state.web_service, enabled).await;
+        }
     }
 
     async fn set_sensitive_command_policy(runtime: &WebServiceRuntimeState, enabled: bool) {
@@ -662,12 +546,6 @@ impl WebService {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
             .or(defaults.token);
-        let hostname = config
-            .tailscale_hostname
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
         let tls_cert_path = normalize_optional_path(config.tls_cert_path);
         let tls_key_path = normalize_optional_path(config.tls_key_path);
 
@@ -685,10 +563,6 @@ impl WebService {
             token,
             route_access_enabled: config.route_access_enabled,
             shared_port_migrated: true,
-            tailscale_enabled: config.tailscale_enabled,
-            tailscale_hostname: hostname,
-            tailscale_auth_key_present: config.tailscale_auth_key_present,
-            tailscale_exposure_mode: normalize_exposure_mode(&config.tailscale_exposure_mode),
             tls_enabled: config.tls_enabled,
             tls_cert_path,
             tls_key_path,
@@ -704,10 +578,6 @@ impl Default for WebServiceConfig {
             token: Some(Uuid::new_v4().to_string()),
             route_access_enabled: false,
             shared_port_migrated: false,
-            tailscale_enabled: false,
-            tailscale_hostname: None,
-            tailscale_auth_key_present: false,
-            tailscale_exposure_mode: default_exposure_mode(),
             tls_enabled: false,
             tls_cert_path: None,
             tls_key_path: None,
@@ -727,18 +597,6 @@ fn normalize_optional_path(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn preferred_access_url(urls: &[String]) -> Option<String> {
-    urls.iter()
-        .map(String::as_str)
-        .find(|url| url.contains(".ts.net"))
-        .or_else(|| {
-            urls.iter()
-                .map(String::as_str)
-                .find(|url| !url.trim().is_empty())
-        })
-        .map(|url| url.trim_end_matches('/').to_string())
 }
 
 fn mobile_token_registry_path(paths: &AppPaths) -> PathBuf {
@@ -778,7 +636,7 @@ fn validate_start_config(
 fn sensitive_commands_enabled_for_runtime(
     config: &WebServiceConfig,
     status: &WebServerStatus,
-    tailscale_status: Option<&TailscaleStatus>,
+    funnel_status: Option<&FunnelStatus>,
 ) -> bool {
     if !status.running {
         return false;
@@ -801,20 +659,15 @@ fn sensitive_commands_enabled_for_runtime(
         return false;
     }
 
-    let Some(tailscale_status) = tailscale_status else {
-        return false;
-    };
-    if config.tailscale_enabled {
-        return tailscale_status.state == "connected"
-            && tailscale_status.serving
-            && tailscale_status.access_urls.iter().any(|url| {
-                Url::parse(url)
-                    .ok()
-                    .is_some_and(|parsed| parsed.scheme().eq_ignore_ascii_case("https"))
-            });
+    match funnel_status {
+        // The funnel was never asked for: plain local HTTP stays fully usable,
+        // matching the old "secure network disabled" behavior.
+        None => true,
+        // A live funnel mapping is HTTPS by definition (TLS ends at Tailscale's
+        // edge), so enabling it opens the gate. While connecting, errored or
+        // conflicted, stay closed — the trusted transport is not there yet.
+        Some(funnel) => funnel.enabled,
     }
-
-    !tailscale_status.serving && matches!(tailscale_status.state.as_str(), "disabled" | "stopped")
 }
 
 async fn resolve_bind_address(host: &str, port: u16) -> Result<SocketAddr, AppError> {
@@ -861,11 +714,9 @@ mod tests {
     use crate::services::deeplink_protocol_service::DeepLinkProtocolRuntime;
     use crate::services::mobile_pairing::MobilePairingStore;
     use crate::services::route_proxy_service::RouteProxyRuntimeState;
-    use crate::services::tailscale_service::{TailscaleRuntimeState, TailscaleStatus};
-    use crate::services::tailscale_sidecar::SidecarControlClient;
-    use crate::services::tailscale_types::{TailscaleLogin, TailscaleStartRequest};
     use crate::terminal_manager::TerminalManager;
     use crate::web::event_bridge::WebEventBroadcaster;
+    use crate::web::tailscale_funnel::FunnelStatus;
     use async_trait::async_trait;
     use rcgen::{generate_simple_self_signed, CertifiedKey};
     use std::sync::atomic::AtomicUsize;
@@ -975,74 +826,6 @@ mod tests {
         );
     }
 
-    struct ControlledSidecarClient {
-        status: TailscaleStatus,
-        stop_result: Result<TailscaleStatus, String>,
-        block_status: bool,
-        block_stop: bool,
-        status_started: Notify,
-        release_status: Notify,
-        stop_started: Notify,
-        release_stop: Notify,
-        start_calls: AtomicUsize,
-    }
-
-    impl ControlledSidecarClient {
-        fn new(
-            status: TailscaleStatus,
-            stop_result: Result<TailscaleStatus, String>,
-            block_status: bool,
-            block_stop: bool,
-        ) -> Self {
-            Self {
-                status,
-                stop_result,
-                block_status,
-                block_stop,
-                status_started: Notify::new(),
-                release_status: Notify::new(),
-                stop_started: Notify::new(),
-                release_stop: Notify::new(),
-                start_calls: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl SidecarControlClient for ControlledSidecarClient {
-        async fn start(&self, _request: TailscaleStartRequest) -> Result<TailscaleStatus, String> {
-            self.start_calls.fetch_add(1, Ordering::AcqRel);
-            Ok(self.status.clone())
-        }
-
-        async fn login_oauth(&self) -> Result<TailscaleLogin, String> {
-            Ok(TailscaleLogin {
-                login_url: Some("https://login.tailscale.com/a/test".to_string()),
-                message: "Complete browser sign-in".to_string(),
-            })
-        }
-
-        async fn stop(&self) -> Result<TailscaleStatus, String> {
-            self.stop_started.notify_one();
-            if self.block_stop {
-                self.release_stop.notified().await;
-            }
-            self.stop_result.clone()
-        }
-
-        async fn logout(&self) -> Result<TailscaleStatus, String> {
-            Ok(TailscaleStatus::needs_login("Signed out"))
-        }
-
-        async fn status(&self) -> Result<TailscaleStatus, String> {
-            self.status_started.notify_one();
-            if self.block_status {
-                self.release_status.notified().await;
-            }
-            Ok(self.status.clone())
-        }
-    }
-
     async fn concurrency_test_state() -> (tempfile::TempDir, Arc<AppState>) {
         let temp = tempdir().unwrap();
         let pool = create_memory_pool().await.unwrap();
@@ -1056,28 +839,12 @@ mod tests {
             route_proxy: RouteProxyRuntimeState::default(),
             saas: crate::saas::SaasRuntime::default(),
             web_service: WebServiceRuntimeState::default(),
-            tailscale: TailscaleRuntimeState::default(),
+            tailscale_funnel: Arc::new(crate::web::tailscale_funnel::FunnelManager::default()),
             terminals: TerminalManager::default(),
             terminal_hub: Arc::new(crate::web::terminal_hub::TerminalHub::default()),
             event_broadcaster: Arc::new(WebEventBroadcaster::default()),
         });
         (temp, state)
-    }
-
-    fn public_tailscale_status() -> TailscaleStatus {
-        TailscaleStatus {
-            state: "connected".to_string(),
-            device_name: Some("ai-switch".to_string()),
-            tailnet_ip: Some("100.64.0.12".to_string()),
-            magic_dns_name: Some("ai-switch.tailnet.ts.net".to_string()),
-            login_url: None,
-            access_urls: vec!["https://ai-switch.tailnet.ts.net".to_string()],
-            serving: true,
-            public: true,
-            exposure_mode: Some("public".to_string()),
-            public_port: Some(443),
-            message: None,
-        }
     }
 
     async fn seed_running_web_service(
@@ -1096,13 +863,20 @@ mod tests {
     }
 
     #[test]
-    fn web_service_config_defaults_keep_auth_key_absent() {
+    fn config_defaults_and_legacy_files_drop_the_removed_secure_network_keys() {
         let config = WebServiceConfig::default();
-        assert_eq!(config.tailscale_enabled, false);
-        assert_eq!(config.tailscale_auth_key_present, false);
-        assert!(config.tailscale_hostname.is_none());
+        assert!(!config.route_access_enabled);
+        // An old web-service.json still carries tailscaleEnabled/…; serde must
+        // ignore the removed keys instead of rejecting the whole file.
+        let legacy: WebServiceConfig = serde_json::from_str(
+            r#"{"host":"127.0.0.1","port":3090,"token":"t","routeAccessEnabled":false,
+                "sharedPortMigrated":true,"tailscaleEnabled":true,
+                "tailscaleExposureMode":"public","tailscaleAuthKeyPresent":true}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.host, "127.0.0.1");
+        assert_eq!(legacy.port, 3090);
     }
-
     #[test]
     fn advanced_tls_configuration_is_normalized_and_preserved() {
         let config = super::WebService::normalize_config(WebServiceConfig {
@@ -1160,145 +934,72 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn private_tailnet_http_does_not_register_sensitive_commands() {
-        let private = WebServiceConfig {
-            host: "127.0.0.1".to_string(),
-            tls_enabled: false,
-            tailscale_enabled: true,
-            tailscale_exposure_mode: "private".to_string(),
-            ..WebServiceConfig::default()
-        };
-        let public = WebServiceConfig {
-            tailscale_exposure_mode: "public".to_string(),
-            ..private.clone()
-        };
-        let web_status = WebServerStatus {
+    fn funnel_status(state: &str, enabled: bool, desired: bool) -> FunnelStatus {
+        FunnelStatus {
+            state: state.to_string(),
+            installed: true,
+            enabled,
+            desired_enabled: desired,
+            owned: enabled,
+            url: enabled.then(|| "https://machine.example.ts.net".to_string()),
+            auth_url: None,
+            error: None,
+            prerequisite: None,
+        }
+    }
+
+    fn loopback_http_status() -> WebServerStatus {
+        WebServerStatus {
             running: true,
             host: "127.0.0.1".to_string(),
             port: Some(3090),
             base_url: Some("http://127.0.0.1:3090".to_string()),
-        };
-        let private_http_status = TailscaleStatus {
-            state: "connected".to_string(),
-            serving: true,
-            public: false,
-            exposure_mode: Some("private".to_string()),
-            access_urls: vec!["http://ai-switch.tailnet.ts.net:3090".to_string()],
-            ..TailscaleStatus::disabled()
-        };
-        let public_status = TailscaleStatus {
-            access_urls: vec!["https://ai-switch.tailnet.ts.net".to_string()],
-            public: true,
-            exposure_mode: Some("public".to_string()),
-            ..private_http_status.clone()
-        };
-
-        validate_start_config(&private).unwrap();
-        assert!(!sensitive_commands_enabled_for_runtime(
-            &private,
-            &web_status,
-            Some(&private_http_status),
-        ));
-        assert!(sensitive_commands_enabled_for_runtime(
-            &public,
-            &web_status,
-            Some(&public_status),
-        ));
+        }
     }
 
     #[test]
-    fn private_tailnet_https_registers_sensitive_commands() {
+    fn funnel_enabled_opens_the_local_http_gate_and_pending_states_keep_it_closed() {
         let config = WebServiceConfig {
             host: "127.0.0.1".to_string(),
             tls_enabled: false,
-            tailscale_enabled: true,
-            tailscale_exposure_mode: "private".to_string(),
             ..WebServiceConfig::default()
         };
-        let web_status = WebServerStatus {
-            running: true,
-            host: "127.0.0.1".to_string(),
-            port: Some(3090),
-            base_url: Some("http://127.0.0.1:3090".to_string()),
-        };
-        let status = TailscaleStatus {
-            state: "connected".to_string(),
-            serving: true,
-            public: false,
-            exposure_mode: Some("private".to_string()),
-            access_urls: vec!["https://ai-switch.tailnet.ts.net:3090".to_string()],
-            ..TailscaleStatus::disabled()
-        };
-
-        assert!(sensitive_commands_enabled_for_runtime(
-            &config,
-            &web_status,
-            Some(&status),
-        ));
-    }
-
-    #[test]
-    fn public_http_gate_stays_closed_until_rebind_is_confirmed() {
-        let config = WebServiceConfig {
-            host: "127.0.0.1".to_string(),
-            tls_enabled: false,
-            tailscale_enabled: true,
-            tailscale_exposure_mode: "public".to_string(),
-            ..WebServiceConfig::default()
-        };
-        let web_status = WebServerStatus {
-            running: true,
-            host: "127.0.0.1".to_string(),
-            port: Some(3090),
-            base_url: Some("http://127.0.0.1:3090".to_string()),
-        };
-        let failed = TailscaleStatus::error("rebind failed");
-        let ready = TailscaleStatus {
-            state: "connected".to_string(),
-            serving: true,
-            public: true,
-            exposure_mode: Some("public".to_string()),
-            access_urls: vec!["https://ai-switch.tailnet.ts.net".to_string()],
-            ..TailscaleStatus::disabled()
-        };
+        let web_status = loopback_http_status();
 
         assert!(!sensitive_commands_enabled_for_runtime(
             &config,
             &web_status,
-            Some(&failed),
+            Some(&funnel_status("starting", false, true)),
+        ));
+        assert!(!sensitive_commands_enabled_for_runtime(
+            &config,
+            &web_status,
+            Some(&funnel_status("error", false, true)),
+        ));
+        assert!(!sensitive_commands_enabled_for_runtime(
+            &config,
+            &web_status,
+            Some(&funnel_status("conflict", false, false)),
         ));
         assert!(sensitive_commands_enabled_for_runtime(
             &config,
             &web_status,
-            Some(&ready),
+            Some(&funnel_status("enabled", true, true)),
         ));
     }
 
     #[test]
-    fn local_http_gate_reopens_only_after_old_sidecar_stops() {
+    fn local_http_gate_stays_open_while_funnel_is_not_requested() {
         let config = WebServiceConfig {
             host: "127.0.0.1".to_string(),
             tls_enabled: false,
-            tailscale_enabled: false,
             ..WebServiceConfig::default()
         };
-        let web_status = WebServerStatus {
-            running: true,
-            host: "127.0.0.1".to_string(),
-            port: Some(3090),
-            base_url: Some("http://127.0.0.1:3090".to_string()),
-        };
 
-        assert!(!sensitive_commands_enabled_for_runtime(
-            &config,
-            &web_status,
-            Some(&TailscaleStatus::error("stop failed")),
-        ));
         assert!(sensitive_commands_enabled_for_runtime(
             &config,
-            &web_status,
-            Some(&TailscaleStatus::disabled()),
+            &loopback_http_status(),
+            None,
         ));
     }
 
@@ -1319,288 +1020,6 @@ mod tests {
         drop(first_guard);
         second.await.unwrap();
         assert!(acquired.load(Ordering::Acquire));
-    }
-
-    #[tokio::test]
-    async fn stop_and_start_are_serialized_until_old_sidecar_is_disconnected() {
-        let (_temp, state) = concurrency_test_state().await;
-        let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = reservation.local_addr().unwrap().port();
-        drop(reservation);
-        let config = WebServiceConfig {
-            host: "127.0.0.1".to_string(),
-            port,
-            tailscale_enabled: false,
-            ..WebServiceConfig::default()
-        };
-        WebService::save_config(&state.paths, &config)
-            .await
-            .unwrap();
-        let old_gate = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        seed_running_web_service(&state, &config, Arc::clone(&old_gate)).await;
-        let sidecar = Arc::new(ControlledSidecarClient::new(
-            TailscaleStatus::disabled(),
-            Ok(TailscaleStatus::disabled()),
-            false,
-            true,
-        ));
-        state
-            .tailscale
-            .set_client_for_test(Arc::clone(&sidecar) as Arc<dyn SidecarControlClient>)
-            .await;
-
-        let stop_state = Arc::clone(&state);
-        let stop_task = tokio::spawn(async move { WebService::stop(&stop_state).await });
-        sidecar.stop_started.notified().await;
-        assert!(!old_gate.load(Ordering::Acquire));
-
-        let start_state = Arc::clone(&state);
-        let mut start_task = tokio::spawn(async move { WebService::start(start_state).await });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut start_task)
-                .await
-                .is_err(),
-            "start must wait until the old sidecar is disconnected"
-        );
-
-        sidecar.release_stop.notify_one();
-        stop_task.await.unwrap();
-        let started = start_task.await.unwrap().unwrap();
-        assert!(started.running);
-        let new_gate = state
-            .web_service
-            .inner
-            .lock()
-            .await
-            .sensitive_command_gate
-            .clone()
-            .unwrap();
-        assert!(new_gate.load(Ordering::Acquire));
-        WebService::stop(&state).await;
-    }
-
-    #[tokio::test]
-    async fn stale_status_observation_cannot_reopen_after_disconnect_failure() {
-        let (_temp, state) = concurrency_test_state().await;
-        let config = WebServiceConfig {
-            tailscale_enabled: true,
-            tailscale_exposure_mode: "public".to_string(),
-            ..WebServiceConfig::default()
-        };
-        WebService::save_config(&state.paths, &config)
-            .await
-            .unwrap();
-        let gate = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        seed_running_web_service(&state, &config, Arc::clone(&gate)).await;
-        let sidecar = Arc::new(ControlledSidecarClient::new(
-            public_tailscale_status(),
-            Err("stop failed".to_string()),
-            true,
-            true,
-        ));
-        state
-            .tailscale
-            .set_client_for_test(Arc::clone(&sidecar) as Arc<dyn SidecarControlClient>)
-            .await;
-
-        let status_state = Arc::clone(&state);
-        let status_task =
-            tokio::spawn(async move { WebService::tailscale_status(&status_state).await });
-        sidecar.status_started.notified().await;
-        assert!(!gate.load(Ordering::Acquire));
-
-        let disconnect_state = Arc::clone(&state);
-        let disconnect_task =
-            tokio::spawn(async move { WebService::disconnect_tailscale(&disconnect_state).await });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), sidecar.stop_started.notified())
-                .await
-                .is_err(),
-            "disconnect must wait for the in-flight status observation"
-        );
-
-        sidecar.release_status.notify_one();
-        sidecar.stop_started.notified().await;
-        assert!(!gate.load(Ordering::Acquire));
-        sidecar.release_stop.notify_one();
-        let disconnected = disconnect_task.await.unwrap().unwrap();
-        assert_eq!(disconnected.state, "error");
-        let observed = status_task.await.unwrap().unwrap();
-        assert!(observed.public);
-        assert!(!gate.load(Ordering::Acquire));
-    }
-
-    #[tokio::test]
-    async fn stale_auth_key_config_cannot_overwrite_a_newer_disabled_save() {
-        let (_temp, state) = concurrency_test_state().await;
-        let initial = WebServiceConfig {
-            tailscale_enabled: true,
-            tailscale_exposure_mode: "public".to_string(),
-            ..WebServiceConfig::default()
-        };
-        WebService::save_config(&state.paths, &initial)
-            .await
-            .unwrap();
-        let gate = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        seed_running_web_service(&state, &initial, gate).await;
-        let sidecar = Arc::new(ControlledSidecarClient::new(
-            public_tailscale_status(),
-            Ok(TailscaleStatus::disabled()),
-            false,
-            true,
-        ));
-        state
-            .tailscale
-            .set_client_for_test(Arc::clone(&sidecar) as Arc<dyn SidecarControlClient>)
-            .await;
-        let disabled = WebServiceConfig {
-            tailscale_enabled: false,
-            tailscale_exposure_mode: "private".to_string(),
-            ..initial.clone()
-        };
-
-        let save_state = Arc::clone(&state);
-        let save_task = tokio::spawn(async move {
-            WebService::save_config_and_reconcile(&save_state, &disabled).await
-        });
-        sidecar.stop_started.notified().await;
-
-        let auth_state = Arc::clone(&state);
-        let mut auth_task = tokio::spawn(async move {
-            WebService::start_tailscale_with_auth_key(&auth_state, "tskey-auth-stale".to_string())
-                .await
-        });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut auth_task)
-                .await
-                .is_err(),
-            "auth-key start must wait for the pending config save"
-        );
-
-        sidecar.release_stop.notify_one();
-        save_task.await.unwrap().unwrap();
-        let auth_status = auth_task.await.unwrap().unwrap();
-        assert_eq!(auth_status.state, "disabled");
-        assert_eq!(sidecar.start_calls.load(Ordering::Acquire), 0);
-
-        let saved = WebService::load_config(&state.paths).await.unwrap();
-        assert!(!saved.tailscale_enabled);
-        assert_eq!(saved.tailscale_exposure_mode, "private");
-        assert!(!state.paths.tailscale_dir.join("auth-key").exists());
-    }
-
-    #[tokio::test]
-    async fn sensitive_gate_closes_while_rebind_is_pending_and_after_failure() {
-        let runtime = WebServiceRuntimeState::default();
-        let gate = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        runtime.inner.lock().await.sensitive_command_gate = Some(Arc::clone(&gate));
-        let config = WebServiceConfig {
-            tailscale_enabled: true,
-            tailscale_exposure_mode: "public".to_string(),
-            ..WebServiceConfig::default()
-        };
-        let status = WebServerStatus {
-            running: true,
-            host: "127.0.0.1".to_string(),
-            port: Some(3090),
-            base_url: Some("http://127.0.0.1:3090".to_string()),
-        };
-        let rebind_started = Arc::new(tokio::sync::Notify::new());
-        let release_rebind = Arc::new(tokio::sync::Notify::new());
-        let task_runtime = runtime.clone();
-        let task_started = Arc::clone(&rebind_started);
-        let task_release = Arc::clone(&release_rebind);
-        let task = tokio::spawn(async move {
-            WebService::reconcile_sensitive_command_gate(
-                &task_runtime,
-                &config,
-                &status,
-                async move {
-                    task_started.notify_one();
-                    task_release.notified().await;
-                    TailscaleStatus::error("rebind failed")
-                },
-            )
-            .await;
-        });
-
-        rebind_started.notified().await;
-        assert!(!gate.load(Ordering::Acquire));
-        release_rebind.notify_one();
-        task.await.unwrap();
-        assert!(!gate.load(Ordering::Acquire));
-    }
-
-    #[tokio::test]
-    async fn coordinated_tailscale_status_refreshes_the_running_gate() {
-        let temp = tempdir().unwrap();
-        let pool = create_memory_pool().await.unwrap();
-        run_migrations(&pool).await.unwrap();
-        let state = AppState {
-            paths: crate::paths::AppPaths::from_data_dir(temp.path().join("app-data")),
-            pool,
-            config_writes: ConfigWriteRuntimeState::default(),
-            deeplink_protocols: DeepLinkProtocolRuntime::default(),
-            close_to_tray: crate::app_state::CloseToTrayRuntime::default(),
-            route_proxy: RouteProxyRuntimeState::default(),
-            saas: crate::saas::SaasRuntime::default(),
-            web_service: WebServiceRuntimeState::default(),
-            tailscale: TailscaleRuntimeState::default(),
-            terminals: TerminalManager::default(),
-            terminal_hub: Arc::new(crate::web::terminal_hub::TerminalHub::default()),
-            event_broadcaster: Arc::new(WebEventBroadcaster::default()),
-        };
-        let config = WebServiceConfig {
-            tailscale_enabled: true,
-            tailscale_exposure_mode: "public".to_string(),
-            ..WebServiceConfig::default()
-        };
-        WebService::save_config(&state.paths, &config)
-            .await
-            .unwrap();
-        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        {
-            let mut runtime = state.web_service.inner.lock().await;
-            runtime.status = Some(WebServerStatus {
-                running: true,
-                host: "127.0.0.1".to_string(),
-                port: Some(3090),
-                base_url: Some("http://127.0.0.1:3090".to_string()),
-            });
-            runtime.sensitive_command_gate = Some(Arc::clone(&gate));
-        }
-        let public_client = Arc::new(ControlledSidecarClient::new(
-            public_tailscale_status(),
-            Ok(TailscaleStatus::stopped("stopped")),
-            false,
-            false,
-        ));
-        state
-            .tailscale
-            .set_client_for_test(public_client as Arc<dyn SidecarControlClient>)
-            .await;
-
-        WebService::tailscale_status(&state).await.unwrap();
-        assert!(gate.load(Ordering::Acquire));
-
-        let private_client = Arc::new(ControlledSidecarClient::new(
-            TailscaleStatus {
-                state: "connected".to_string(),
-                serving: true,
-                public: false,
-                exposure_mode: Some("private".to_string()),
-                ..TailscaleStatus::disabled()
-            },
-            Ok(TailscaleStatus::stopped("stopped")),
-            false,
-            false,
-        ));
-        state
-            .tailscale
-            .set_client_for_test(private_client as Arc<dyn SidecarControlClient>)
-            .await;
-        WebService::tailscale_status(&state).await.unwrap();
-        assert!(!gate.load(Ordering::Acquire));
     }
 
     #[tokio::test]
@@ -1634,7 +1053,7 @@ mod tests {
             route_proxy: RouteProxyRuntimeState::default(),
             saas: crate::saas::SaasRuntime::default(),
             web_service: WebServiceRuntimeState::default(),
-            tailscale: TailscaleRuntimeState::default(),
+            tailscale_funnel: Default::default(),
             terminals: TerminalManager::default(),
             terminal_hub: Arc::new(crate::web::terminal_hub::TerminalHub::default()),
             event_broadcaster: Arc::new(WebEventBroadcaster::default()),
@@ -1705,7 +1124,7 @@ mod tests {
             route_proxy: RouteProxyRuntimeState::default(),
             saas: crate::saas::SaasRuntime::default(),
             web_service: WebServiceRuntimeState::default(),
-            tailscale: TailscaleRuntimeState::default(),
+            tailscale_funnel: Default::default(),
             terminals: TerminalManager::default(),
             terminal_hub: Arc::new(crate::web::terminal_hub::TerminalHub::default()),
             event_broadcaster: Arc::new(WebEventBroadcaster::default()),

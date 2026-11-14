@@ -1,6 +1,6 @@
 ---
 title: Architecture
-description: How AI Switch is layered — a React UI shared by desktop and browser, the ai_switch_lib Rust core, dual Tauri IPC and axum HTTP transports, SQLite storage and the data directory layout, and a Go Tailscale sidecar.
+description: How AI Switch is layered — a React UI shared by desktop and browser, the ai_switch_lib Rust core, dual Tauri IPC and axum HTTP transports, SQLite storage and the data directory layout, and Tailscale Funnel driven through the system tailscale CLI.
 ---
 
 # Architecture
@@ -32,7 +32,7 @@ AI Switch is built around one idea: **one body of business logic, two runtime sh
                         │
                         ▼
 ┌──────────────────────────────────────────────────────────┐
-│  Sidecar  ai-switch-tsnet (Go + Tailscale tsnet)          │
+│  Remote access  system `tailscale` CLI (Tailscale Funnel) │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -75,7 +75,7 @@ The `setup()` phase also spawns several long-lived tasks: the tray menu and hide
 Security details worth knowing:
 
 - The `authorize_api_request` middleware in `web/auth.rs` enforces bearer-token auth on `/api/*` and `/ws/events`, and it runs *before* the JSON extractor — an unauthorized request never gets its body parsed.
-- **Sensitive commands** covering credentials, proxy keys, MCP, and skill writes additionally pass through `gate_sensitive_commands`. Direct desktop listeners on `127.0.0.1` or `0.0.0.0` open the gate after startup; loopback listeners exposed through Tailscale follow the sidecar state. A closed gate returns 404 rather than 403, so the response does not confirm the command exists.
+- **Sensitive commands** covering credentials, proxy keys, MCP, and skill writes additionally pass through `gate_sensitive_commands`. Direct desktop listeners on `127.0.0.1` or `0.0.0.0` open the gate after startup; loopback listeners exposed through Tailscale Funnel follow the Funnel state. A closed gate returns 404 rather than 403, so the response does not confirm the command exists.
 - Request bodies are capped at 12 MiB (`SENSITIVE_COMMAND_BODY_LIMIT`).
 - Every `/api/*` response carries `Cache-Control: no-store` and `Pragma: no-cache`.
 - CORS allows only `GET`/`POST`/`OPTIONS` and the `Authorization`/`Content-Type` headers; preflight does not bypass auth.
@@ -132,7 +132,7 @@ Top-level modules, per `src-tauri/src/lib.rs`:
 `platform_capability_service`, `config_write_service`, `target_service`, `official_agent_identity_service`, `client_identity`
 
 **Network and remote access**
-`web_service`, `tailscale_service`, `tailscale_sidecar`, `tailscale_types`, `http_client`
+`web_service` (with the Funnel CLI integration in `web/tailscale_funnel`), `remote_probe`, `mobile_pairing`, `http_client`
 
 **Everything else**
 `settings_service`, `response_failure_service` (response-level failure and quota-exhaustion detection)
@@ -241,20 +241,23 @@ In the current version, API keys sit in the local database as plaintext JSON. Tr
 ├── certs/route-proxy/        # route proxy self-signed certificates
 ├── imports/
 ├── logs/
-└── tailscale/                # sidecar state
 ```
 
-## The sidecar: ai-switch-tsnet
+## Remote access: the Tailscale Funnel integration
 
-`sidecar/ai-switch-tsnet/` is a standalone Go program (`go 1.24.0`, depending on `tailscale.com v1.82.5`) shipped with the desktop app as a Tauri `externalBin`. It does three things:
+Remote access no longer has a separate process. The app drives the **system-installed `tailscale` CLI** to publish the local Web service over Tailscale Funnel:
 
-1. Authenticates with Tailscale using OAuth or an auth key
-2. Joins the tailnet as a `tsnet` node and serves on the private network
-3. Reverse-proxies remote requests to the AI Switch web service on local `127.0.0.1`
+`src-tauri/src/web/tailscale_funnel.rs`, with its `cli` submodule, handles:
 
-On startup the sidecar prints `CONTROL 127.0.0.1:<port>` to stdout. The Rust-side `tailscale_sidecar` uses that to reach its loopback-only control API: `POST /control/start`, `/control/login-oauth`, `/control/stop`, `/control/logout`, and `GET /control/status`.
+1. Locating the system `tailscale` executable (PATH, macOS's app-bundled path, the common distribution paths, and Windows's `Program Files\Tailscale\tailscale.exe`).
+2. Running `tailscale status --json`, `funnel status --json`, `up` / `up --authkey`, and `funnel --bg --https=443`, and parsing their JSON output.
+3. Verifying every mutation by re-reading `funnel status --json` rather than trusting exit codes.
 
-There are two exposure modes. `private` is reachable only inside the tailnet; `public` publishes an internet-facing HTTPS entry point through Tailscale Funnel. **Neither mode skips AI Switch's own token check** — Tailscale solves network reachability, it does not replace application auth. Setup steps are in [remote access and HTTPS](/en/deploy/remote-access).
+Publishing maps `http://127.0.0.1:<port>` to `https://<hostname>.<tailnet>.ts.net` (HTTPS 443). The authorization link shown in the UI is filtered out of `up`'s output and only HTTPS links on `login.tailscale.com` are accepted.
+
+**Where state and preference live**: the enable/disable intent and the mapping it owns (hostname plus port) are stored under the key `web_service_tailscale_funnel` in the app database's metadata table (`app_metadata`); the node's own login state is maintained by the system `tailscaled`, and the app stores no key. On restart, if the preference is still enabled, the app re-publishes once the Web service rebinds. It only removes the mapping it owns; a 443 mapping configured outside the app is reported as a conflict and never overwritten.
+
+**The access-token check is not skipped because of Funnel** — Tailscale solves reachability, not application auth. The bind address must be `127.0.0.1` or `0.0.0.0`. Setup steps are in [remote access and HTTPS](/en/deploy/remote-access).
 
 ## Key dependencies
 

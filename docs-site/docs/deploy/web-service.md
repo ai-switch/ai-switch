@@ -19,7 +19,7 @@ Web 服务模式适合这些场景：在手机上临时切换账号；在同一�
 
 启动成功后，用浏览器访问 `http://127.0.0.1:19527`（或你设置的地址）即可。首次打开需要输入访问令牌，令牌保存在浏览器 `localStorage` 的 `ai-switch.webToken` 键下，之后同一浏览器不必重复输入。
 
-算力池路由不再在设置页单独开关，而是在算力池顶部启停。路由已启用但共享端口未运行时，算力池顶部显示启动按钮。设置页仍可启用**安全网络**，通过 Tailscale 把服务暴露给自己的设备或公网；配套的**访问模式**可选「仅私网」或「公网访问」。这部分详见 [远程访问与 HTTPS](/deploy/remote-access)。
+算力池路由不再在设置页单独开关，而是在算力池顶部启停。路由已启用但共享端口未运行时，算力池顶部显示启动按钮。Web 服务设置里另有一个 **Tailscale 公网访问** 区域，用来把服务通过 Tailscale Funnel 发布成公网 HTTPS 地址（`https://<machine>.<tailnet>.ts.net`）；它要求系统已安装 `tailscale` CLI，缺失时该区域会显示安装链接。它只提供公网 Funnel 访问这一种模式。这部分详见 [远程访问与 HTTPS](/deploy/remote-access)。
 
 ## 浏览器端的三个入口
 
@@ -59,13 +59,15 @@ Web 服务的配置持久化在 `~/.ai-switch/web-service.json`。界面上的�
 | `port` | `19527` | 监听端口 |
 | `token` | 首次生成时自动写入随机 UUID | 访问令牌 |
 | `routeAccessEnabled` | `false` | 是否接受算力池模型路由，由算力池顶部控制。旧配置里的 `autoStart: true` 会迁移为 `true` |
-| `tailscaleEnabled` | `false` | 是否启用 Tailscale 暴露 |
-| `tailscaleExposureMode` | `private` | `private`（仅私网）或 `public`（Funnel 公网） |
 | `tlsEnabled` | `false` | 是否启用 TLS。**界面无此开关，只能改文件** |
 | `tlsCertPath` | 空 | 证书链 PEM 路径。**界面无此输入框** |
 | `tlsKeyPath` | 空 | 私钥 PEM 路径。**界面无此输入框** |
 
 修改文件后需要重启 Web 服务才会生效。`tlsCertPath` 与 `tlsKeyPath` 必须同时提供，只给一个会以 `web.tls_paths_incomplete` 报错拒绝启动。
+
+::: info 旧字段 `tailscaleEnabled` / `tailscaleExposureMode`
+旧版本会在 `web-service.json` 里写这两个字段。当前版本已不再使用：Tailscale 公网访问的开启意图与它拥有的 Funnel 映射改存在应用数据库里，文件中的这两个键会被忽略。远程访问现在只有公网 Funnel 一种模式。
+:::
 
 ## 绑定地址与明文 HTTP
 
@@ -83,11 +85,11 @@ Web 服务的配置持久化在 `~/.ai-switch/web-service.json`。界面上的�
 
 **敏感命令**包括凭据的导出/预览导入/导入、读取代理密钥、从市场安装 MCP、增删改本地 MCP 服务器、以及技能的保存/删除/安装包。桌面版直接监听 `127.0.0.1` 或 `0.0.0.0` 时，只要服务已启动并通过访问令牌鉴权，这些命令就可用；`0.0.0.0` 明文模式不会额外降级权限。
 
-当桌面端保持环回监听并通过 Tailscale 暴露时，运行时闸门仍根据外部链路状态切换：
+当桌面端保持环回监听并通过 Tailscale Funnel 暴露时，运行时闸门仍根据外部链路状态切换：
 
-- Tailscale 未启用时，环回 HTTP 可用；
-- Tailscale 公网模式完成 HTTPS 暴露后可用；
-- Tailscale 尚未建立可用外部链路时暂时关闭，返回 404「Web command is not available」。
+- 未开启公网访问时，环回 HTTP 可用；
+- 公网访问完成 HTTPS 暴露后可用；
+- Funnel 尚未建立可用链路时暂时关闭，返回 404「Web command is not available」。
 
 另外要注意：桌面 Web 服务会拒绝使用空令牌或过短令牌启动，令牌实际上是必填项。
 
@@ -101,7 +103,7 @@ Web 服务的配置持久化在 `~/.ai-switch/web-service.json`。界面上的�
 - **令牌等价于 shell 权限。** Web API 开放了终端会话命令，泄露令牌意味着对方可以在这台机器上执行命令，同时读取所有账号配置。
 - **令牌保存在浏览器 localStorage。** 在共享或公共设备上访问后请退出并清理站点数据。
 - **令牌轮换要手动做。** 改完令牌需要重启服务，并且所有浏览器都要重新输入新令牌。
-- **公网暴露前请三思。** 需要外网访问时优先用 Tailscale 私网，只在确有必要时才启用 Funnel，且两种情况下 AI Switch 自身的令牌校验都不会被跳过。
+- **公网暴露前请三思。** 需要外网访问时用 Tailscale Funnel 公网访问，它会给地址上的任何人看到登录页的机会，但 AI Switch 自身的令牌校验不会被跳过。
 :::
 
 ## 下一步

@@ -5,14 +5,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createMobilePairing,
   disableRouteProxyHttps,
+  disableTailscaleFunnel,
   deleteRouteProxyHttpsCertificates,
-  disconnectTailscale,
   enableRouteProxyHttps,
+  enableTailscaleFunnel,
   getRouteProxyHttpsStatus,
   getRouteProxyStatus,
   getCodexLoginState,
   getSettings,
-  getTailscaleStatus,
+  getTailscaleFunnelStatus,
   getWebServerStatus,
   getWebServiceConfig,
   getUsageHistoryStorage,
@@ -23,6 +24,7 @@ import {
   saveWebServiceConfig,
   startTailscaleLogin,
   startTailscaleWithAuthKey,
+  cancelTailscaleFunnelOperation,
   startWebServer,
   stopWebServer,
   uninstallRouteProxyRootCa,
@@ -43,10 +45,12 @@ vi.mock("../src/lib/api/client", () => ({
   getWebServerStatus: vi.fn(),
   startWebServer: vi.fn(),
   stopWebServer: vi.fn(),
-  getTailscaleStatus: vi.fn(),
+  getTailscaleFunnelStatus: vi.fn(),
   startTailscaleLogin: vi.fn(),
   startTailscaleWithAuthKey: vi.fn(),
-  disconnectTailscale: vi.fn(),
+  enableTailscaleFunnel: vi.fn(),
+  disableTailscaleFunnel: vi.fn(),
+  cancelTailscaleFunnelOperation: vi.fn(),
   getRouteProxyStatus: vi.fn(),
   getRouteProxyHttpsStatus: vi.fn(),
   enableRouteProxyHttps: vi.fn(),
@@ -128,10 +132,12 @@ describe("SettingsScreen", () => {
     vi.mocked(getWebServerStatus).mockReset();
     vi.mocked(startWebServer).mockReset();
     vi.mocked(stopWebServer).mockReset();
-    vi.mocked(getTailscaleStatus).mockReset();
+    vi.mocked(getTailscaleFunnelStatus).mockReset();
     vi.mocked(startTailscaleLogin).mockReset();
     vi.mocked(startTailscaleWithAuthKey).mockReset();
-    vi.mocked(disconnectTailscale).mockReset();
+    vi.mocked(enableTailscaleFunnel).mockReset();
+    vi.mocked(disableTailscaleFunnel).mockReset();
+    vi.mocked(cancelTailscaleFunnelOperation).mockReset();
     vi.mocked(getRouteProxyStatus).mockReset();
     vi.mocked(getRouteProxyHttpsStatus).mockReset();
     vi.mocked(enableRouteProxyHttps).mockReset();
@@ -155,7 +161,6 @@ describe("SettingsScreen", () => {
       port: 3090,
       token: "secret-token-123456",
       routeAccessEnabled: false,
-      tailscaleEnabled: true,
       tlsEnabled: false,
       tlsCertPath: null,
       tlsKeyPath: null,
@@ -179,29 +184,55 @@ describe("SettingsScreen", () => {
       port: null,
       baseUrl: null,
     });
-    vi.mocked(getTailscaleStatus).mockResolvedValue({
-      state: "notConnected",
-      deviceName: null,
-      tailnetIp: null,
-      message: null,
+    vi.mocked(getTailscaleFunnelStatus).mockResolvedValue({
+      state: "ready",
+      installed: true,
+      enabled: false,
+      desiredEnabled: false,
+      owned: false,
+      url: null,
+      authUrl: null,
+      error: null,
     });
     vi.mocked(startTailscaleLogin).mockResolvedValue({
-      loginUrl: null,
-      message: "login started",
+      state: "ready",
+      installed: true,
+      enabled: false,
+      desiredEnabled: false,
+      owned: false,
+      url: null,
+      authUrl: null,
+      error: null,
     });
     vi.mocked(startTailscaleWithAuthKey).mockResolvedValue({
-      state: "connected",
-      deviceName: "ai-switch",
-      tailnetIp: "100.64.0.12",
-      accessUrls: ["http://100.64.0.12:3090"],
-      serving: true,
-      message: null,
+      state: "ready",
+      installed: true,
+      enabled: false,
+      desiredEnabled: false,
+      owned: false,
+      url: null,
+      authUrl: null,
+      error: null,
     });
-    vi.mocked(disconnectTailscale).mockResolvedValue({
-      state: "notConnected",
-      deviceName: null,
-      tailnetIp: null,
-      message: null,
+    vi.mocked(enableTailscaleFunnel).mockResolvedValue({
+      state: "enabled",
+      installed: true,
+      enabled: true,
+      desiredEnabled: true,
+      owned: true,
+      url: "https://ai-switch.tailnet.ts.net",
+      authUrl: null,
+      error: null,
+    });
+    vi.mocked(disableTailscaleFunnel).mockResolvedValue({
+      state: "ready",
+      installed: true,
+      enabled: false,
+      desiredEnabled: false,
+      owned: false,
+      url: null,
+      authUrl: null,
+      error: null,
     });
     vi.mocked(getRouteProxyStatus).mockResolvedValue({
       running: false,
@@ -277,7 +308,7 @@ describe("SettingsScreen", () => {
     expect(screen.queryByRole("button", { name: /导入/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /目标/ })).not.toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "共享服务端口" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /使用 OAuth 登录/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Tailscale 公网访问/ })).toBeInTheDocument();
 
     const themeSelect = screen.getByRole("combobox", { name: "主题外观" });
     expect(themeSelect).toHaveValue(settingsFixture.theme === "dark" || settingsFixture.theme === "light" ? settingsFixture.theme : "system");
@@ -614,7 +645,6 @@ describe("SettingsScreen", () => {
       port: 3090,
       token: "secret-token-123456",
       routeAccessEnabled: false,
-      tailscaleEnabled: false,
       tlsEnabled: true,
       tlsCertPath: " C:/secure/web-cert.pem ",
       tlsKeyPath: " C:/secure/web-key.pem ",
@@ -680,7 +710,7 @@ describe("SettingsScreen", () => {
     expect(screen.getByRole("button", { name: "生成并导入根证书" })).toBeDisabled();
   });
 
-  it("refreshes secure-network status after starting and stopping Web Service", async () => {
+  it("refreshes the funnel status after starting and stopping Web Service", async () => {
     vi.mocked(getSettings).mockResolvedValue(settingsFixture);
 
     render(
@@ -696,11 +726,11 @@ describe("SettingsScreen", () => {
     // load; the 1s default has been observed to expire here at ~1.9s even though
     // the case only needs ~450ms on an idle machine.
     await waitFor(() => expect(startWebServer).toHaveBeenCalledTimes(1), { timeout: 5000 });
-    await waitFor(() => expect(getTailscaleStatus).toHaveBeenCalledTimes(2), { timeout: 5000 });
+    await waitFor(() => expect(getTailscaleFunnelStatus).toHaveBeenCalledTimes(2), { timeout: 5000 });
 
     await userEvent.click(await screen.findByRole("button", { name: "Stop service port" }));
     await waitFor(() => expect(stopWebServer).toHaveBeenCalledTimes(1), { timeout: 5000 });
-    await waitFor(() => expect(getTailscaleStatus).toHaveBeenCalledTimes(3), { timeout: 5000 });
+    await waitFor(() => expect(getTailscaleFunnelStatus).toHaveBeenCalledTimes(3), { timeout: 5000 });
   });
 
   it("explains and blocks startup when the Web token is too short", async () => {
@@ -710,7 +740,6 @@ describe("SettingsScreen", () => {
       port: 10086,
       token: "123456",
       routeAccessEnabled: false,
-      tailscaleEnabled: false,
       tlsEnabled: false,
       tlsCertPath: null,
       tlsKeyPath: null,
@@ -726,7 +755,7 @@ describe("SettingsScreen", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "启动服务端口" }));
 
-    // See the secure-network case: `findBy*` also defaults to 1s, which this
+    // See the funnel-refresh case: `findBy*` also defaults to 1s, which this
     // file can exceed when every test runs at once.
     expect(
       await screen.findByText(
@@ -752,7 +781,6 @@ describe("SettingsScreen", () => {
       port: 3090,
       token: "secret-token-123456",
       routeAccessEnabled: false,
-      tailscaleEnabled: false,
       tlsEnabled: false,
       tlsCertPath: null,
       tlsKeyPath: null,

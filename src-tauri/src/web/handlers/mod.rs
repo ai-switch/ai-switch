@@ -99,10 +99,12 @@ pub fn is_sensitive_command(command: &str) -> bool {
             | "get_web_server_status"
             | "start_web_server"
             | "stop_web_server"
-            | "get_tailscale_status"
+            | "get_tailscale_funnel_status"
             | "start_tailscale_login"
             | "start_tailscale_with_auth_key"
-            | "disconnect_tailscale"
+            | "enable_tailscale_funnel"
+            | "disable_tailscale_funnel"
+            | "cancel_tailscale_funnel_operation"
             // Rewrites the entire database file under an exclusive lock: a paired
             // phone should not be able to stall the desktop app for seconds.
             | "compact_usage_history"
@@ -1237,7 +1239,11 @@ pub async fn dispatch_command(
             }
             #[cfg(feature = "desktop")]
             {
-                to_value(WebService::stop(state.as_ref()).await)
+                to_value(
+                    WebService::stop(state.as_ref())
+                        .await
+                        .map_err(to_error)?,
+                )
             }
         }
         "set_route_access" => {
@@ -1248,8 +1254,8 @@ pub async fn dispatch_command(
             WebService::set_route_access(state.as_ref(), enabled).await?;
             to_value(RouteProxyService::status(&state.route_proxy).await)
         }
-        "get_tailscale_status" => to_value(
-            WebService::tailscale_status(state.as_ref())
+        "get_tailscale_funnel_status" => to_value(
+            WebService::get_tailscale_funnel_status(state.as_ref())
                 .await
                 .map_err(to_error)?,
         ),
@@ -1262,20 +1268,30 @@ pub async fn dispatch_command(
             .map_err(to_error)?,
         ),
         "start_tailscale_login" => to_value(
-            WebService::start_tailscale_login(state.as_ref())
+            WebService::start_tailscale_login(state.clone())
                 .await
                 .map_err(to_error)?,
         ),
         "start_tailscale_with_auth_key" => {
             let auth_key = required_string_arg(&args, "authKey")?;
             to_value(
-                WebService::start_tailscale_with_auth_key(state.as_ref(), auth_key)
+                WebService::start_tailscale_with_auth_key(state.clone(), auth_key)
                     .await
                     .map_err(to_error)?,
             )
         }
-        "disconnect_tailscale" => to_value(
-            WebService::disconnect_tailscale(state.as_ref())
+        "enable_tailscale_funnel" => to_value(
+            WebService::enable_tailscale_funnel(state.clone())
+                .await
+                .map_err(to_error)?,
+        ),
+        "disable_tailscale_funnel" => to_value(
+            WebService::disable_tailscale_funnel(state.as_ref())
+                .await
+                .map_err(to_error)?,
+        ),
+        "cancel_tailscale_funnel_operation" => to_value(
+            WebService::cancel_tailscale_funnel_operation(state.as_ref())
                 .await
                 .map_err(to_error)?,
         ),
@@ -1487,7 +1503,6 @@ mod tests {
     use crate::database::{create_memory_pool, run_migrations};
     use crate::services::config_write_service::ConfigWriteRuntimeState;
     use crate::services::route_proxy_service::RouteProxyRuntimeState;
-    use crate::services::tailscale_service::TailscaleRuntimeState;
     use crate::services::web_service::WebServiceRuntimeState;
     use crate::terminal_manager::TerminalManager;
     use crate::web::event_bridge::WebEventBroadcaster;
@@ -1515,7 +1530,7 @@ mod tests {
                 route_proxy: RouteProxyRuntimeState::default(),
                 saas: crate::saas::SaasRuntime::default(),
                 web_service: WebServiceRuntimeState::default(),
-                tailscale: TailscaleRuntimeState::default(),
+                tailscale_funnel: std::sync::Arc::new(crate::web::tailscale_funnel::FunnelManager::default()),
                 terminals: TerminalManager::default(),
                 terminal_hub: Arc::new(crate::web::terminal_hub::TerminalHub::default()),
                 event_broadcaster: Arc::new(WebEventBroadcaster::default()),

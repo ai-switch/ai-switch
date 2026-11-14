@@ -23,7 +23,7 @@ async fn fixture() -> (TempDir, Arc<AppState>, WebServiceConfig) {
         close_to_tray: Default::default(),
         route_proxy: RouteProxyRuntimeState::default(),
         web_service: Default::default(),
-        tailscale: Default::default(),
+        tailscale_funnel: Default::default(),
         terminals: Default::default(),
         terminal_hub: Default::default(),
         event_broadcaster: Default::default(),

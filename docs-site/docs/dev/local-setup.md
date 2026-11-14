@@ -1,6 +1,6 @@
 ---
 title: 本地开发
-description: 在本地搭建 AI Switch 开发环境：工具链版本要求、依赖安装、前端与 Rust 检查命令、sidecar 测试、桌面应用开发模式与构建，以及这个文档站自身的开发方式。
+description: 在本地搭建 AI Switch 开发环境：工具链版本要求、依赖安装、前端与 Rust 检查命令、桌面应用开发模式与构建，以及这个文档站自身的开发方式。
 ---
 
 # 本地开发
@@ -16,7 +16,6 @@ description: 在本地搭建 AI Switch 开发环境：工具链版本要求、�
 | Node.js | 22 | CI 用 `actions/setup-node` 固定为 22 |
 | pnpm | 10.12.4 | 与根 `package.json` 的 `packageManager` 字段一致，CI 用 `pnpm/action-setup` 固定 |
 | Rust | stable | CI 用 `dtolnay/rust-toolchain@stable` |
-| Go | stable | 仅构建/测试 sidecar 时需要 |
 
 Windows 与 macOS 上 Tauri 2 的系统依赖由各自的开发者工具链提供（Windows 需要 MSVC 生成工具与 WebView2，macOS 需要 Xcode 命令行工具）。
 
@@ -71,24 +70,6 @@ pnpm server:check
 `cargo check` 在 Windows 上偶发在 `tauri-build` 阶段报 `PermissionDenied` 而 panic，这通常是构建产物目录的临时文件锁，直接重跑即可。
 :::
 
-## sidecar 测试
-
-Tailscale sidecar 是独立的 Go 模块，测试需要切换工作目录：
-
-```powershell
-cd sidecar/ai-switch-tsnet
-go test ./...
-```
-
-如果要单独构建 sidecar 产物（`pnpm tauri:build` 打包桌面应用时需要它就位）：
-
-```powershell
-cd sidecar/ai-switch-tsnet
-go build -o ../../src-tauri/binaries/ai-switch-tsnet-x86_64-pc-windows-msvc.exe .
-```
-
-文件名后缀必须是当前 Rust 目标三元组，Tauri 的 `externalBin` 机制按三元组查找二进制。用 `rustc -vV` 可以看到本机的 `host:` 三元组。
-
 ## 发布脚本测试
 
 发布流程会归集产物、生成 Release 正文并校验 `latest.json`，对应脚本自带 Node 原生测试：
@@ -125,8 +106,6 @@ pnpm tauri:build
 - `pnpm build` 是 `tsc && vite build`，产出 `dist/`。
 - `pnpm tauri:build` 打包安装包，产物在 `src-tauri/target/release/bundle/` 下。
 
-打包前请确认 `src-tauri/binaries/` 里有对应三元组的 sidecar 二进制，否则 Tauri 会因找不到 `externalBin` 而失败。
-
 ### 独立服务器
 
 ```powershell
@@ -156,7 +135,6 @@ pnpm test:run
 pnpm release:manifest:test
 pnpm rust:check
 pnpm rust:test
-cd sidecar/ai-switch-tsnet; go test ./...
 ```
 
 这正是 `.github/workflows/release.yml` 在每个平台构建作业里跑的检查集合。任一项失败时不应打 tag，详见[发布流程](/dev/release)。

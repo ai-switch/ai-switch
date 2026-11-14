@@ -73,10 +73,10 @@ describe("standalone server release archive", () => {
     expect(workflow).toContain('throw "Server bundle is missing web/index.html"');
   });
 
-  it("ships the tailscale sidecar under the name the server looks for", () => {
-    // tailscale_sidecar.rs falls back to a sibling `ai-switch-tsnet[.exe]`, not
-    // the target-triple name the build produces.
-    expect(workflow).toContain('"ai-switch-tsnet$ExeSuffix"');
+  it("ships no Go sidecar: public access drives the system tailscale CLI", () => {
+    expect(workflow).not.toContain("ai-switch-tsnet");
+    expect(workflow).not.toContain("SIDECAR_BIN");
+    expect(workflow).not.toContain("sidecar/ai-switch-tsnet");
   });
 
   it("builds and stages a Linux ARM64 standalone server archive", () => {
@@ -84,28 +84,19 @@ describe("standalone server release archive", () => {
     expect(workflow).toContain('-Platform "linux-aarch64"');
   });
 
-  it("builds the Linux ARM64 sidecar from its Go module directory", () => {
+  it("cross-builds the Linux ARM64 server without any Go step", () => {
     const arm64Step = workflow.slice(
       workflow.indexOf("- name: Build Linux ARM64 standalone server"),
       workflow.indexOf("- name: Stage release assets"),
     );
 
-    expect(arm64Step).toContain("pushd sidecar/ai-switch-tsnet");
-    expect(arm64Step).toContain('-o "../../$SIDECAR_ARM64_BIN" .');
-  });
-
-  it("returns to the repository root before building the ARM64 Rust server", () => {
-    const arm64Step = workflow.slice(
-      workflow.indexOf("- name: Build Linux ARM64 standalone server"),
-      workflow.indexOf("- name: Stage release assets"),
-    );
-    const sidecarBuild = arm64Step.indexOf("go build");
-    const restoreDirectory = arm64Step.indexOf("popd");
-    const cargoBuild = arm64Step.indexOf("cargo build");
-
-    expect(restoreDirectory).toBeGreaterThan(sidecarBuild);
-    expect(cargoBuild).toBeGreaterThan(restoreDirectory);
+    expect(arm64Step).toContain("rustup target add aarch64-unknown-linux-gnu");
+    expect(arm64Step).toContain("cargo build");
+    expect(arm64Step).toContain("target aarch64-unknown-linux-gnu");
     expect(arm64Step).toContain("cd src-tauri");
+    // Anchored so `cargo build` does not read as a Go build.
+    expect(arm64Step).not.toMatch(/^\s*go (build|test)\b/m);
+    expect(arm64Step).not.toContain("sidecar/ai-switch-tsnet");
   });
 });
 

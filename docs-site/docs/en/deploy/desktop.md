@@ -19,7 +19,7 @@ The release pipeline builds one set of installers per platform. The formats come
 
 Every platform's artifacts also ship the signature files (`.sig`) and `latest.json` metadata that the Tauri updater needs to verify in-app updates. See [Release Process](/en/dev/release) for the full pipeline.
 
-Alongside the desktop installers, each release attaches two more archives: `ai-switch-server` (the standalone server binary) and `ai-switch-tsnet` (the Tailscale sidecar). See [Standalone Server](/en/deploy/standalone-server) and [Remote Access and HTTPS](/en/deploy/remote-access) respectively.
+Alongside the desktop installers, each release attaches the `ai-switch-server` archive (the standalone server binary) — see [Standalone Server](/en/deploy/standalone-server). Remote access no longer has a separate component; see [Remote Access and HTTPS](/en/deploy/remote-access).
 
 To pick the right installer and get through first-run setup, start with [Installation](/en/guide/installation) and [Quick Start](/en/guide/quick-start).
 
@@ -38,10 +38,9 @@ All state is local. Nothing requires a cloud account:
 | `~/.ai-switch/settings.json` | App-level settings (language, theme, and so on) |
 | `~/.ai-switch/ai-switch.db` | Main SQLite database: accounts, pool, sessions, usage, MCP, skills |
 | `~/.ai-switch/ai-switch-dev.db` | Separate database used by dev builds (`pnpm tauri:dev`) so they never touch the real one |
-| `~/.ai-switch/web-service.json` | Web service config (host, port, access token, Tailscale toggles) |
+| `~/.ai-switch/web-service.json` | Web service config (host, port, access token, and so on) |
 | `~/.ai-switch/route-proxy-https.json` | Enable/auto-start state for local pool HTTPS |
 | `~/.ai-switch/certs/route-proxy/` | Self-signed root and server certificates for local pool HTTPS |
-| `~/.ai-switch/tailscale/` | State directory for the Tailscale sidecar |
 | `~/.ai-switch/backups/` | Backups; `backups/config-snapshots` holds snapshots taken before writing native config files (mode 0700 on Unix) |
 | `~/.ai-switch/imports/` | Staging directory for import operations |
 | `~/.ai-switch/logs/` | Runtime logs |

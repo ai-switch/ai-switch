@@ -1,4 +1,5 @@
 pub mod account_repository;
+pub mod app_metadata_repository;
 pub mod batch_repository;
 pub mod config_snapshot_repository;
 pub mod import_repository;

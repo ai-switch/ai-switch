@@ -15,7 +15,7 @@ AI Switch 是一个用于切换 AI 供应商与官方账号的应用，有桌面
 - 账号、会话、终端与路由代理的完整流程
 - 设置保存在 `~/.ai-switch/settings.json`
 - Web 服务设置，HTTP 访问由访问令牌保护
-- Tailscale 登录入口，用于私网远程访问，支持 MagicDNS HTTPS 与移动端配对
+- 通过本机 Tailscale Funnel 发布公网 HTTPS 入口，支持 README 所述的移动端配对
 
 ## 平台支持
 
@@ -102,7 +102,7 @@ git push origin v0.4.2-rc.1
 
 tag 去掉 `v` 前缀后的版本号，必须与 `package.json` 和 `src-tauri/tauri.conf.json` 完全一致，包括预发布后缀。打 tag 的提交必须属于仓库的默认分支。
 
-工作流会构建带签名的 Tauri 桌面安装包、`ai-switch-server`、`ai-switch-tsnet`，以及供 GitHub Releases 使用的 `latest.json` 更新器清单。
+工作流会构建带签名的 Tauri 桌面安装包、`ai-switch-server`，以及供 GitHub Releases 使用的 `latest.json` 更新器清单。
 
 ### 包管理器
 
@@ -129,7 +129,7 @@ tag 去掉 `v` 前缀后的版本号，必须与 `package.json` 和 `src-tauri/t
 2. 选择 **Web 服务**
 3. 填写主机、服务端口和访问令牌
 4. 点击**保存**，再按需要启动**共享服务端口**
-5. 可选：启用安全网络（Tailscale），选择访问模式（仅私网 / 公网访问），再点**使用 OAuth 登录**
+5. 可选：在 **Web 服务** 里展开 **Tailscale 公网访问**，点**开启公网访问**（会引导登录，也可粘贴 auth key）
 
 GUI 版和独立 server 版一样，Web 页面、SaaS（启用时）与算力池模型 API 共用一个监听端口。设置页只管理**共享服务端口**的监听地址、端口、TLS 和启停；算力池路由在算力池顶部管理。路由已启用但共享端口未运行时，算力池会显示启动按钮。桌面 dev 模式默认使用 `10086`，并使用独立的 `web-service-dev.json`，不会改动正式版配置；安装版和独立 server 的新配置默认使用服务端口 `19527`。旧独立算力池监听会在共享服务成功启动后收拢，不会并行保留第二套端口。
 
@@ -139,9 +139,9 @@ GUI 版和独立 server 版一样，Web 页面、SaaS（启用时）与算力池
 
 桌面版默认绑定 `127.0.0.1:19527`，设置页也可选择 `0.0.0.0` 直接向局域网开放，无需启用 TLS。此时终端、凭据和技能/MCP 等全部 Web 命令都可通过明文 HTTP 调用，访问令牌是唯一保护，请只在可信网络中使用。独立 server 的非环回明文限制不变。
 
-私网访问时，桌面端通过 Tailscale `ListenTLS` 发布 `https://<magicdns-名称>:<端口>`。请先在 Tailscale 管理后台启用 MagicDNS 和 HTTPS 证书；不要把 `100.x.y.z` 这个 IP 填成移动端 URL，因为证书是按 MagicDNS 名称签发的。手机上必须已经用官方 Tailscale App 登录同一个 tailnet。uni-app 客户端本身不内嵌 Tailscale SDK。
+公网访问由**本机已安装的 Tailscale** 提供：AI Switch 不打包 Tailscale 组件，而是调用系统里的 `tailscale` 命令，用 Funnel 把共享端口发布成 `https://<机器名>.<tailnet>.ts.net`。使用前需要在这台机器上安装 Tailscale（[下载](https://tailscale.com/download)），并在 Tailscale 后台为 tailnet 启用 **MagicDNS**、**HTTPS 证书**，同时允许 Funnel 策略。地址是公开的 HTTPS，任何拿到链接的人都能打开登录页，访问令牌仍然是唯一的门槛，因此不要随意分享。登录可以点**开启公网访问**走浏览器授权，也可以在没有浏览器的机器上粘贴 Tailscale auth key（一次性使用，不落盘）。应用只清理自己建立的映射；如果你在 Tailscale 里手工配过 443，界面会提示冲突且不会改动它。
 
-H5 和小程序客户端建议把公网 HTTPS 地址作为默认的跨端入口。H5 需要 CORS，小程序需要把域名加入合法请求域名列表。安全网络面板可以显示一个短期、一次性的移动端配对二维码：它只包含 URL 和配对码，**不包含** Web 服务的长期令牌。扫码只是回填表单，移动端用户仍然可以手动输入或修改 URL 和令牌。
+H5 和小程序客户端建议把公网 HTTPS 地址作为默认的跨端入口。H5 需要 CORS，小程序需要把域名加入合法请求域名列表。公网访问已启用时，可以生成一个短期、一次性的移动端配对二维码：它只包含 URL 和配对码，**不包含** Web 服务的长期令牌。扫码只是回填表单，移动端用户仍然可以手动输入或修改 URL 和令牌。
 
 ### 独立服务器
 
@@ -175,7 +175,7 @@ src-tauri/target/release/ai-switch-server.exe
 - `AI_SWITCH_TOKEN` 访问 API 和 WebSocket 的必填令牌，至少 16 个字符；未设置时服务拒绝启动
 - `AI_SWITCH_STATIC_DIR` 浏览器界面用的前端 `dist` 目录（只有你挪动过它才需要设置）
 
-发布包 `ai-switch-server_<tag>_<platform>.zip` 里已经带了二进制、Tailscale sidecar 和同级的 `web/` 目录，所以解压即用，不需要额外配置就能提供浏览器界面。安装版桌面端也会把同一套资源放在可执行文件旁边的 `web/` 下。
+发布包 `ai-switch-server_<tag>_<platform>.zip` 里已经带了二进制和同级的 `web/` 目录，所以解压即用，不需要额外配置就能提供浏览器界面。安装版桌面端也会把同一套资源放在可执行文件旁边的 `web/` 下。
 
 ### 共享端口与 Linux 一键安装
 

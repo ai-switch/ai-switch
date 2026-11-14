@@ -1,6 +1,6 @@
 ---
 title: 架构总览
-description: AI Switch 的分层架构说明：React 界面层、Rust 核心 crate ai_switch_lib、Tauri IPC 与 axum HTTP 双传输、SQLite 存储层与数据目录布局，以及 Go 编写的 Tailscale sidecar。
+description: AI Switch 的分层架构说明：React 界面层、Rust 核心 crate ai_switch_lib、Tauri IPC 与 axum HTTP 双传输、SQLite 存储层与数据目录布局，以及通过系统 tailscale CLI 暴露的 Tailscale Funnel。
 ---
 
 # 架构总览
@@ -32,7 +32,7 @@ AI Switch 的核心设计目标是**一份业务逻辑，两种运行形态**。
                         │
                         ▼
 ┌──────────────────────────────────────────────────────────┐
-│  sidecar  ai-switch-tsnet（Go + Tailscale tsnet）         │
+│  远程访问  系统 `tailscale` CLI（Tailscale Funnel）        │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -75,7 +75,7 @@ AI Switch 的核心设计目标是**一份业务逻辑，两种运行形态**。
 安全相关的实现细节：
 
 - `web/auth.rs` 的 `authorize_api_request` 中间件对 `/api/*` 与 `/ws/events` 强制校验 Bearer 令牌，且在 JSON 提取器之前生效——非法请求不会被解析正文。
-- **敏感命令**（凭据、代理密钥、MCP 与技能写入等）额外经过 `gate_sensitive_commands` 闸门。桌面直接监听 `127.0.0.1` 或 `0.0.0.0` 时，服务启动后开放；环回监听通过 Tailscale 暴露时按 sidecar 状态动态切换。闸门关闭时返回 404 而不是 403，避免暴露命令存在性。
+- **敏感命令**（凭据、代理密钥、MCP 与技能写入等）额外经过 `gate_sensitive_commands` 闸门。桌面直接监听 `127.0.0.1` 或 `0.0.0.0` 时，服务启动后开放；环回监听通过 Tailscale Funnel 暴露时按 Funnel 状态动态切换。闸门关闭时返回 404 而不是 403，避免暴露命令存在性。
 - 请求体上限 12 MiB（`SENSITIVE_COMMAND_BODY_LIMIT`）。
 - 所有 `/api/*` 响应带 `Cache-Control: no-store` 与 `Pragma: no-cache`。
 - CORS 只允许 `GET`/`POST`/`OPTIONS` 与 `Authorization`/`Content-Type` 头，预检不绕过鉴权。
@@ -132,7 +132,7 @@ AI Switch 的核心设计目标是**一份业务逻辑，两种运行形态**。
 `platform_capability_service`、`config_write_service`、`target_service`、`official_agent_identity_service`、`client_identity`
 
 **网络与远程**
-`web_service`、`tailscale_service`、`tailscale_sidecar`、`tailscale_types`、`http_client`
+`web_service`（含 `web/tailscale_funnel` 的 Funnel CLI 集成）、`remote_probe`、`mobile_pairing`、`http_client`
 
 **其他**
 `settings_service`、`response_failure_service`（响应级失败与额度耗尽判定）
@@ -241,20 +241,23 @@ AI Switch 的核心设计目标是**一份业务逻辑，两种运行形态**。
 ├── certs/route-proxy/        # 路由代理自签证书
 ├── imports/
 ├── logs/
-└── tailscale/                # sidecar 状态
 ```
 
-## sidecar：ai-switch-tsnet
+## 远程访问：Tailscale Funnel 集成
 
-`sidecar/ai-switch-tsnet/` 是一个独立的 Go 程序（`go 1.24.0`，依赖 `tailscale.com v1.82.5`），以 Tauri `externalBin` 的形式随桌面应用分发。它的职责是：
+远程访问不再有独立进程。应用直接驱动**系统安装的 `tailscale` CLI**，把本机 Web 服务发布到 Tailscale Funnel：
 
-1. 用 OAuth 或 auth key 登录 Tailscale
-2. 以 `tsnet` 节点身份加入 tailnet 并对外提供服务
-3. 把远程请求反向代理到本机 `127.0.0.1` 上的 AI Switch Web 服务
+`src-tauri/src/web/tailscale_funnel.rs` 及其 `cli` 子模块负责：
 
-sidecar 启动时在 stdout 打印 `CONTROL 127.0.0.1:<port>`，Rust 侧的 `tailscale_sidecar` 据此连接其仅监听回环的控制 API：`POST /control/start`、`/control/login-oauth`、`/control/stop`、`/control/logout` 与 `GET /control/status`。
+1. 定位系统的 `tailscale` 可执行文件（PATH、macOS 的 app 内置路径、各发行版常见路径，以及 Windows 的 `Program Files\Tailscale\tailscale.exe`）。
+2. 运行 `tailscale status --json`、`funnel status --json`、`up`/`up --authkey`、`funnel --bg --https=443` 等命令，并解析它们的 JSON 输出。
+3. 每次改动的结果都靠重新读取 `funnel status --json` 校验，而不是相信退出码。
 
-暴露模式分两种：`private` 仅 tailnet 内可达，`public` 通过 Tailscale Funnel 提供公网 HTTPS 入口。**无论哪种模式，AI Switch 自身的访问令牌校验都不会被跳过**——Tailscale 只解决网络可达性，不代替应用鉴权。配置步骤见[远程访问与 HTTPS](/deploy/remote-access)。
+发布时把 `http://127.0.0.1:<端口>` 映射到 `https://<主机名>.<tailnet>.ts.net`（HTTPS 443）。界面显示的授权链接从 `up` 的输出里过滤出来，只接受 `login.tailscale.com` 上的 HTTPS 链接。
+
+**状态与偏好存放位置**：开启/关闭的意图和它拥有的映射（主机名 + 端口）以 `web_service_tailscale_funnel` 为键，存在应用数据库的元数据表里（`app_metadata`）；节点本身的登录态由系统 `tailscaled` 维护，应用不保存任何密钥。应用重启时若偏好仍为开启，会在 Web 服务重新绑定后重新发布。只清理它自己拥有的映射，遇到应用之外配置的 443 映射则报告冲突、绝不覆盖。
+
+**访问令牌校验不会因 Funnel 而跳过**——Tailscale 只解决网络可达性，不代替应用鉴权。绑定地址必须是 `127.0.0.1` 或 `0.0.0.0`。配置步骤见[远程访问与 HTTPS](/deploy/remote-access)。
 
 ## 关键依赖
 

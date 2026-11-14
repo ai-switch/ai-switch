@@ -11,7 +11,7 @@ AI Switch 桌面端从 GitHub Releases 获取，三个平台都有预构建的�
 
 打开 [Releases 页面](https://github.com/ai-switch/ai-switch/releases/latest)，正文顶部有一张下载表格，每个平台各占一行（macOS 的 Apple Silicon 和 Intel 分开两行），点对应你系统的那个链接就行。
 
-想直接翻资产列表也可以：桌面端安装包命名为 `ai-switch-<版本>-<平台>`（如 `ai-switch-0.8.0-windows-x86_64-setup.exe`），排在列表最前面。往后是独立服务器、Tailscale sidecar，以及自动更新才会用到的 `ai-switch-updater-*` 和 `latest.json`。
+想直接翻资产列表也可以：桌面端安装包命名为 `ai-switch-<版本>-<平台>`（如 `ai-switch-0.8.0-windows-x86_64-setup.exe`），排在列表最前面。往后是独立服务器、以及自动更新才会用到的 `ai-switch-updater-*` 和 `latest.json`。
 
 带 `-rc`、`-beta`、`-alpha` 的版本是预发布版，正常使用请挑不带这些后缀的。
 
@@ -139,13 +139,16 @@ AI Switch 的全部本地状态都在用户主目录下的 `~/.ai-switch/`（Win
 │   └── config-snapshots/            # 写入 CLI 配置前的快照（Unix 上权限 0700）
 ├── imports/                         # 账号导入的中间文件
 ├── logs/                            # 日志
-├── tailscale/                       # Tailscale sidecar 状态
 └── certs/route-proxy/               # 本地代理的 HTTPS 证书
 ```
 
 几点说明：
 
 **`settings.json`** 存应用级设置。数据库路径等信息会回写到这个文件里，但它是只读展示用的，改它不会让程序换目录。
+
+::: tip 想让别的设备访问？先在这台机器上装 Tailscale
+安装包不再自带任何网络组件。若要用手机或另一台电脑访问，需要你自己在这台机器上安装官方的 [Tailscale](https://tailscale.com/download)；应用会调用系统 `tailscale` CLI，通过 Tailscale Funnel 把 Web 服务发布成公网 HTTPS 地址。手机端不需要安装 Tailscale。详见[远程访问与 HTTPS](/deploy/remote-access)。
+:::
 
 **SQLite 数据库**是主要的数据载体：路由账号、算力池成员与游标、用量事件、会话、MCP 服务器、技能等等都在里面。schema 由 `src-tauri/migrations` 下的 **23 个迁移**管理，启动时自动执行。正式版用 `ai-switch.db`，开发版（`tauri dev` / debug 构建）用 `ai-switch-dev.db`，两者互不干扰，所以本地开发不会碰坏你日常使用的数据。
 
@@ -196,7 +199,7 @@ AI Switch 的全部本地状态都在用户主目录下的 `~/.ai-switch/`（Win
 
 不想用预构建包，或者需要 Linux ARM 之类 Releases 里没有的目标，可以自己构建。
 
-大致需要 Node（配 pnpm）、Rust 工具链，以及构建 Tailscale sidecar 用的 Go：
+大致需要 Node（配 pnpm）和 Rust 工具链：
 
 ```powershell
 corepack enable

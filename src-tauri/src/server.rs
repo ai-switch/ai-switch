@@ -10,7 +10,6 @@ use crate::services::config_write_service::ConfigWriteRuntimeState;
 use crate::services::deeplink_protocol_service::DeepLinkProtocolRuntime;
 use crate::services::route_proxy_service::{RouteProxyRuntimeState, RouteProxyService};
 use crate::services::route_recovery_service::RouteRecoveryService;
-use crate::services::tailscale_service::TailscaleRuntimeState;
 use crate::services::web_service::{WebService, WebServiceRuntimeState};
 use crate::terminal_manager::TerminalManager;
 use crate::web::event_bridge::{EventEmitter, WebEventBroadcaster};
@@ -18,6 +17,7 @@ use crate::web::router::build_shared_server_router;
 use crate::web::static_assets::{
     locate_static_dir, resolve_static_dir, static_dir_candidates_report,
 };
+use crate::web::tailscale_funnel as tailscale_funnel_mod;
 
 pub fn is_loopback_host(host: &str) -> bool {
     let host = host.trim();
@@ -333,7 +333,7 @@ async fn shutdown_runtime(state: &Arc<AppState>) {
     if state.saas.logs.shutdown().await.is_err() {
         eprintln!("SaaS log queue could not drain before exit");
     }
-    crate::services::tailscale_service::TailscaleService::shutdown(&state.tailscale).await;
+    tailscale_funnel_mod::shutdown(state).await;
     state.terminals.kill_all();
 }
 
@@ -401,7 +401,7 @@ pub async fn run_from_env() -> Result<(), String> {
         route_proxy,
         saas: crate::saas::SaasRuntime::default(),
         web_service: WebServiceRuntimeState::default(),
-        tailscale: TailscaleRuntimeState::default(),
+        tailscale_funnel: Arc::new(tailscale_funnel_mod::FunnelManager::default()),
         terminals: TerminalManager::default(),
         terminal_hub: Arc::new(crate::web::terminal_hub::TerminalHub::default()),
         event_broadcaster: Arc::new(WebEventBroadcaster::new()),
@@ -479,6 +479,11 @@ pub async fn run_from_env() -> Result<(), String> {
     } else {
         None
     };
+    // Reconcile a funnel mapping a crashed run left behind, even if the bind
+    // below is about to fail.
+    if let Err(error) = tailscale_funnel_mod::initialize(&state).await {
+        eprintln!("funnel startup reconcile failed: {error}");
+    }
     let listener = bind_server_listener(addr).await?;
     let bound_address = listener
         .local_addr()
@@ -503,6 +508,8 @@ pub async fn run_from_env() -> Result<(), String> {
         bound_web_base_url(scheme, bound_address),
     )
     .await;
+    // Re-publish the funnel if the persisted preference still asks for it.
+    tailscale_funnel_mod::restore(Arc::clone(&shutdown_state));
 
     if let Some(rustls_config) = rustls_config {
         let listener = listener

@@ -58,7 +58,6 @@ unzip -q "${TEMP_DIR}/${ARCHIVE}" -d "$TEMP_DIR/package"
 
 [[ -f "$TEMP_DIR/package/ai-switch-server" ]] || die "The release archive has no ai-switch-server binary."
 [[ -f "$TEMP_DIR/package/web/index.html" ]] || die "The release archive has no web/index.html."
-[[ -f "$TEMP_DIR/package/ai-switch-tsnet" ]] || die "The release archive has no ai-switch-tsnet sidecar."
 
 if ldd "$TEMP_DIR/package/ai-switch-server" 2>/dev/null | grep -q "not found"; then
   say "Installing missing WebKitGTK runtime dependencies"
@@ -95,17 +94,16 @@ fi
 run_root install -d -o ai-switch -g ai-switch -m 0755 "$INSTALL_DIR"
 run_root install -d -o ai-switch -g ai-switch -m 0750 /var/lib/ai-switch
 run_root cp "$TEMP_DIR/package/ai-switch-server" "$INSTALL_DIR/ai-switch-server"
-run_root cp "$TEMP_DIR/package/ai-switch-tsnet" "$INSTALL_DIR/ai-switch-tsnet"
 run_root install -d -o ai-switch -g ai-switch -m 0755 "$INSTALL_DIR/web"
 run_root find "$INSTALL_DIR/web" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 run_root cp -R "$TEMP_DIR/package/web/." "$INSTALL_DIR/web/"
 run_root chown -R ai-switch:ai-switch "$INSTALL_DIR"
-run_root chmod 0755 "$INSTALL_DIR/ai-switch-server" "$INSTALL_DIR/ai-switch-tsnet"
+run_root chmod 0755 "$INSTALL_DIR/ai-switch-server"
 
 ENV_TMP="$TEMP_DIR/server.env"
 if ! run_root test -r "$ENV_FILE"; then
-  printf 'AI_SWITCH_HOST=%s\nAI_SWITCH_PORT=%s\nAI_SWITCH_ALLOW_INSECURE_HTTP=%s\nAI_SWITCH_TOKEN=%s\nAI_SWITCH_STATIC_DIR=%s\nAI_SWITCH_TSNET_PATH=%s\n' \
-    "$HOST" "$PORT" "$ALLOW_INSECURE_HTTP" "$existing_token" "$INSTALL_DIR/web" "$INSTALL_DIR/ai-switch-tsnet" > "$ENV_TMP"
+  printf 'AI_SWITCH_HOST=%s\nAI_SWITCH_PORT=%s\nAI_SWITCH_ALLOW_INSECURE_HTTP=%s\nAI_SWITCH_TOKEN=%s\nAI_SWITCH_STATIC_DIR=%s\n' \
+    "$HOST" "$PORT" "$ALLOW_INSECURE_HTTP" "$existing_token" "$INSTALL_DIR/web" > "$ENV_TMP"
   run_root install -D -o root -g root -m 0600 "$ENV_TMP" "$ENV_FILE"
 else
   say "Keeping existing environment in ${ENV_FILE}"

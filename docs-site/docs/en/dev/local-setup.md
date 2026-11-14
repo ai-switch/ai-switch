@@ -1,6 +1,6 @@
 ---
 title: Local Setup
-description: Set up an AI Switch development environment — toolchain versions, dependency installation, frontend and Rust checks, sidecar tests, running the desktop app, building installers, and working on this documentation site.
+description: Set up an AI Switch development environment — toolchain versions, dependency installation, frontend and Rust checks, running the desktop app, building installers, and working on this documentation site.
 ---
 
 # Local Setup
@@ -16,7 +16,6 @@ Versions follow what CI actually uses in `.github/workflows/release.yml`. Matchi
 | Node.js | 22 | CI pins this via `actions/setup-node` |
 | pnpm | 10.12.4 | Matches the `packageManager` field in the root `package.json`; CI pins it via `pnpm/action-setup` |
 | Rust | stable | CI uses `dtolnay/rust-toolchain@stable` |
-| Go | stable | Only needed to build or test the sidecar |
 
 On Windows and macOS, Tauri 2's system requirements come from the platform toolchains (MSVC build tools and WebView2 on Windows, Xcode Command Line Tools on macOS).
 
@@ -71,24 +70,6 @@ All three are thin wrappers that invoke cargo inside `src-tauri`:
 On Windows, `cargo check` occasionally panics in the `tauri-build` step with `PermissionDenied`. This is a transient lock on files in the build output directory — just run it again.
 :::
 
-## Sidecar tests
-
-The Tailscale sidecar is a separate Go module, so tests need a different working directory:
-
-```powershell
-cd sidecar/ai-switch-tsnet
-go test ./...
-```
-
-To build the sidecar binary on its own (it must be in place before `pnpm tauri:build` can package the desktop app):
-
-```powershell
-cd sidecar/ai-switch-tsnet
-go build -o ../../src-tauri/binaries/ai-switch-tsnet-x86_64-pc-windows-msvc.exe .
-```
-
-The filename suffix must be your current Rust target triple — Tauri's `externalBin` mechanism looks the binary up by triple. `rustc -vV` prints your machine's `host:` triple.
-
 ## Release script tests
 
 The release pipeline stages the assets, builds the release body, and generates and verifies `latest.json`. Those scripts ship with Node's built-in test runner:
@@ -125,8 +106,6 @@ pnpm tauri:build
 - `pnpm build` is `tsc && vite build`, producing `dist/`.
 - `pnpm tauri:build` produces installers under `src-tauri/target/release/bundle/`.
 
-Before packaging, confirm `src-tauri/binaries/` contains a sidecar binary for your target triple — otherwise Tauri fails because it cannot find the `externalBin`.
-
 ### Standalone server
 
 ```powershell
@@ -156,7 +135,6 @@ pnpm test:run
 pnpm release:manifest:test
 pnpm rust:check
 pnpm rust:test
-cd sidecar/ai-switch-tsnet; go test ./...
 ```
 
 This is exactly the check set `.github/workflows/release.yml` runs inside every platform build job. Do not tag a release while any of them fails — see [release process](/en/dev/release).

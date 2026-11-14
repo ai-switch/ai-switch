@@ -59,7 +59,7 @@ describe("Tauri desktop configuration", () => {
       "src/screens/AboutScreen.tsx",
       "src/screens/AccountsScreen.tsx",
       "src/screens/McpScreen.tsx",
-      "src/components/settings/tailscale-settings.tsx",
+      "src/components/settings/tailscale-funnel-settings.tsx",
     ]) {
       const source = readSource(path);
       expect(source).toMatch(/from "\.\.\/(\.\.\/)?lib\/openExternal"/);

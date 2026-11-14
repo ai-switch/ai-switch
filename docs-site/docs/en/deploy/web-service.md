@@ -19,7 +19,7 @@ Web Service mode fits a few situations: switching accounts from your phone; chec
 
 Once it is up, open `http://127.0.0.1:19527` (or whatever address you configured) in a browser. The first visit asks for the access token, which is then stored in `localStorage` under the key `ai-switch.webToken`, so the same browser will not ask again.
 
-Compute-pool routing is no longer a separate Settings toggle; manage it from the pool toolbar. When routing is enabled but the shared port is stopped, the toolbar shows a start button. Settings still provides **Enable secure network** for exposing the service to your own devices — or the public internet — through Tailscale, with an **Access mode** of either private-only or public. See [Remote Access and HTTPS](/en/deploy/remote-access) for the details.
+Compute-pool routing is no longer a separate Settings toggle; manage it from the pool toolbar. When routing is enabled but the shared port is stopped, the toolbar shows a start button. Web Service settings also carry a **Tailscale public access** section that publishes the service as a public HTTPS address over Tailscale Funnel (`https://<machine>.<tailnet>.ts.net`); it requires the system `tailscale` CLI and shows an install link when it is missing. Public Funnel access is the only mode it offers. See [Remote Access and HTTPS](/en/deploy/remote-access) for the details.
 
 ## The three browser-facing endpoints
 
@@ -59,13 +59,15 @@ Web service settings persist to `~/.ai-switch/web-service.json`. Every control i
 | `port` | `19527` | Listening port |
 | `token` | Random UUID written on first config creation | Access token |
 | `routeAccessEnabled` | `false` | Whether compute-pool model routes are accepted, controlled from the pool toolbar. Legacy `autoStart: true` migrates to `true` |
-| `tailscaleEnabled` | `false` | Whether to expose the service through Tailscale |
-| `tailscaleExposureMode` | `private` | `private` (tailnet only) or `public` (Funnel) |
 | `tlsEnabled` | `false` | Enable TLS. **No UI toggle; file only** |
 | `tlsCertPath` | empty | Path to the certificate chain PEM. **No UI field** |
 | `tlsKeyPath` | empty | Path to the private key PEM. **No UI field** |
 
 Restart the web service after editing the file. `tlsCertPath` and `tlsKeyPath` must be supplied together; providing only one fails startup with `web.tls_paths_incomplete`.
+
+::: info Legacy `tailscaleEnabled` / `tailscaleExposureMode` fields
+Older versions wrote these two fields into `web-service.json`. The current version no longer uses them: Tailscale public access's enable intent and the Funnel mapping it owns now live in the app database, and both file keys are ignored. Remote access now has only the public Funnel mode.
+:::
 
 ## Bind address and plaintext HTTP
 
@@ -83,11 +85,11 @@ Two categories do not reach the browser.
 
 **Sensitive commands** include exporting credentials, previewing and performing credential imports, reading the proxy key, installing MCP servers, changing local MCP configuration, and saving/deleting/installing skills. On a direct desktop listener bound to `127.0.0.1` or `0.0.0.0`, they are available once the service is running and access-token authentication succeeds; plaintext `0.0.0.0` does not downgrade their permissions.
 
-When the desktop stays on loopback and Tailscale provides the external path, the runtime gate still follows the sidecar state:
+When the desktop stays on loopback and Tailscale Funnel provides the external path, the runtime gate still follows the external link state:
 
-- loopback HTTP is available while Tailscale is off;
+- loopback HTTP is available while public access is off;
 - public Tailscale access becomes available after its HTTPS endpoint is ready;
-- while the external path is not ready, sensitive commands temporarily return 404 "Web command is not available".
+- while the Funnel link is not ready, sensitive commands temporarily return 404 "Web command is not available".
 
 The desktop Web service refuses to start with an empty or too-short token, so the token is mandatory in practice.
 
@@ -101,7 +103,7 @@ Terminal commands (create session, write input, resize, kill session, list sessi
 - **The token is equivalent to shell access.** The web API exposes terminal session commands, so a leaked token means command execution on that machine, not just config disclosure.
 - **The token is stored in browser localStorage.** After using a shared or public device, sign out and clear site data.
 - **Rotation is manual.** After changing the token, restart the service and re-enter it in every browser.
-- **Think hard before exposing this publicly.** Prefer a Tailscale private network for remote access, and enable Funnel only when you genuinely need it. In both cases AI Switch's own token check still applies.
+- **Think hard before exposing this publicly.** Remote access means Tailscale Funnel public access, which lets anyone on the address see the sign-in page — but AI Switch's own token check still applies.
 :::
 
 ## Next steps

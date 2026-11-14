@@ -19,7 +19,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BUNDLE_DIR="$REPO_ROOT/src-tauri/target/release/bundle/appimage"
+# CI builds per-triple (release.yml exports TAURI_BUNDLE_DIR, e.g.
+# src-tauri/target/x86_64-unknown-linux-gnu/release/bundle); the default is
+# the host layout local dev gets from plain `tauri build`.
+BUNDLE_DIR="${TAURI_BUNDLE_DIR:-$REPO_ROOT/src-tauri/target/release/bundle}/appimage"
 
 # ── 1. Locate the AppDir ─────────────────────────────────────────────────────
 APPDIR=$(find "$BUNDLE_DIR" -maxdepth 1 -type d -name '*.AppDir' | head -1)

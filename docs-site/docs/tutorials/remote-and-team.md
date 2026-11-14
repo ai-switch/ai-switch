@@ -1,6 +1,6 @@
 ---
 title: 手机访问与团队自建
-description: 四条远程使用路径的操作步骤与安全边界，包含桌面 Web 服务、Tailscale 私网、独立服务器一键安装与 Docker 部署，附环境变量、curl 验证与排错表。
+description: 四条远程使用路径的操作步骤与安全边界，包含桌面 Web 服务、Tailscale Funnel 公网访问、独立服务器一键安装与 Docker 部署，附环境变量、curl 验证与排错表。
 ---
 
 # 手机访问与团队自建
@@ -18,7 +18,7 @@ description: 四条远程使用路径的操作步骤与安全边界，包含桌�
 | 路径 | 适合 | 对外暴露 | 运维成本 |
 | --- | --- | --- | --- |
 | **A 桌面 Web 服务** | 临时用手机在同一 Wi-Fi 下切个号 | 局域网，默认仅本机 | 最低，桌面端点几下 |
-| **B Tailscale 私网** | 从外网访问自己的机器，不想开公网端口 | 私有网络 / 可选 Funnel | 低，需要 Tailscale 账号 |
+| **B Tailscale Funnel** | 从外网访问自己的机器，不想自己配端口和证书 | 公网 HTTPS，由 Tailscale 提供 | 低，需要本机装 Tailscale 并有账号 |
 | **C 独立服务器** | 无桌面环境的服务器、团队长期共用 | 由 Nginx / Caddy 反代决定 | 中，需要进程守护与 HTTPS |
 | **D Docker** | 只有 Docker 的机器，想一次拉起 server 与日志服务 | 由 compose / 反代决定 | 中，一条命令但配置多 |
 
@@ -56,23 +56,27 @@ curl -X POST http://127.0.0.1:19527/api/list_accounts \
 选 `0.0.0.0` 后，终端、凭据导出、代理密钥、MCP 与技能安装等全部 Web 命令都可通过**明文 HTTP** 调用，令牌是唯一保护。只在可信局域网里这么做，并自行配防火墙；跨不可信网络请用路径 B 或给反代配 HTTPS。这项放宽只适用于桌面版，独立 server 默认仍拒绝非环回明文 HTTP。
 :::
 
-配置文件在 `~/.ai-switch/web-service.json`，字段包括 `host`、`port`、`token`、`routeAccessEnabled`、`tailscaleEnabled`、`tailscaleExposureMode`、`tlsEnabled` / `tlsCertPath` / `tlsKeyPath`（后三个界面无控件，只能改文件，且证书与私钥必须同时给）。改文件后要重启 Web 服务才生效。
+配置文件在 `~/.ai-switch/web-service.json`，字段包括 `host`、`port`、`token`、`routeAccessEnabled`、`tlsEnabled` / `tlsCertPath` / `tlsKeyPath`（后三个界面无控件，只能改文件，且证书与私钥必须同时给）。旧版本里的 `tailscaleEnabled` / `tailscaleExposureMode` 已不再使用。改文件后要重启 Web 服务才生效。
 
 **桌面独占命令有 3 个**：打开证书目录、把会话拉到系统终端应用、通过系统保存对话框导出凭据。浏览器调用会返回「仅桌面可用」。
 
-## 路径 B：Tailscale 私网（推荐给外网访问）
+## 路径 B：Tailscale Funnel 公网访问（推荐给外网访问）
 
-不想暴露公网端口、也不想自己张罗证书，就在设置页启用 **安全网络**（Tailscale），并把**访问模式**选成「仅私网」。需要公网分享时才有必要选「公网访问」（Funnel）。
+不想自己张罗证书和公网端口，就用 Tailscale Funnel：让官方 Tailscale 在这一步替你做 TLS。做法是先在**这台机器上装好 Tailscale**（<https://tailscale.com/download>），然后在 **设置 → Web 服务 → Tailscale 公网访问** 里点**开启公网访问**：
 
-桌面端保持环回监听并通过 Tailscale 暴露时，敏感命令的闸门按外部链路状态切换：未启用时环回 HTTP 可用；公网模式完成 HTTPS 暴露后可用；Tailscale 尚未建立可用外部链路时暂时关闭，返回 404「Web command is not available」。
+1. 应用会按需自动启动 Web 服务、运行 `tailscale up`，把 `login.tailscale.com` 授权链接显示出来并自动在浏览器打开；也可以用无界面机器适用的 **auth key** 方式，密钥只用一次、不落盘。
+2. 成功后得到公网地址，形如 `https://<machine>.<tailnet>.ts.net`，任何设备用浏览器都能打开，**手机不需要装 Tailscale**。
+3. 前提是 tailnet 已启用 **MagicDNS** 与 **HTTPS certificates** 并允许 **Funnel**；缺 MagicDNS 会提示启用，设备未获批准会提示找管理员批准。
+
+应用只清理它自己创建的 Funnel 映射：443 上已有你在应用之外配置的映射时，它会报告**冲突**而不是覆盖。
 
 ::: tip 令牌校验不会被跳过
-无论走 Tailscale 私网还是 Funnel，AI Switch 自己的令牌校验都照常执行。Tailscale 解决的是「怎么连上」，不是「谁能操作」。
+无论走 Tailscale 公网还是局域网明文，AI Switch 自己的令牌校验都照常执行。Tailscale 解决的是「怎么连上」，不是「谁能操作」。
 :::
 
-独立服务器走这条路径时需要自己提供 Tailscale sidecar：把 `ai-switch-tsnet` 放在二进制同级目录，或用 `AI_SWITCH_TSNET_PATH` 指定路径。
+独立服务器走这条路径时，也同样是先在这台机器上装好 `tailscale` CLI（服务器不再携带任何 sidecar）。
 
-> ✅ **检查点**：在另一台已加入同一 tailnet 的设备上用 Tailscale 给的主机名 / IP 打开面板，输入令牌后能看到与本机一致的账号列表。
+> ✅ **检查点**：在另一台设备（手机走蜂窝数据也行）用 Funnel 地址打开面板，输入令牌后能看到与本机一致的账号列表。
 
 ## 路径 C：独立服务器（团队自建）
 
@@ -102,8 +106,9 @@ systemctl status ai-switch-server
 | `AI_SWITCH_TOKEN` | 无 | **必填，至少 16 字符**，缺失或过短拒绝启动 |
 | `AI_SWITCH_STATIC_DIR` | 无 | 前端 `dist` 目录，需含 `index.html` |
 | `AI_SWITCH_TLS_CERT_PATH` / `AI_SWITCH_TLS_KEY_PATH` | 无 | 证书链 / 私钥 PEM，必须成对 |
-| `AI_SWITCH_TSNET_PATH` | 无 | Tailscale sidecar 路径 |
 | `AI_SWITCH_ALLOW_INSECURE_HTTP` | 无 | 有可信 HTTPS 反代时显式设 `1` 才允许非环回明文 |
+
+服务器本身不再有 Tailscale 相关变量；需要远程访问时，在本机自行安装 `tailscale` CLI（见路径 B）。
 
 ```bash
 export AI_SWITCH_HOST=127.0.0.1
@@ -150,6 +155,7 @@ docker compose -f deploy/docker-compose.yml up -d
 ```
 
 - `AI_SWITCH_SAAS_ENABLE=0`：只启动独立 server，不再需要 Redis / PostgreSQL。
+- 镜像内置了 Tailscale 并在启动时运行 `tailscaled --tun=userspace-networking`，因此容器里也能用 Tailscale 公网访问（需要 tailnet 已启用 MagicDNS 与 HTTPS 证书）；它不再附带任何内置 sidecar。
 - `AI_SWITCH_TOKEN` 不设置时 entrypoint 会生成并在容器日志里打印：`docker logs <容器名> | grep AI_SWITCH_TOKEN`。**跨重启请显式设置**。
 - 其他变量（`AI_SWITCH_HOST`、TLS、静态资源目录等）与独立服务器一致。
 
@@ -172,7 +178,7 @@ docker compose -f deploy/docker-compose.yml up -d
 - 令牌轮换要手动做：改完重启服务，所有浏览器都要重新输入新令牌。
 - 在共享 / 公共设备访问后退出并清理站点数据（令牌在 `localStorage`）。
 - 默认只监听 `127.0.0.1`；绑 `0.0.0.0` 前先确认防火墙与网络可信度。
-- 公网暴露优先用 Tailscale 私网；确需公网时配 HTTPS 反代，别让裸 HTTP 直接对外。
+- 公网暴露用 Tailscale Funnel 就够了，TLS 由 Tailscale 提供；如果不用它、直接把服务放到公网，请自己配 HTTPS 反代，别让裸 HTTP 直接对外。
 - `~/.ai-switch` 里的 SQLite 保存着 API Key 与账号凭据，按凭据目录对待：收紧权限、加密备份、不要放进公开仓库或明文同步盘。
 
 ## 排错表
@@ -185,7 +191,10 @@ docker compose -f deploy/docker-compose.yml up -d
 | 非环回地址起不来 | 独立 server 默认拒绝明文 HTTP | 配 HTTPS 反代，或显式设 `AI_SWITCH_ALLOW_INSECURE_HTTP=1`（仅限可信边界） |
 | 页面白屏 / 静态资源 404 | 找不到 `index.html` | 设 `AI_SWITCH_STATIC_DIR`，或把前端放到二进制同级 `web/` |
 | 浏览器里某命令提示「仅桌面可用」 | 命中桌面独占命令 | 到桌面端执行；或改用等价的 Web 命令 |
-| Tailscale 下敏感命令 404 | 外部链路尚未建立可用状态 | 等链路就绪；环回直连仍可用 |
+| 开启公网访问卡在登录 | 本机未登录 Tailscale | 完成浏览器授权，或用 auth key 连接 |
+| 提示「未安装 Tailscale」 | 本机没有 `tailscale` CLI | 从 <https://tailscale.com/download> 安装后刷新 |
+| 公网访问报冲突 | 443 上已有应用之外配置的 Funnel 映射 | 到 Tailscale 里处理该映射，再回应用重试 |
+| 开启后敏感命令 404 | Funnel 尚未建立可用链路 | 等链路就绪；环回直连仍可用 |
 | 忘记 Docker 令牌 | 未显式设置时由 entrypoint 生成 | `docker logs <容器名> \| grep AI_SWITCH_TOKEN` |
 | 忘记 systemd 令牌 | 写在 env 文件里 | `sudo cat /etc/ai-switch/server.env` |
 | 换了数据目录变量没生效 | `AI_SWITCH_DATA_DIR` 未实现 | 用运行账号主目录或容器卷控制 |

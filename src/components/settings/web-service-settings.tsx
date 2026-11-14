@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleStop, RefreshCcw, Server, ShieldCheck } from "lucide-react";
 import {
@@ -12,15 +12,13 @@ import type { WebServiceConfig } from "../../lib/api/types";
 import { useI18n } from "../../lib/i18n";
 import { isDesktop } from "../../lib/transport";
 import { TokenInput } from "../auth/TokenInput";
-import { TailscaleSettings } from "./tailscale-settings";
+import { TailscaleFunnelSettings } from "./tailscale-funnel-settings";
 
 const defaultConfig: WebServiceConfig = {
   host: "127.0.0.1",
   port: process.env.NODE_ENV !== "production" ? 10086 : 19527,
   token: "",
   routeAccessEnabled: false,
-  tailscaleEnabled: false,
-  tailscaleExposureMode: "private",
   tlsEnabled: false,
   tlsCertPath: null,
   tlsKeyPath: null,
@@ -35,10 +33,6 @@ function normalizeConfig(config: WebServiceConfig): WebServiceConfig {
     port: Number.isFinite(config.port) && config.port > 0 ? config.port : defaultConfig.port,
     token: config.token?.trim() || "",
     routeAccessEnabled: Boolean(config.routeAccessEnabled),
-    tailscaleEnabled: Boolean(config.tailscaleEnabled),
-    tailscaleHostname: config.tailscaleHostname?.trim() || null,
-    tailscaleAuthKeyPresent: Boolean(config.tailscaleAuthKeyPresent),
-    tailscaleExposureMode: config.tailscaleExposureMode === "public" ? "public" : "private",
     tlsEnabled: Boolean(config.tlsEnabled),
     tlsCertPath: config.tlsCertPath?.trim() || null,
     tlsKeyPath: config.tlsKeyPath?.trim() || null,
@@ -59,17 +53,37 @@ export function WebServiceSettings() {
   });
   const [form, setForm] = useState<WebServiceConfig>(defaultConfig);
 
+  // The Funnel panel reports the public URL it verified, and remembers whether
+  // this render pass should select it.
+  const [publicUrl, setPublicUrl] = useState<string | null>(null);
+  const [funnelRefreshVersion, setFunnelRefreshVersion] = useState(0);
+  // Bumped synchronously before the stop request, so the Funnel panel aborts
+  // its own flow instead of racing the shutdown.
+  const stopIntent = useRef(0);
+  const [stopIntentVersion, setStopIntentVersion] = useState(0);
+  const [starting, setStarting] = useState(false);
+
+
+  // Adopt the loaded config once per fetch; later user edits must win.
+  const adoptedConfig = useRef<WebServiceConfig | null>(null);
   useEffect(() => {
-    if (configQuery.data) {
-      setForm(normalizeConfig(configQuery.data));
-    }
+    if (!configQuery.data || adoptedConfig.current === configQuery.data) return;
+    adoptedConfig.current = configQuery.data;
+    setForm(normalizeConfig(configQuery.data));
   }, [configQuery.data]);
+
+  const handleFunnelAddress = useCallback(
+    (url: string | null, _select: "initial" | "enabled" | null) => {
+      setPublicUrl(url);
+    },
+    [],
+  );
 
   const saveMutation = useMutation({
     mutationFn: async () => {
       const saved = await saveWebServiceConfig(normalizeConfig(form));
       queryClient.setQueryData(["web-service-config"], saved);
-      await queryClient.invalidateQueries({ queryKey: ["tailscale-status"] });
+      await queryClient.invalidateQueries({ queryKey: ["tailscale-funnel-status"] });
       return saved;
     },
   });
@@ -85,10 +99,11 @@ export function WebServiceSettings() {
       const status = await startWebServer();
       queryClient.setQueryData(["web-server-status"], status);
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["tailscale-status"] }),
+        queryClient.invalidateQueries({ queryKey: ["tailscale-funnel-status"] }),
         queryClient.invalidateQueries({ queryKey: ["route-proxy-status"] }),
         queryClient.invalidateQueries({ queryKey: ["route-proxy-https-status"] }),
       ]);
+      setFunnelRefreshVersion((version) => version + 1);
       return status;
     },
   });
@@ -98,13 +113,39 @@ export function WebServiceSettings() {
       const status = await stopWebServer();
       queryClient.setQueryData(["web-server-status"], status);
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["tailscale-status"] }),
+        queryClient.invalidateQueries({ queryKey: ["tailscale-funnel-status"] }),
         queryClient.invalidateQueries({ queryKey: ["route-proxy-status"] }),
         queryClient.invalidateQueries({ queryKey: ["route-proxy-https-status"] }),
       ]);
       return status;
     },
   });
+
+  // The Funnel panel calls this instead of starting the service itself, so the
+  // one-click flow reuses the same validation and cache updates.
+  const ensureWebServiceRunning = useCallback(async () => {
+    if (statusQuery.data?.running) return true;
+    setStarting(true);
+    try {
+      await startMutation.mutateAsync();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      setStarting(false);
+    }
+  }, [startMutation, statusQuery.data?.running]);
+
+  const handleStop = () => {
+    // Announce the intent before the request lands: the Funnel panel clears
+    // its in-flight setup synchronously, so nothing can re-publish a funnel
+    // after the shutdown has begun.
+    stopIntent.current += 1;
+    setStopIntentVersion(stopIntent.current);
+    stopMutation.mutate();
+    // The shutdown also clears the funnel mapping, so the panel re-reads.
+    setFunnelRefreshVersion((version) => version + 1);
+  };
 
   const status = statusQuery.data;
   const serviceHost = status?.host ?? form.host;
@@ -192,53 +233,6 @@ export function WebServiceSettings() {
                   value={form.token ?? ""}
                   copy
                 />
-                <div className="flex flex-wrap gap-3">
-                  <label className="inline-flex items-center gap-2 rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-[12px] font-medium text-stone-700">
-                    <input
-                      checked={form.tailscaleEnabled}
-                      onChange={(event) =>
-                        setForm((current) => ({
-                          ...current,
-                          tailscaleEnabled: event.target.checked,
-                        }))
-                      }
-                      type="checkbox"
-                    />
-                    {t("settings.webService.tailscaleEnabled")}
-                  </label>
-                  {form.tailscaleEnabled ? (
-                    <label className="inline-flex items-center gap-2 rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-[12px] font-medium text-stone-700">
-                      <span>{t("settings.webService.exposureMode")}</span>
-                      <select
-                        className="rounded-lg border border-stone-200 bg-white px-2 py-1 text-[12px] font-semibold text-stone-800 outline-none focus:border-stone-400"
-                        onChange={(event) => {
-                          const nextMode = event.target.value === "public" ? "public" : "private";
-                          if (nextMode === "public") {
-                            const ok = window.confirm(t("settings.webService.publicConfirm"));
-                            if (!ok) {
-                              return;
-                            }
-                          }
-                          setForm((current) => ({
-                            ...current,
-                            tailscaleExposureMode: nextMode,
-                          }));
-                        }}
-                        value={form.tailscaleExposureMode ?? "private"}
-                      >
-                        <option value="private">
-                          {t("settings.webService.exposurePrivate")}
-                        </option>
-                        <option value="public">{t("settings.webService.exposurePublic")}</option>
-                      </select>
-                    </label>
-                  ) : null}
-                </div>
-                {form.tailscaleEnabled && form.tailscaleExposureMode === "public" ? (
-                  <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
-                    {t("settings.webService.publicHint")}
-                  </p>
-                ) : null}
               </>
             ) : (
               <div className="rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-[12px] text-stone-600">
@@ -267,7 +261,7 @@ export function WebServiceSettings() {
                   <button
                     className="inline-flex items-center gap-1.5 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[13px] font-semibold text-stone-700 motion-control hover:border-stone-300 disabled:cursor-not-allowed disabled:opacity-60"
                     disabled={stopMutation.isPending}
-                    onClick={() => stopMutation.mutate()}
+                    onClick={handleStop}
                     type="button"
                   >
                     <CircleStop className="h-3.5 w-3.5" />
@@ -276,7 +270,7 @@ export function WebServiceSettings() {
                 ) : (
                   <button
                     className="inline-flex items-center gap-1.5 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[13px] font-semibold text-stone-700 motion-control hover:border-stone-300 disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={startMutation.isPending}
+                    disabled={startMutation.isPending || starting}
                     onClick={() => startMutation.mutate()}
                     type="button"
                   >
@@ -293,6 +287,7 @@ export function WebServiceSettings() {
               ) : (
                 <p>{t("settings.webService.stopped")}</p>
               )}
+              {publicUrl ? <p className="mt-1 font-mono">{publicUrl}</p> : null}
               {saveMutation.isError ? (
                 <p className="mt-1 text-red-700">{t("settings.webService.saveError")}</p>
               ) : null}
@@ -312,15 +307,19 @@ export function WebServiceSettings() {
             </div>
 
             {desktop ? (
-              <TailscaleSettings
-                enabled={form.tailscaleEnabled}
-                exposureMode={form.tailscaleExposureMode ?? "private"}
+              <TailscaleFunnelSettings
+                ensureWebServiceRunning={ensureWebServiceRunning}
+                onAddressChange={handleFunnelAddress}
+                refreshVersion={funnelRefreshVersion}
+                serviceBusy={startMutation.isPending || stopMutation.isPending || starting}
+                serviceRunning={Boolean(status?.running)}
+                stopIntent={stopIntent}
+                stopIntentVersion={stopIntentVersion}
               />
             ) : null}
           </>
         )}
       </section>
-
     </>
   );
 }

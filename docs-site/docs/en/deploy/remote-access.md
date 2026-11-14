@@ -1,6 +1,6 @@
 ---
 title: Remote Access and HTTPS
-description: Reach AI Switch over a Tailscale private network or Funnel, and generate and trust a self-signed root certificate for the local pool proxy. Includes real certificate paths, per-platform trust commands, and default states.
+description: Reach AI Switch over a public Tailscale Funnel address, and generate and trust a self-signed root certificate for the local pool proxy. Includes real certificate paths, per-platform trust commands, and default states.
 ---
 
 # Remote Access and HTTPS
@@ -12,72 +12,71 @@ This page covers two independent things. Separate them before reading on:
 
 Different ports, different certificate stories. Do not conflate them.
 
-## Two routes to remote access
+## Remote access: public Tailscale Funnel
 
-| Route | Visibility | Transport encryption | Best for |
-| --- | --- | --- | --- |
-| Tailscale private network | Only devices on your own Tailscale account | Provided by Tailscale | Reaching an always-on home machine from a phone or laptop |
-| Tailscale Funnel | Anyone on the internet can reach the address | HTTPS provided by Tailscale | When you genuinely need to serve external clients |
-
-Neither route changes AI Switch's own authentication: **the access token is still required**. Tailscale solves reachability and channel encryption; it is not a substitute for application-level authorisation.
-
-Use **public HTTPS** as the cross-platform baseline: H5 needs CORS, and a mini-program needs the hostname on its allowed request-domain list. Reserve the private endpoint for the native App.
-
-## Tailscale private network
-
-AI Switch ships a Go sidecar (`ai-switch-tsnet`, built on Tailscale's `tsnet` library). The desktop sidecar joins your tailnet in userspace, outside the app process. The desktop does not need a system Tailscale client; **the phone App still needs the official Tailscale App, signed in to the same tailnet**. The uni-app client does not embed a Tailscale SDK.
-
-### Turning it on
-
-1. In the desktop app, go to **Settings → Web Service** and enable **secure network**.
-2. Set **Access mode** to private only.
-3. Save and start the service.
-4. In the **secure network** area, click **Sign in with OAuth**. A browser opens the Tailscale authorisation page; complete it and return to the app.
-
-After sign-in the UI shows a MagicDNS HTTPS address for private mode, in this shape:
+AI Switch ships no networking component of its own. It drives the **system-installed `tailscale` CLI** and publishes the local Web service over Tailscale Funnel as a public HTTPS address:
 
 ```text
-https://ai-switch.<your-tailnet>.ts.net:19527
+https://<machine>.<your-tailnet>.ts.net
 ```
 
-Do not enter the `100.x.y.z` address in the mobile client: Tailscale HTTPS certificates are issued for the MagicDNS hostname, so an IP URL fails hostname verification. Enable **MagicDNS** and **HTTPS certificates** in the Tailscale admin console first. The sidecar uses the hostname `ai-switch` by default and keeps its state in `~/.ai-switch/tailscale/`.
+The prerequisite is that **you install Tailscale on this machine yourself**:
+
+- Install it from <https://tailscale.com/download> so the local `tailscale` command is available.
+- When the CLI is missing, the settings panel shows an **Install Tailscale** link.
+- The tailnet must have **MagicDNS** and **HTTPS certificates** enabled and allow **Funnel** (a policy setting). A missing MagicDNS certificate surfaces as "enable MagicDNS"; an unapproved device surfaces as "this device needs approval from your Tailscale administrator".
+
+**Your phone does not need Tailscale.** A public Funnel address is reachable from any device, so a phone (or anything else) only needs a browser and the access token. The uni-app client does not embed a Tailscale SDK either.
+
+Tailscale does not change AI Switch's own authentication: **the access token is still required**. Tailscale solves reachability and channel encryption; it is not a substitute for application-level authorisation.
+
+Use this **public HTTPS** address as the single cross-platform baseline: H5 needs CORS, and a mini-program needs the hostname on its allowed request-domain list.
+
+## Enabling public access in one flow
+
+The entry point is the **Tailscale public access** section inside **Settings → Web Service** in the desktop app:
+
+1. Make sure the **shared service port** is running (the one-click flow starts the Web service for you when you click enable).
+2. Click **Enable public access**.
+3. The app runs `tailscale up` when needed, streams the `login.tailscale.com` authorization URL to the UI and opens it in your browser; once authorized it continues automatically.
+4. On success the UI shows the public address, shaped like `https://<machine>.<your-tailnet>.ts.net`, with copy and mobile-pairing actions.
+
+Under the hood it runs `tailscale funnel --bg --https=443`, publishing `http://127.0.0.1:<port>` on HTTPS 443. Funnel only allows ports 443, 8443, and 10000; the app always uses 443.
 
 ### The other sign-in path: auth keys
 
-If a browser OAuth flow is impractical — for example when you are SSH'd into a headless machine — paste a Tailscale **auth key** into the same area and click connect with auth key. The key is persisted to `~/.ai-switch/tailscale/auth-key` so the node can reconnect after a restart.
-
-::: warning The auth key is stored in plaintext
-`~/.ai-switch/tailscale/auth-key` is a plaintext file. If you do not need automatic reconnection, revoke the key in the Tailscale admin console afterwards, or use OAuth sign-in instead.
-:::
+If this machine has no browser — for example a headless host you reach over SSH — paste a Tailscale **auth key** into the same area and click connect with auth key. The key is used once (`tailscale up --authkey`) and is **never written to disk**; the node connection itself lives in the system `tailscaled` state.
 
 ### Sign-in never happens on its own
 
-Worth stressing: **the app does not sign in to Tailscale at startup.**
+Worth stressing: **the app never signs in to Tailscale unattended at startup.**
 
-Startup recovery only attempts a reconnect if one of these exists: a saved auth key, or previously persisted tsnet login state in the sidecar directory. With neither, the UI reports that the secure network is waiting for sign-in and waits for you to click.
+Only after you have **enabled public access and left it enabled** will a restart re-publish it once the Web service rebinds; if re-authorization is required it stops and waits for you to click once.
 
 In other words, installing the app does not join you to any network. You have to perform an explicit authorisation step.
 
-### Pairing a phone with a QR code
+## Ownership and conflicts
 
-In the desktop secure-network panel, choose **Show mobile pairing QR**, then choose **Scan import** while adding or editing a real instance in the mobile App. The QR contains the remote URL, a short-lived single-use pairing code, and its expiry; **it never contains the long-lived Web Service token**. Redeeming the code returns an independent mobile token.
+The app only ever removes the Funnel mapping **it created itself**:
 
-Scanning only fills the form. The mobile App still lets you edit the public/private URLs and enter or replace a token manually. Pairing codes are single-use and expire; generate a new one when needed. Before using a private URL, sign the official Tailscale App into the same tailnet. H5 and mini-program builds should use the public HTTPS URL.
+- On enable it records the mapping it owns (hostname plus port) in the app database.
+- **Disabling public access** removes only that mapping; if the mapping on 443 is no longer the app's, the UI reports that it cannot be removed here.
+- If 443 already carries a Funnel mapping **you configured outside the app**, the app does not overwrite it — it reports a **conflict** and asks you to resolve it in Tailscale first.
+- On restart, if it was previously enabled, the app re-publishes after the Web service is ready (non-interactively; it stops and waits if sign-in is required).
 
-## Tailscale Funnel (public)
+## Pairing a phone with a QR code
 
-Switch **Access mode** to public and the sidecar listens through Tailscale Funnel instead, which turns the service into a publicly reachable HTTPS address:
+In the desktop Tailscale public-access section, choose **Show pairing QR**, then choose **Scan import** while adding or editing a real instance in the mobile App. The QR contains the remote URL, a short-lived single-use pairing code, and its expiry; **it never contains the long-lived Web Service token**. Redeeming the code returns an independent mobile token.
 
-```text
-https://ai-switch.<your-tailnet>.ts.net
-```
+Scanning only fills the form. The mobile App still lets you edit the URL and enter or replace a token manually. Pairing codes are single-use and expire; generate a new one when needed. **The phone does not need Tailscale to use this address** — it is an ordinary public HTTPS URL any browser can open. It does require public access to be on and the machine to be able to reach that address (the app checks reachability before creating a pairing code; pick **Generate anyway** when the phone is on another network).
 
-Funnel uses port 443 by default (443, 8443, and 10000 — the ports Funnel supports — are preserved as configured). Things to know:
+## What Funnel requires
 
 - **Your Tailscale account must permit Funnel.** That is a tailnet policy setting, enabled in the Tailscale admin console.
+- **MagicDNS and HTTPS certificates are required.** The address uses the MagicDNS hostname and the HTTPS certificate is issued for it; do not use `100.x.y.z`, which fails hostname verification.
 - **HTTPS comes from Tailscale**, which issues and renews the certificate. You do not supply one.
 - **The access token still applies.** Anyone can reach the address, but without the token they get nothing. At that point the token is the only door.
-- **Sign-in works the same way.** Switching to public mode does not skip Tailscale sign-in.
+- **The Web service must listen on `127.0.0.1` or `0.0.0.0`.** Any other bind address cannot be handed to Funnel.
 
 ## Bringing your own certificate for the web service
 
@@ -193,9 +192,10 @@ The proxy HTTPS status endpoint returns the certificate directory, the root cert
 
 ::: warning Ground rules for remote access
 - **Every `/api/*` and `/ws/events` request needs the access token, including over Tailscale.** Tailscale is not an authentication layer; it only provides the channel.
-- **Tailscale sign-in is a manual action.** The app never signs in at startup; it only attempts a reconnect when a saved auth key or prior tsnet state exists locally.
+- **Tailscale sign-in is a manual action.** The app never signs in unattended at startup; it only re-publishes after a restart when public access was enabled and the machine was previously signed in.
+- **Install Tailscale on this machine before you go remote.** The app bundles no networking component; the UI offers an install link when the CLI is missing.
 - **Think before binding `0.0.0.0`.** The desktop app permits plaintext startup and exposes every Web command to that network; the access token is the only protection.
-- **Think harder before enabling Funnel.** That is a public address, and the token is the only door. Prefer private mode unless you truly need otherwise.
+- **Think harder before enabling Funnel.** That is a public address, and the token is the only door. It lets anyone on `https://<machine>.<tailnet>.ts.net` see the sign-in page.
 - **The token is equivalent to shell access.** The web API includes terminal session commands, so a leaked token costs more than config disclosure.
 - **The self-signed root is for this machine only.** Its SANs are just `localhost` and `127.0.0.1`. Never copy the root private key to another machine, and never use it to issue certificates for remote access.
 - **Mobile token storage is platform-aware.** The App can inject an iOS Keychain / Android Keystore adapter; H5 and mini-program builds fall back to `uni` local storage for compatibility. In either case, never put the token in a QR code or a log.

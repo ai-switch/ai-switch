@@ -43,7 +43,7 @@ If you have not installed the app yet, start with [Installation](/en/guide/insta
   <a class="tutorial-card" href="./remote-and-team.html">
     <div class="tc-head"><span class="tc-tag">Deploy</span><span class="tc-time">12 min</span></div>
     <span class="tc-title">Phone access and team servers</span>
-    <span class="tc-desc">Four paths — Web service, Tailscale private net, standalone server and Docker. Pick the one that fits.</span>
+    <span class="tc-desc">Four paths — Web service, Tailscale Funnel public access, standalone server and Docker. Pick the one that fits.</span>
     <span class="tc-more">Open the guide →</span>
   </a>
 </div>

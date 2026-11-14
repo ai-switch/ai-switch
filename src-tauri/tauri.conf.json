@@ -46,9 +46,6 @@
       "../dist": "web/",
       "resources/skill-packages": "skill-packages/"
     },
-    "externalBin": [
-      "binaries/ai-switch-tsnet"
-    ],
     "macOS": {
       "signingIdentity": "-"
     },

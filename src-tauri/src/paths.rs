@@ -39,7 +39,6 @@ pub struct AppPaths {
     pub imagegen_dir: PathBuf,
     pub videogen_dir: PathBuf,
     pub logs_dir: PathBuf,
-    pub tailscale_dir: PathBuf,
     pub route_proxy_https_dir: PathBuf,
 }
 
@@ -67,7 +66,6 @@ impl AppPaths {
             imagegen_dir: data_dir.join("imagegen"),
             videogen_dir: data_dir.join("videogen"),
             logs_dir: data_dir.join("logs"),
-            tailscale_dir: data_dir.join("tailscale"),
             route_proxy_https_dir: data_dir.join("certs").join("route-proxy"),
             data_dir,
         }
@@ -84,7 +82,6 @@ impl AppPaths {
         tokio::fs::create_dir_all(&self.videogen_dir).await?;
         set_private_directory_permissions(&self.videogen_dir).await?;
         tokio::fs::create_dir_all(&self.logs_dir).await?;
-        tokio::fs::create_dir_all(&self.tailscale_dir).await?;
         Ok(())
     }
 }
@@ -111,15 +108,6 @@ mod tests {
     fn dev_service_config_is_separate_from_the_installed_release_config() {
         assert_eq!(web_service_file_name(true), "web-service-dev.json");
         assert_eq!(web_service_file_name(false), "web-service.json");
-    }
-
-    #[test]
-    fn app_paths_include_tailscale_dir() {
-        let paths = AppPaths::from_data_dir(PathBuf::from("C:/tmp/ai-switch-data"));
-        assert_eq!(
-            paths.tailscale_dir,
-            PathBuf::from("C:/tmp/ai-switch-data/tailscale")
-        );
     }
 
     #[test]

@@ -41,12 +41,11 @@ Output paths:
 
 If you would rather not compile it yourself, every release attaches per-platform `ai-switch-server` archives to the GitHub Release. See [Release Process](/en/dev/release).
 
-The archive unzips into exactly the layout recommended under "How the frontend is located" below — `ai-switch-server`, `ai-switch-tsnet` and `web/` already sit together, so you do not need `AI_SWITCH_STATIC_DIR` at all:
+The archive unzips into exactly the layout recommended under "How the frontend is located" below — `ai-switch-server` and `web/` already sit together, so you do not need `AI_SWITCH_STATIC_DIR` at all:
 
 ```text
 ai-switch-server_v0.7.3_windows-x86_64/
 ├── ai-switch-server.exe
-├── ai-switch-tsnet.exe
 └── web/
     ├── index.html
     └── assets/...
@@ -64,13 +63,13 @@ Every runtime parameter comes from an environment variable. There are no command
 | `AI_SWITCH_STATIC_DIR` | none | No | Frontend `dist` directory. Only honoured if it contains `index.html`; otherwise the built-in candidates apply |
 | `AI_SWITCH_TLS_CERT_PATH` | none | Paired with the next | Path to the certificate chain PEM |
 | `AI_SWITCH_TLS_KEY_PATH` | none | Paired with the previous | Path to the private key PEM |
-| `AI_SWITCH_TSNET_PATH` | none | No | Path to the Tailscale sidecar executable. Defaults to `ai-switch-tsnet` next to the current executable |
 
 A few things this table needs spelled out:
 
 - **`AI_SWITCH_TOKEN` is mandatory.** If it is unset, whitespace-only, or shorter than 16 characters, the server refuses to start and prints why. That is deliberate: ordinary commands include ones that return an account's plaintext API key (`list_route_credentials`), so running without a token exposes the credential store to anyone who can reach the port.
 - **The two TLS paths must be provided together.** Supplying only one fails with `web.tls_paths_incomplete` and the server does not start.
 - **The data directory cannot be set by environment variable.** The server always writes to `~/.ai-switch` under the running user's home directory. `AI_SWITCH_DATA_DIR`, which appears in the README, is **not implemented** in the current code — setting it has no effect. To relocate the data, control the service account's home directory or mount a container volume there.
+- **Remote access needs you to install Tailscale.** The standalone server no longer carries any networking sidecar; to make its Web service reachable from outside, install the official `tailscale` CLI on this machine — see [Remote Access and HTTPS](/en/deploy/remote-access).
 
 ## Running it
 
@@ -177,9 +176,9 @@ With that layout you do not need `AI_SWITCH_STATIC_DIR` at all. Paths that match
 | | Desktop web service | Standalone server |
 | --- | --- | --- |
 | Configuration | `~/.ai-switch/web-service.json` plus the settings UI | Environment variables |
-| Sensitive-command gate | Open after direct desktop startup; loopback plus Tailscale follows sidecar state | Always open, which makes the token that much more important |
+| Sensitive-command gate | Open after direct desktop startup; loopback plus Tailscale Funnel follows the Funnel state | Always open, which makes the token that much more important |
 | Desktop-only commands | Available inside the desktop window | Unavailable (no native desktop environment) |
-| Tailscale | Toggled and signed in from the settings UI | You supply the sidecar binary (`AI_SWITCH_TSNET_PATH` or a sibling file) |
+| Tailscale | Enabled and signed in from the settings UI (driving the system `tailscale` CLI) | You install the Tailscale CLI on this machine yourself (the server no longer ships a sidecar) |
 | Tray and auto-update | Yes | No — bring your own process supervisor and upgrade process |
 
 Because the standalone server does not gate sensitive commands dynamically, credential export, proxy key reads, and MCP/skill installation are all callable once the token check passes.

@@ -65,8 +65,8 @@ test("puts a labelled download table above the changelog", async () => {
     );
     // The AppImage and the .deb share the Linux row; neither is the "main" one.
     assert.match(rows[2], /AppImage\).+·.+\.deb\)/);
-    // Updater-only payloads and the sidecar stay out of the table.
-    assert.doesNotMatch(body, /app\.tar\.gz|tsnet/);
+    // Updater-only payloads stay out of the table.
+    assert.doesNotMatch(body, /app\.tar\.gz|latest\.json/);
     assert.match(body, /独立服务器.+Standalone server: \[Windows \(x64\)\]/);
     assert.match(body, /Standalone server:.+\[Linux \(ARM64\)\]/);
     assert.match(
@@ -118,7 +118,7 @@ test("renders installer downloads from nested GitHub Actions artifacts", async (
     }
     assert.ok(body.startsWith("## 下载 · Downloads\n\n"), "the download heading must lead the release");
     assert.ok(body.endsWith(`${NOTES}\n`), "the bilingual notes must remain intact");
-    assert.doesNotMatch(body, /\.sig|app\.tar\.gz|tsnet|latest\.json/);
+    assert.doesNotMatch(body, /\.sig|app\.tar\.gz|latest\.json/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

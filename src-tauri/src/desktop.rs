@@ -67,7 +67,8 @@ use commands::usage_stats_commands::{
     reload_model_price_overrides, save_model_price_configs,
 };
 use commands::web_service_commands::{
-    create_mobile_pairing, disconnect_tailscale, get_tailscale_status, get_web_server_status,
+    cancel_tailscale_funnel_operation, create_mobile_pairing, disable_tailscale_funnel,
+    enable_tailscale_funnel, get_tailscale_funnel_status, get_web_server_status,
     get_web_service_config, save_web_service_config, set_route_access, start_tailscale_login,
     start_tailscale_with_auth_key, start_web_server, stop_web_server,
 };
@@ -87,8 +88,8 @@ use services::deeplink_service::{parse_deeplink_url, DeepLinkErrorPayload};
 use services::route_proxy_https_service::RouteProxyHttpsService;
 use services::route_proxy_service::RouteProxyRuntimeState;
 use services::route_recovery_service::RouteRecoveryService;
-use services::tailscale_service::{TailscaleRuntimeState, TailscaleService};
 use services::web_service::{WebService, WebServiceRuntimeState};
+use web::tailscale_funnel as tailscale_funnel_mod;
 use skills::command::{
     skills_delete, skills_install_package, skills_list, skills_list_agents, skills_list_packages,
     skills_read, skills_read_package, skills_save, skills_uninstall_package,
@@ -395,12 +396,17 @@ pub fn run() {
             route_proxy,
             saas: crate::saas::SaasRuntime::default(),
             web_service: WebServiceRuntimeState::default(),
-            tailscale: TailscaleRuntimeState::default(),
+            tailscale_funnel: Arc::new(tailscale_funnel_mod::FunnelManager::default()),
             terminals: TerminalManager::default(),
             terminal_hub: Arc::new(crate::web::terminal_hub::TerminalHub::default()),
             event_broadcaster: Arc::new(WebEventBroadcaster::new()),
         })
         .setup(move |app| {
+            // Remove a funnel mapping a crashed run left behind, even when Web
+            // auto-start is off or the next bind is going to fail.
+            tauri::async_runtime::block_on(tailscale_funnel_mod::initialize(
+                app.state::<AppState>().inner(),
+            ));
             if launched_from_autostart {
                 if let Some(window) = app.get_webview_window("main") {
                     if let Err(error) = window.hide() {
@@ -664,11 +670,13 @@ pub fn run() {
             start_web_server,
             stop_web_server,
             set_route_access,
-            get_tailscale_status,
+            get_tailscale_funnel_status,
             create_mobile_pairing,
             start_tailscale_login,
             start_tailscale_with_auth_key,
-            disconnect_tailscale,
+            enable_tailscale_funnel,
+            disable_tailscale_funnel,
+            cancel_tailscale_funnel_operation,
             mcp_scan_local,
             mcp_list_marketplaces,
             mcp_search_marketplace,
@@ -708,7 +716,11 @@ pub fn run() {
                         eprintln!("SaaS log queue could not drain before exit");
                     }
                 });
-                tauri::async_runtime::block_on(TailscaleService::shutdown(&state.tailscale));
+                // The updater's relaunch() may skip this event entirely; the
+                // launch-time funnel reconcile then removes whatever mapping a
+                // hard-killed run left behind.
+                tauri::async_runtime::block_on(tailscale_funnel_mod::shutdown(&state));
+
                 state.terminals.kill_all();
             }
         });

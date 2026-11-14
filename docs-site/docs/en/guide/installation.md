@@ -11,7 +11,7 @@ AI Switch desktop builds come from GitHub Releases, with prebuilt packages for a
 
 Open the [latest release page](https://github.com/ai-switch/ai-switch/releases/latest). The release body starts with a download table — one row per platform, with Apple Silicon and Intel macOS on separate rows, so click the link for your system.
 
-If you would rather scan the asset list: the desktop installers are named `ai-switch-<version>-<platform>` (for example `ai-switch-0.8.0-windows-x86_64-setup.exe`) and sort to the top of it. Below them come the standalone server, the Tailscale sidecar, and the `ai-switch-updater-*` archives plus `latest.json` that only the built-in updater needs.
+If you would rather scan the asset list: the desktop installers are named `ai-switch-<version>-<platform>` (for example `ai-switch-0.8.0-windows-x86_64-setup.exe`) and sort to the top of it. Below them come the standalone server and the `ai-switch-updater-*` archives plus `latest.json` that only the built-in updater needs.
 
 Versions containing `-rc`, `-beta`, or `-alpha` are prereleases. For normal use, pick one without those suffixes.
 
@@ -139,13 +139,16 @@ All local state sits in `~/.ai-switch/` under your home directory (`%USERPROFILE
 │   └── config-snapshots/            # snapshots taken before writing CLI config (mode 0700 on Unix)
 ├── imports/                         # intermediate files from account imports
 ├── logs/                            # logs
-├── tailscale/                       # Tailscale sidecar state
 └── certs/route-proxy/               # HTTPS certificates for the local proxy
 ```
 
 A few notes.
 
 **`settings.json`** holds application-level settings. Paths such as the database location are written back into this file, but they are informational — editing them will not relocate anything.
+
+::: tip Want to reach it from another device? Install Tailscale on this machine first
+The installers no longer bundle any networking component. To reach AI Switch from a phone or another computer, install the official [Tailscale](https://tailscale.com/download) on this machine yourself; the app drives the system `tailscale` CLI and publishes the Web service as a public HTTPS address over Tailscale Funnel. Your phone does not need Tailscale. See [Remote Access and HTTPS](/en/deploy/remote-access).
+:::
 
 **The SQLite database** carries the real data: route accounts, pool membership and cursors, usage events, sessions, MCP servers, skills, and more. Its schema is managed by the **23 migrations** in `src-tauri/migrations` and applied automatically at startup. Release builds use `ai-switch.db` and development builds (`tauri dev` / debug) use `ai-switch-dev.db`, so local development can't damage the data you use day to day.
 
@@ -196,7 +199,7 @@ So the trust anchor for the update path is the public key compiled into the app 
 
 If you'd rather not use a prebuilt package, or you need a target that isn't published — Linux on ARM, say — you can build it yourself.
 
-Broadly you'll need Node (with pnpm), a Rust toolchain, and Go for building the Tailscale sidecar:
+Broadly you'll need Node (with pnpm) and a Rust toolchain:
 
 ```powershell
 corepack enable

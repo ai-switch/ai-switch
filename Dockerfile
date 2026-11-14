@@ -54,33 +54,49 @@ RUN set -eux; \
     unzip -q "/tmp/${ARCHIVE}" -d /package; \
     # Release ZIPs may lose executable mode bits (for example, Windows staging).
     # Restore modes before checking the downloaded binaries.
-    chmod 0755 /package/ai-switch-server /package/ai-switch-tsnet; \
+    chmod 0755 /package/ai-switch-server; \
     test -x /package/ai-switch-server; \
-    test -x /package/ai-switch-tsnet; \
     test -f /package/web/index.html
 
 FROM debian:bookworm-slim
+# Tailscale comes from their official apt repository, not from the release
+# archive: public access drives the system `tailscale` CLI, so the container
+# needs the real client and daemon. tailscaled runs in userspace-networking
+# mode (see the entrypoint), which needs no /dev/net/tun and no NET_ADMIN.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
       libssl3 \
+      gpg \
+    && mkdir -p /usr/share/keyrings \
+    && curl -fsSL --retry 3 --retry-delay 1 \
+      "https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg" \
+      -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
+    && curl -fsSL --retry 3 --retry-delay 1 \
+      "https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list" \
+      -o /etc/apt/sources.list.d/tailscale.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends tailscale \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --home-dir /home/ai-switch --create-home ai-switch \
-    && install -d -o ai-switch -g ai-switch -m 0750 /home/ai-switch/.ai-switch
+    && install -d -o ai-switch -g ai-switch -m 0750 /home/ai-switch/.ai-switch \
+    && install -d -o ai-switch -g ai-switch -m 0755 /var/lib/tailscale
 
 COPY --from=download /package/ai-switch-server /app/ai-switch-server
-COPY --from=download /package/ai-switch-tsnet /app/ai-switch-tsnet
 COPY --from=download /package/web /app/web
 COPY deploy/docker-entrypoint.sh /app/docker-entrypoint.sh
-RUN chmod 0755 /app/ai-switch-server /app/ai-switch-tsnet /app/docker-entrypoint.sh
+RUN chmod 0755 /app/ai-switch-server /app/docker-entrypoint.sh
 
 ENV HOME=/home/ai-switch \
     AI_SWITCH_HOST=0.0.0.0 \
     AI_SWITCH_PORT=19527 \
     AI_SWITCH_ALLOW_INSECURE_HTTP=1 \
     AI_SWITCH_STATIC_DIR=/app/web \
-    AI_SWITCH_TSNET_PATH=/app/ai-switch-tsnet
+    # tailscaled state survives restarts on the volume below; the CLI finds the
+    # daemon through this socket.
+    TS_SOCKET=/home/ai-switch/.ai-switch/tailscaled.sock \
+    TS_STATE_DIR=/home/ai-switch/.ai-switch/tailscale
 USER ai-switch
 EXPOSE 19527
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

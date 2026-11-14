@@ -3,6 +3,7 @@ pub mod event_bridge;
 pub mod handlers;
 pub mod router;
 pub mod static_assets;
+pub mod tailscale_funnel;
 pub mod terminal_hub;
 pub mod terminal_ws;
 pub mod video_routes;

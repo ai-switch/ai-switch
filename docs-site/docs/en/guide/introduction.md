@@ -142,7 +142,7 @@ Both use the same data directory layout. See [Web Service Mode](/en/deploy/web-s
 - **Frontend**: Tauri 2 + React 18 + TypeScript
 - **Core**: the Rust crate `ai_switch_lib`, using axum, sqlx, rustls, rcgen, reqwest, portable-pty
 - **Data**: SQLite, 23 migrations, in `src-tauri/migrations`
-- **Sidecar**: `ai-switch-tsnet`, written in Go on Tailscale tsnet + Funnel, for private remote access
+- **Remote access**: no bundled networking component — the app drives the **system-installed `tailscale` CLI** and publishes the Web service as a public HTTPS address over Tailscale Funnel (public mode only; private tailnet mode was removed)
 - **Standalone binary**: `ai-switch-server`, for browser and mobile access
 
 Architecture details are in [Architecture](/en/dev/architecture).

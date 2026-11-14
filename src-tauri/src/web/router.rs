@@ -430,7 +430,6 @@ mod tests {
     use crate::services::deeplink_protocol_service::DeepLinkProtocolRuntime;
     use crate::services::route_credential_service::RouteCredentialService;
     use crate::services::route_proxy_service::{RouteProxyRuntimeState, RouteProxyService};
-    use crate::services::tailscale_service::TailscaleRuntimeState;
     use crate::services::web_service::{WebService, WebServiceConfig, WebServiceRuntimeState};
     use crate::terminal_manager::TerminalManager;
     use crate::web::event_bridge::WebEventBroadcaster;
@@ -483,7 +482,7 @@ mod tests {
             route_proxy: RouteProxyRuntimeState::default(),
             saas: crate::saas::SaasRuntime::default(),
             web_service: WebServiceRuntimeState::default(),
-            tailscale: TailscaleRuntimeState::default(),
+            tailscale_funnel: std::sync::Arc::new(crate::web::tailscale_funnel::FunnelManager::default()),
             terminals: TerminalManager::default(),
             terminal_hub: Arc::new(crate::web::terminal_hub::TerminalHub::default()),
             event_broadcaster: Arc::new(WebEventBroadcaster::default()),
@@ -523,7 +522,7 @@ mod tests {
             route_proxy: RouteProxyRuntimeState::default(),
             saas: crate::saas::SaasRuntime::default(),
             web_service: WebServiceRuntimeState::default(),
-            tailscale: TailscaleRuntimeState::default(),
+            tailscale_funnel: std::sync::Arc::new(crate::web::tailscale_funnel::FunnelManager::default()),
             terminals: TerminalManager::default(),
             terminal_hub: Arc::new(crate::web::terminal_hub::TerminalHub::default()),
             event_broadcaster: Arc::new(WebEventBroadcaster::default()),
@@ -562,7 +561,7 @@ mod tests {
             route_proxy: RouteProxyRuntimeState::default(),
             saas: crate::saas::SaasRuntime::default(),
             web_service: WebServiceRuntimeState::default(),
-            tailscale: TailscaleRuntimeState::default(),
+            tailscale_funnel: std::sync::Arc::new(crate::web::tailscale_funnel::FunnelManager::default()),
             terminals: TerminalManager::default(),
             terminal_hub: Arc::new(crate::web::terminal_hub::TerminalHub::default()),
             event_broadcaster: Arc::new(WebEventBroadcaster::default()),
@@ -1192,13 +1191,15 @@ mod tests {
             ("get_web_server_status", json!({})),
             ("start_web_server", json!({})),
             ("stop_web_server", json!({})),
-            ("get_tailscale_status", json!({})),
+            ("get_tailscale_funnel_status", json!({})),
             ("start_tailscale_login", json!({})),
             (
                 "start_tailscale_with_auth_key",
                 json!({ "authKey": "tskey-auth-test" }),
             ),
-            ("disconnect_tailscale", json!({})),
+            ("enable_tailscale_funnel", json!({})),
+            ("disable_tailscale_funnel", json!({})),
+            ("cancel_tailscale_funnel_operation", json!({})),
             ("create_mobile_pairing", json!({})),
             (
                 "create_terminal_session",

@@ -13,7 +13,7 @@
 
 当用户说“发布新版”时，按以下顺序执行：
 
-1. 先检查 GitHub Actions 中 `main` 分支最近一次 CI 状态；如果 CI 失败或仍在运行，先报告状态并停止发布。若没有可用的 CI 记录，至少运行仓库发布流程中的本地检查：`pnpm typecheck`、`pnpm test:run`、`pnpm release:manifest:test`、`pnpm rust:check`、`pnpm rust:test` 和 `go test ./...`（工作目录为 `sidecar/ai-switch-tsnet`）。任一检查失败时不得提交或打 tag。
+1. 先检查 GitHub Actions 中 `main` 分支最近一次 CI 状态；如果 CI 失败或仍在运行，先报告状态并停止发布。若没有可用的 CI 记录，至少运行仓库发布流程中的本地检查：`pnpm typecheck`、`pnpm test:run`、`pnpm release:manifest:test`、`pnpm rust:check` 和 `pnpm rust:test`。任一检查失败时不得提交或打 tag。
 2. 找出最新的语义化版本 tag，分析该 tag 到当前最新代码（包括待提交工作区改动）的变化，生成条目化更新日志。更新日志必须通俗易懂，分别提供中文和英文版本，按功能、修复、改进等用户可理解的内容描述，不直接堆砌 commit hash 或内部实现细节。
 3. 使用同一份双语更新日志作为 Git 提交信息，提交标题简洁明确，正文保留完整的中文和英文条目；不要另外创建持久化的 CHANGELOG 文件，除非用户明确要求。提交正文必须按「中文条目 → 空行 → 独占一行的 29 个连字符（`-----------------------------`）→ 空行 → 英文条目」的顺序排列：发布流水线把这条提交信息原样写入更新清单的 `notes`（GitHub Release 正文则是在它前面再拼一张下载表），客户端据此按界面语言只显示对应语种的那一半。除该分隔线外，正文其余位置不要出现 12 个以上连续的 `-`、`*` 或 `_`。
 4. 根据变更类型自动递增版本号：破坏性变更递增 major，新增用户功能递增 minor，修复和一般改进递增 patch。若用户明确指定版本号，使用用户指定的版本。同步更新 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`，并在需要时更新 `src-tauri/Cargo.lock` 中项目自身的版本条目，保持所有应用版本一致。

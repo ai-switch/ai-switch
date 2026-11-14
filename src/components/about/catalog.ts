@@ -80,7 +80,6 @@ export const OPEN_SOURCE_CREDITS: OpenSourceCreditGroup[] = [
   {
     titleKey: "about.credits.groupNetwork",
     items: [
-      { name: "Tailscale (tsnet)", license: "BSD-3-Clause", url: "https://tailscale.com" },
       { name: "rustls", license: "Apache-2.0 / MIT / ISC", url: "https://github.com/rustls/rustls" },
       { name: "rcgen", license: "MIT / Apache-2.0", url: "https://github.com/rustls/rcgen" },
     ],

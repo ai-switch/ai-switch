@@ -25,7 +25,11 @@ test("docker image uses verified release archives instead of compiling source", 
   assert.match(dockerfile, /sha256sum/);
   assert.match(dockerfile, /ai-switch-server_\$\{VERSION\}_linux-\$\{ARCH\}\.zip/);
   assert.match(dockerfile, /ai-switch-server/);
-  assert.match(dockerfile, /ai-switch-tsnet/);
+  assert.doesNotMatch(dockerfile, /ai-switch-tsnet/);
+  // Public access drives the system `tailscale` CLI, so the runtime image
+  // installs the client from Tailscale's own apt repository.
+  assert.match(dockerfile, /pkgs\.tailscale\.com/);
+  assert.match(dockerfile, /apt-get install -y --no-install-recommends tailscale/);
   assert.match(dockerfile, /web\/index\.html/);
   assert.match(dockerfile, /useradd .*ai-switch/);
   assert.match(dockerfile, /install -d .*\/home\/ai-switch\/\.ai-switch/);
@@ -181,7 +185,7 @@ test("Docker restores executable modes stripped by the Release ZIP before valida
   const dockerfile = await read("Dockerfile");
   const downloadStage = dockerfile.split("FROM debian:bookworm-slim")[1];
   const extraction = downloadStage.indexOf('unzip -q "/tmp/${ARCHIVE}" -d /package');
-  const chmod = downloadStage.indexOf("chmod 0755 /package/ai-switch-server /package/ai-switch-tsnet", extraction);
+  const chmod = downloadStage.indexOf("chmod 0755 /package/ai-switch-server", extraction);
   const executableCheck = downloadStage.indexOf("test -x /package/ai-switch-server", extraction);
   assert.ok(extraction !== -1, "the release must be extracted first");
   assert.ok(chmod > extraction && chmod < executableCheck, "Release ZIPs store both binaries as 0644; restore modes before test -x");

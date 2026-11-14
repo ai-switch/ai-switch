@@ -22,9 +22,6 @@ vi.mock("../../src/lib/api/client", () => ({
   stopWebServer: vi.fn(),
 }));
 vi.mock("../../src/lib/transport", () => ({ isDesktop: vi.fn() }));
-vi.mock("../../src/components/settings/tailscale-settings", () => ({
-  TailscaleSettings: () => null,
-}));
 
 function renderSettings() {
   return render(
@@ -50,8 +47,6 @@ describe("WebServiceSettings", () => {
       port: 19527,
       token: "0123456789abcdef",
       routeAccessEnabled: true,
-      tailscaleEnabled: false,
-      tailscaleExposureMode: "private",
       tlsEnabled: false,
       tlsCertPath: null,
       tlsKeyPath: null,

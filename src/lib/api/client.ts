@@ -60,8 +60,6 @@ import type {
   RouteProxyStatus,
   SaveRouteCredentialExportResult,
   SaveRouteProxyDiagnosticsResult,
-  TailscaleLogin,
-  TailscaleStatus,
   SessionMessage,
   SessionMeta,
   SessionUsageStats,
@@ -71,6 +69,7 @@ import type {
   UsageOverview,
   UsageHistoryStorage,
   ResponseBodyCleanup,
+  TailscaleFunnelStatus,
   WebServerStatus,
   WebServiceConfig,
   UpdateOfficialAccount,
@@ -698,24 +697,32 @@ export function setRouteAccess(enabled: boolean): Promise<RouteProxyStatus> {
   return invoke("set_route_access", { enabled });
 }
 
-export function getTailscaleStatus(): Promise<TailscaleStatus> {
-  return invoke("get_tailscale_status");
+export function getTailscaleFunnelStatus(): Promise<TailscaleFunnelStatus> {
+  return invoke("get_tailscale_funnel_status");
 }
 
 export function createMobilePairing(force = false): Promise<MobilePairingPayload> {
   return invoke("create_mobile_pairing", { force });
 }
 
-export function startTailscaleLogin(): Promise<TailscaleLogin> {
+export function startTailscaleLogin(): Promise<TailscaleFunnelStatus> {
   return invoke("start_tailscale_login");
 }
 
-export function startTailscaleWithAuthKey(authKey: string): Promise<TailscaleStatus> {
+export function startTailscaleWithAuthKey(authKey: string): Promise<TailscaleFunnelStatus> {
   return invoke("start_tailscale_with_auth_key", { authKey });
 }
 
-export function disconnectTailscale(): Promise<TailscaleStatus> {
-  return invoke("disconnect_tailscale");
+export function enableTailscaleFunnel(): Promise<TailscaleFunnelStatus> {
+  return invoke("enable_tailscale_funnel");
+}
+
+export function disableTailscaleFunnel(): Promise<TailscaleFunnelStatus> {
+  return invoke("disable_tailscale_funnel");
+}
+
+export function cancelTailscaleFunnelOperation(): Promise<TailscaleFunnelStatus> {
+  return invoke("cancel_tailscale_funnel_operation");
 }
 
 export function mcpScanLocal(): Promise<LocalMcpServer[]> {

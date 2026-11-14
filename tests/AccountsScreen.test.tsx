@@ -424,6 +424,26 @@ async function selectAccountView(name: "默认组" | "未入池" | "已归档") 
   );
 }
 
+/**
+ * 列表/卡片切换现在收在「刷新」下拉里。helper 只负责把菜单打开（已经开着就复用），
+ * 点哪一项仍由调用方决定，这样断言「切换后菜单关闭」的用例不会被 helper 抹平。
+ */
+async function openRefreshMenu() {
+  const menu = screen.queryByRole("menu", { name: "刷新操作" });
+  if (!menu) {
+    const trigger = await screen.findByRole("button", { name: "打开刷新菜单" });
+    // 刷新期间这个触发器是禁用的，等它恢复可用再点，免得落到 disabled 上。
+    await waitFor(() => expect(trigger).toBeEnabled());
+    await userEvent.click(trigger);
+  }
+  return screen.getByRole("menu", { name: "刷新操作" });
+}
+
+async function selectAccountLayout(name: "列表模式" | "卡片模式") {
+  await openRefreshMenu();
+  await userEvent.click(within(screen.getByRole("menu", { name: "刷新操作" })).getByRole("menuitemradio", { name }));
+}
+
 async function openFormTab(name: "基础" | "高级" | "代理" | "故障处理" | "其他") {
   await userEvent.click(await screen.findByRole("tab", { name }));
 }
@@ -1138,14 +1158,16 @@ describe("AccountsScreen", () => {
     expect(within(poolActions).getByRole("button", { name: "启用算力池路由接入" })).toBeInTheDocument();
     expect(within(poolActions).getByRole("button", { name: "打开算力池测试菜单" })).toBeInTheDocument();
     expect(within(poolActions).queryByRole("button", { name: "新增账号" })).not.toBeInTheDocument();
-    expect(within(listActions).getByRole("button", { name: "列表模式" })).toBeInTheDocument();
     expect(within(listActions).getByRole("button", { name: "新增账号" })).toBeInTheDocument();
     expect(within(listActions).getByRole("button", { name: "刷新账号列表" })).toBeInTheDocument();
     expect(within(screen.getByTestId("account-workspace-scroll-region")).queryByRole("button", { name: "新增账号" })).not.toBeInTheDocument();
     expect(within(poolActions).queryByRole("button", { name: "配置 Codex 基线模型" }) !== null).toBe(!capability);
+    // 展示模式收进了刷新下拉，工具栏上不再单摆切换按钮。
+    expect(within(listActions).queryByRole("button", { name: "列表模式" })).not.toBeInTheDocument();
 
-    await userEvent.click(within(listActions).getByRole("button", { name: "卡片模式" }));
-    expect(within(listActions).getByRole("button", { name: "卡片模式" })).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(within(listActions).getByRole("button", { name: "打开刷新菜单" }));
+    expect(within(listActions).getByRole("menu", { name: "刷新操作" })).toBeInTheDocument();
+    await userEvent.click(within(listActions).getByRole("menuitemradio", { name: "卡片模式" }));
     expect(screen.getByTestId("account-list")).toHaveAttribute("data-account-layout", "card");
     await userEvent.click(within(listActions).getByRole("button", { name: "新增账号" }));
     expect(await screen.findByRole("heading", { name: "新增账号" })).toBeInTheDocument();
@@ -1936,12 +1958,11 @@ describe("AccountsScreen", () => {
 
     await screen.findByText("Team Account");
     expect(screen.getByTestId("account-list")).toHaveAttribute("data-account-layout", "list");
-    expect(screen.getByRole("button", { name: "列表模式" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(
+      within(await openRefreshMenu()).getByRole("menuitemradio", { name: "列表模式" }),
+    ).toHaveAttribute("aria-checked", "true");
 
-    await userEvent.click(screen.getByRole("button", { name: "卡片模式" }));
+    await selectAccountLayout("卡片模式");
 
     const list = screen.getByTestId("account-list");
     expect(list).toHaveAttribute("data-account-layout", "card");
@@ -1956,10 +1977,9 @@ describe("AccountsScreen", () => {
     renderScreen();
 
     expect(await screen.findByTestId("account-card-cred-api-1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "卡片模式" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(
+      within(await openRefreshMenu()).getByRole("menuitemradio", { name: "卡片模式" }),
+    ).toHaveAttribute("aria-checked", "true");
   });
 
   it("keeps card backgrounds neutral regardless of account status", async () => {
@@ -1970,7 +1990,7 @@ describe("AccountsScreen", () => {
     renderScreen();
 
     await screen.findByText("Team Account");
-    await userEvent.click(screen.getByRole("button", { name: "卡片模式" }));
+    await selectAccountLayout("卡片模式");
 
     expect(screen.getByTestId("account-card-cred-official-1")).toHaveClass("bg-white");
     expect(screen.getByTestId("account-card-cred-official-1")).not.toHaveClass("bg-amber-50/50");
@@ -1982,7 +2002,7 @@ describe("AccountsScreen", () => {
     renderScreen();
 
     await screen.findByText("Team Account");
-    await userEvent.click(screen.getByRole("button", { name: "卡片模式" }));
+    await selectAccountLayout("卡片模式");
 
     const card = screen.getByTestId("account-card-cred-official-1");
     expect(card).not.toHaveClass("z-50");
@@ -2000,7 +2020,7 @@ describe("AccountsScreen", () => {
     renderScreen();
 
     await screen.findByText("Team Account");
-    await userEvent.click(screen.getByRole("button", { name: "卡片模式" }));
+    await selectAccountLayout("卡片模式");
 
     const card = screen.getByTestId("account-card-cred-official-1");
     expect(card).toHaveTextContent("P3-");
@@ -2097,7 +2117,7 @@ describe("AccountsScreen", () => {
       }),
     );
     renderScreen();
-    await userEvent.click(screen.getByRole("button", { name: "卡片模式" }));
+    await selectAccountLayout("卡片模式");
 
     const card = await screen.findByTestId("account-card-cred-official-1");
     const latency = within(card).getByTestId("account-latency-cred-official-1");
@@ -2336,7 +2356,7 @@ describe("AccountsScreen", () => {
     expect(listRow).toContainElement(within(row).getByText("基线模型"));
     expect(listRow).not.toContainElement(within(row).getByText("正常"));
 
-    await userEvent.click(screen.getByRole("button", { name: "卡片模式" }));
+    await selectAccountLayout("卡片模式");
 
     const card = screen.getByTestId("account-card-cred-official-1");
     const cardRow = within(card).getByTestId("account-model-list-cred-official-1");
@@ -2356,7 +2376,7 @@ describe("AccountsScreen", () => {
     renderScreen();
 
     await screen.findByText("Team Account");
-    await userEvent.click(screen.getByRole("button", { name: "卡片模式" }));
+    await selectAccountLayout("卡片模式");
 
     const card = screen.getByTestId("account-card-cred-official-1");
     const footer = within(card).getByTestId("account-card-footer-cred-official-1");
@@ -2374,7 +2394,7 @@ describe("AccountsScreen", () => {
     );
 
     // 列表模式：两个计数器都留在徽章行，并发排在最后（余额之后），冷却紧跟状态标签。
-    await userEvent.click(screen.getByRole("button", { name: "列表模式" }));
+    await selectAccountLayout("列表模式");
     const row = await screen.findByLabelText("放置在 Team Account 前");
     expect(screen.queryByTestId("account-card-footer-cred-official-1")).not.toBeInTheDocument();
     const rowBadges = within(row).getByText("正常").closest("div");
@@ -2401,7 +2421,7 @@ describe("AccountsScreen", () => {
     renderScreen();
 
     await screen.findByText("Team Account");
-    await userEvent.click(screen.getByRole("button", { name: "卡片模式" }));
+    await selectAccountLayout("卡片模式");
 
     const card = screen.getByTestId("account-card-cred-official-1");
     expect(card).not.toHaveTextContent("请求 3");
@@ -2410,7 +2430,7 @@ describe("AccountsScreen", () => {
     ).toContainElement(within(card).getByTestId("credential-activity-cred-official-1"));
 
     // 列表模式不需要这个兜底：并发本来就在徽章行，跟请求统计的开关无关。
-    await userEvent.click(screen.getByRole("button", { name: "列表模式" }));
+    await selectAccountLayout("列表模式");
     const row = await screen.findByLabelText("放置在 Team Account 前");
     expect(row).not.toHaveTextContent("请求 3");
     expect(within(row).getByText("正常").closest("div")).toContainElement(
@@ -2422,7 +2442,7 @@ describe("AccountsScreen", () => {
     renderScreen();
 
     await screen.findByText("Team Account");
-    await userEvent.click(screen.getByRole("button", { name: "卡片模式" }));
+    await selectAccountLayout("卡片模式");
 
     const dragHandle = screen.getByLabelText("拖动 Team Account");
     const firstCard = screen.getByTestId("account-card-cred-official-1");
@@ -2464,7 +2484,7 @@ describe("AccountsScreen", () => {
     renderScreen();
 
     await screen.findByText("Team Account");
-    await userEvent.click(screen.getByRole("button", { name: "卡片模式" }));
+    await selectAccountLayout("卡片模式");
 
     const dragHandle = screen.getByLabelText("拖动 Team Account");
     dragHandle.focus();
@@ -2604,7 +2624,7 @@ describe("AccountsScreen", () => {
 
   it("keeps card rows compact while their list fills the remaining space", async () => {
     renderScreen();
-    await userEvent.click(await screen.findByRole("button", { name: "卡片模式" }));
+    await selectAccountLayout("卡片模式");
     expect(screen.getByTestId("account-list")).toHaveClass("grid", "flex-1", "content-start");
   });
 
@@ -3247,20 +3267,38 @@ describe("AccountsScreen", () => {
     expect(screen.getByText("已移动 1 个账号。")).toBeInTheDocument();
   });
 
-  it("selects all visible accounts and inverts the current page selection", async () => {
+  it("toggles the whole page from the account list header checkbox", async () => {
     renderScreen();
 
-    await userEvent.click(await screen.findByLabelText("全选当前页账号"));
+    const selectAll = await screen.findByLabelText("全选当前页账号");
+    // 表头复选框长在列表表头里，不再是列表上方单摆的按钮。
+    expect(within(screen.getByTestId("account-list-header")).getByLabelText("全选当前页账号")).toBe(
+      selectAll,
+    );
+    expect(selectAll).not.toBeChecked();
+
+    await userEvent.click(selectAll);
+    expect(screen.getByText("已选 2 个账号")).toBeInTheDocument();
+    expect(screen.getByLabelText("选择 Team Account")).toBeChecked();
+    expect(screen.getByLabelText("选择 API Account")).toBeChecked();
+    expect(selectAll).toBeChecked();
+    expect((selectAll as HTMLInputElement).indeterminate).toBe(false);
+
+    // 取消其中一个：表头复选框转入半选（indeterminate），此时点击它补齐成全选。
+    await userEvent.click(screen.getByLabelText("选择 Team Account"));
+    expect(screen.getByText("已选 1 个账号")).toBeInTheDocument();
+    await waitFor(() => expect((selectAll as HTMLInputElement).indeterminate).toBe(true));
+    expect(selectAll).not.toBeChecked();
+
+    await userEvent.click(selectAll);
     expect(screen.getByText("已选 2 个账号")).toBeInTheDocument();
     expect(screen.getByLabelText("选择 Team Account")).toBeChecked();
     expect(screen.getByLabelText("选择 API Account")).toBeChecked();
 
-    await userEvent.click(screen.getByLabelText("选择 Team Account"));
-    expect(screen.getByText("已选 1 个账号")).toBeInTheDocument();
-    await userEvent.click(screen.getByLabelText("反选当前页账号"));
-
-    expect(screen.getByText("已选 1 个账号")).toBeInTheDocument();
-    expect(screen.getByLabelText("选择 Team Account")).toBeChecked();
+    // 本页已全选时再点，清空本页选择，提示条随之消失。
+    await userEvent.click(selectAll);
+    expect(screen.queryByText(/已选 \d+ 个账号/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("选择 Team Account")).not.toBeChecked();
     expect(screen.getByLabelText("选择 API Account")).not.toBeChecked();
   });
 
@@ -6977,7 +7015,7 @@ describe("AccountsScreen", () => {
     vi.mocked(listRouteCredentials).mockResolvedValue([credentialsFixture[0], relayAccount]);
     renderScreen();
 
-    await userEvent.click(await screen.findByRole("button", { name: "卡片模式" }));
+    await selectAccountLayout("卡片模式");
 
     const card = await screen.findByTestId(`account-card-${relayAccount.id}`);
     const badge = within(card).getByTestId(`credential-relay-balance-${relayAccount.id}`);
@@ -8171,11 +8209,11 @@ describe("AccountsScreen", () => {
     renderScreen("codex", "in_pool", false, client);
     await userEvent.click(await screen.findByLabelText("启用算力池路由接入"));
     await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ["web-server-status"] }));
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["tailscale-status"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["tailscale-funnel-status"] });
     invalidate.mockClear();
     await userEvent.click(await screen.findByLabelText("关闭算力池路由接入"));
     await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ["web-server-status"] }));
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["tailscale-status"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["tailscale-funnel-status"] });
   });
 
   it("uses distinct service start, stop, and send-test controls", async () => {

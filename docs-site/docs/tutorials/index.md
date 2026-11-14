@@ -43,7 +43,7 @@ description: 六篇可照着做的 AI Switch 实战教程，覆盖第一条请�
   <a class="tutorial-card" href="./remote-and-team.html">
     <div class="tc-head"><span class="tc-tag">部署</span><span class="tc-time">12 分钟</span></div>
     <span class="tc-title">手机访问与团队自建</span>
-    <span class="tc-desc">Web 服务、Tailscale 私网、独立服务器与 Docker 四条路径，按场景选一条。</span>
+    <span class="tc-desc">Web 服务、Tailscale Funnel 公网访问、独立服务器与 Docker 四条路径，按场景选一条。</span>
     <span class="tc-more">开始教程 →</span>
   </a>
 </div>

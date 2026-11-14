@@ -100,25 +100,36 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Every row names the triple its artifacts are built for — the host
+          # triple on native rows — so binary paths, bundle dirs and asset
+          # naming derive from one field with no host/cross branching. See
+          # "Compute platform variables".
           - label: Windows
             os: windows-latest
+            target: x86_64-pc-windows-msvc
             bundles: nsis
           - label: macOS (Apple Silicon)
             os: macos-latest
+            target: aarch64-apple-darwin
             bundles: "app dmg"
           # An arm64 dmg does not run on an Intel Mac at all — not even under
           # Rosetta — so the second macOS row is the whole of Intel support.
-          # `macos-15-intel` is the label that replaced the retired `macos-13`
-          # image; GitHub has announced it as the last x86_64 macOS image
-          # Actions will offer, available until August 2027. Building natively
-          # rather than cross-compiling from the arm runner is what keeps
-          # `go test`, `cargo test` and the frontend suite running on the
-          # architecture that actually ships.
+          # It cross-compiles x86_64-apple-darwin on the same Apple Silicon
+          # image as the arm64 row (the lingyun/codeg-plus setup), because
+          # `macos-15-intel` — the last x86_64 macOS image GitHub offers,
+          # available until August 2027 — is going away, and GitHub's arm64
+          # images ship no Rosetta for x64 test binaries to run under. Tests
+          # in this job therefore run on the arm64 host and the cross build
+          # only proves the x64 target compiles and links; the artifacts get
+          # one native exercise later, when package-managers.yml installs the
+          # cask on a real Intel runner (macos-15-intel is kept for that job).
           - label: macOS (Intel)
-            os: macos-15-intel
+            os: macos-latest
+            target: x86_64-apple-darwin
             bundles: "app dmg"
           - label: Linux
             os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
             bundles: "deb appimage"
 
     env:
@@ -163,20 +174,20 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          # The std for the row's triple: the cross rows (macOS Intel) cannot
+          # compile without it; on native rows it is the host std already.
+          targets: ${{ matrix.target }}
 
       # 缓存 Rust 编译产物（registry + target/）：首次全量编译后，后续发布仅重编改动部分。
-      # key 按 matrix.os 隔离，避免 4 个平台 job 互相覆盖彼此的 target 缓存（rust-cache 默认键不含 OS）。
+      # key 按 matrix.os + matrix.target 隔离，避免各平台 job 互相覆盖彼此的
+      # target 缓存（rust-cache 默认键不含 OS/target；两个 macOS 行现在共用
+      # macos-latest 镜像，但各自编译不同的 triple）。
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri"
-          key: ${{ matrix.os }}
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: stable
-          cache-dependency-path: sidecar/ai-switch-tsnet/go.sum
+          key: ${{ matrix.os }}-${{ matrix.target }}
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -184,33 +195,40 @@ jobs:
       - name: Compute platform variables
         shell: pwsh
         run: |
-          $hostTriple = ((rustc -vV | Select-String '^host:') -replace '^host:\s*', '').Trim()
+          # The matrix target triple is the single source of truth: on a cross
+          # row (macOS Intel builds x86_64 on an arm64 runner) the runner's own
+          # OS/arch would name the wrong updater platform and look for the
+          # wrong binaries.
+          $targetTriple = "${{ matrix.target }}"
+
           $exeSuffix = ""
-          if ($env:RUNNER_OS -eq "Windows") {
+          if ($targetTriple.Contains("windows")) {
             $exeSuffix = ".exe"
           }
 
-          $arch = switch ($env:RUNNER_ARCH) {
-            "X64" { "x86_64" }
-            "ARM64" { "aarch64" }
-            default { throw "Unsupported runner architecture: $env:RUNNER_ARCH" }
+          $arch = switch -Wildcard ($targetTriple) {
+            "x86_64-*" { "x86_64" }
+            "aarch64-*" { "aarch64" }
+            default { throw "Unsupported target triple: $targetTriple" }
           }
 
-          $platform = switch ($env:RUNNER_OS) {
-            "Windows" { "windows-$arch" }
-            "macOS" { "darwin-$arch" }
-            "Linux" { "linux-$arch" }
-            default { throw "Unsupported runner OS: $env:RUNNER_OS" }
+          $os = switch -Wildcard ($targetTriple) {
+            "*-apple-darwin" { "darwin" }
+            "*-pc-windows-msvc" { "windows" }
+            "*-unknown-linux-gnu" { "linux" }
+            default { throw "Unsupported target triple: $targetTriple" }
           }
 
-          "HOST_TRIPLE=$hostTriple" >> $env:GITHUB_ENV
+          # Cargo puts cross builds under target/<triple>/, so the paths below
+          # hold for native rows too (where the triple is the host's).
+          "TARGET_TRIPLE=$targetTriple" >> $env:GITHUB_ENV
           "EXE_SUFFIX=$exeSuffix" >> $env:GITHUB_ENV
-          "UPDATER_PLATFORM=$platform" >> $env:GITHUB_ENV
+          "UPDATER_PLATFORM=$os-$arch" >> $env:GITHUB_ENV
           "APP_VERSION=$("${{ github.ref_name }}" -replace '^v', '')" >> $env:GITHUB_ENV
-          "SIDECAR_BIN=src-tauri/binaries/ai-switch-tsnet-$hostTriple$exeSuffix" >> $env:GITHUB_ENV
-          "SERVER_BIN=src-tauri/target/release/ai-switch-server$exeSuffix" >> $env:GITHUB_ENV
-          if ($env:RUNNER_OS -eq "Linux") {
-            "SIDECAR_ARM64_BIN=src-tauri/binaries/ai-switch-tsnet-aarch64-unknown-linux-gnu" >> $env:GITHUB_ENV
+          "SERVER_BIN=src-tauri/target/$targetTriple/release/ai-switch-server$exeSuffix" >> $env:GITHUB_ENV
+          "BUNDLE_DIR=src-tauri/target/$targetTriple/release/bundle" >> $env:GITHUB_ENV
+
+          if ($os -eq "linux") {
             "SERVER_ARM64_BIN=src-tauri/target/aarch64-unknown-linux-gnu/release/ai-switch-server" >> $env:GITHUB_ENV
           }
 
@@ -232,21 +250,6 @@ jobs:
       - name: Build frontend assets
         run: pnpm build
 
-      - name: Run sidecar tests
-        working-directory: sidecar/ai-switch-tsnet
-        run: go test ./...
-
-      - name: Build sidecar binary
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
-          Push-Location sidecar/ai-switch-tsnet
-          go build -trimpath -ldflags="-s -w" -o "../../$env:SIDECAR_BIN" .
-          Pop-Location
-          if (-not (Test-Path $env:SIDECAR_BIN)) {
-            throw "Missing sidecar binary: $env:SIDECAR_BIN"
-          }
-
       - name: Check standalone server
         run: pnpm server:check
 
@@ -260,14 +263,24 @@ jobs:
         shell: pwsh
         run: |
           $bundles = "${{ matrix.bundles }}".Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)
-          & pnpm tauri build --ci --bundles @bundles
+          # --target also steers the bundler: the bundle lands under
+          # target/<triple>/release/bundle, which "Stage release assets" reads
+          # via BUNDLE_DIR.
+          & pnpm tauri build --ci --bundles @bundles --target ${{ matrix.target }}
 
       - name: Patch AppImage for Wayland compatibility
         if: runner.os == 'Linux'
         shell: bash
+        env:
+          TAURI_BUNDLE_DIR: ${{ env.BUNDLE_DIR }}
         run: bash src-tauri/scripts/patch-appimage-wayland.sh
 
       - name: Build standalone server
+        # CARGO_BUILD_TARGET (not a script edit) sends `cargo build` to the
+        # matrix triple, so the server lands in target/<triple>/release where
+        # SERVER_BIN looks — same mechanism `tauri build --target` uses above.
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
         run: pnpm server:build:release
 
       - name: Build Linux ARM64 standalone server
@@ -275,10 +288,6 @@ jobs:
         shell: bash
         run: |
           rustup target add aarch64-unknown-linux-gnu
-          pushd sidecar/ai-switch-tsnet
-          GOARCH=arm64 go build -trimpath -ldflags="-s -w" \
-            -o "../../$SIDECAR_ARM64_BIN" .
-          popd
           export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
           export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
           export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
@@ -295,10 +304,10 @@ jobs:
           New-Item -ItemType Directory -Force $dest | Out-Null
 
           # GitHub sorts the release page's asset list by name and folds all but
-          # the first few away, so the installers are named to sort ahead of the
-          # server and sidecar archives. See scripts/stage-release-assets.mjs.
+          # the first few away, so the installers are named to sort ahead of
+          # the server archive. See scripts/stage-release-assets.mjs.
           node scripts/stage-release-assets.mjs `
-            --bundle-dir src-tauri/target/release/bundle `
+            --bundle-dir $env:BUNDLE_DIR `
             --dest $dest `
             --platform $env:UPDATER_PLATFORM `
             --version $env:APP_VERSION
@@ -309,9 +318,7 @@ jobs:
           function Stage-ServerArchive {
             param(
               [string] $ServerBin,
-              [string] $SidecarBin,
               [string] $Platform,
-              [string] $ExeSuffix,
               [bool] $IncludeLinuxHelpers
             )
             $serverStage = "server-bundle-$Platform"
@@ -319,7 +326,6 @@ jobs:
             New-Item -ItemType Directory -Force $serverStage | Out-Null
             New-Item -ItemType Directory -Force "release-assets/$Platform" | Out-Null
             Copy-Item $ServerBin (Join-Path $serverStage (Split-Path $ServerBin -Leaf))
-            Copy-Item $SidecarBin (Join-Path $serverStage "ai-switch-tsnet$ExeSuffix")
             Copy-Item dist (Join-Path $serverStage "web") -Recurse
             if (-not (Test-Path (Join-Path $serverStage "web/index.html"))) {
               throw "Server bundle is missing web/index.html"
@@ -329,24 +335,18 @@ jobs:
               Copy-Item deploy/ai-switch-server.service (Join-Path $serverStage "ai-switch-server.service")
             }
             $serverArchive = Join-Path "release-assets/$Platform" "ai-switch-server_${tag}_${Platform}.zip"
-            $sidecarArchive = Join-Path "release-assets/$Platform" "ai-switch-tsnet_${tag}_${Platform}.zip"
             Compress-Archive -Path "$serverStage/*" -DestinationPath $serverArchive -Force
-            Compress-Archive -Path $SidecarBin -DestinationPath $sidecarArchive -Force
           }
 
           Stage-ServerArchive `
             -ServerBin $env:SERVER_BIN `
-            -SidecarBin $env:SIDECAR_BIN `
             -Platform $env:UPDATER_PLATFORM `
-            -ExeSuffix $env:EXE_SUFFIX `
             -IncludeLinuxHelpers ("${{ matrix.label }}" -eq "Linux")
 
           if ("${{ matrix.label }}" -eq "Linux") {
             Stage-ServerArchive `
               -ServerBin $env:SERVER_ARM64_BIN `
-              -SidecarBin $env:SIDECAR_ARM64_BIN `
               -Platform "linux-aarch64" `
-              -ExeSuffix "" `
               -IncludeLinuxHelpers $true
           }
 

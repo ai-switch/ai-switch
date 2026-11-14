@@ -1063,11 +1063,6 @@ export type WebServiceConfig = {
   routeAccessEnabled: boolean;
   /** Internal one-time marker for resetting legacy Web-only ports. */
   sharedPortMigrated?: boolean;
-  tailscaleEnabled: boolean;
-  tailscaleHostname?: string | null;
-  tailscaleAuthKeyPresent?: boolean;
-  /** private = tailnet only; public = Tailscale Funnel */
-  tailscaleExposureMode?: "private" | "public";
   tlsEnabled?: boolean;
   tlsCertPath?: string | null;
   tlsKeyPath?: string | null;
@@ -1080,23 +1075,25 @@ export type WebServerStatus = {
   baseUrl?: string | null;
 };
 
-export type TailscaleStatus = {
-  state: string;
-  deviceName?: string | null;
-  tailnetIp?: string | null;
-  magicDnsName?: string | null;
-  loginUrl?: string | null;
-  accessUrls?: string[];
-  serving?: boolean;
-  public?: boolean;
-  exposureMode?: string | null;
-  publicPort?: number | null;
-  message?: string | null;
-};
+export type TailscaleFunnelPrerequisite =
+  | "install"
+  | "startDaemon"
+  | "connect"
+  | "login"
+  | "approveDevice"
+  | "configureDns"
+  | "startWebService";
 
-export type TailscaleLogin = {
-  loginUrl?: string | null;
-  message: string;
+export type TailscaleFunnelStatus = {
+  state: string;
+  installed: boolean;
+  enabled: boolean;
+  desiredEnabled: boolean;
+  owned: boolean;
+  url?: string | null;
+  authUrl?: string | null;
+  error?: string | null;
+  prerequisite?: TailscaleFunnelPrerequisite | null;
 };
 
 export type MobilePairingPayload = {

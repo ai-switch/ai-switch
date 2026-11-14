@@ -34,7 +34,7 @@ The concurrency group keys on `github.ref` with `cancel-in-progress: false`, so 
 | Job | Runner | Responsibility |
 | --- | --- | --- |
 | `prepare` | `ubuntu-latest` | Validate the tag and version consistency, verify the tag's branch ancestry, create a draft release with generated notes |
-| `build` | matrix: `windows-latest` / `macos-latest` / `macos-15-intel` / `ubuntu-latest` | Run all checks, build the sidecar, package the Tauri installers and standalone server, upload artifacts |
+| `build` | matrix: `windows-latest` / `macos-latest` ×2 / `ubuntu-latest` | Run all checks, package the Tauri installers and standalone server, upload artifacts |
 | `publish` | `ubuntu-latest` | Collect artifacts, generate and verify `latest.json`, promote the draft to a real release |
 
 The dependency chain is `prepare` → `build` (parallel matrix) → `publish`. `build` sets `fail-fast: false`, so one target failing does not cancel the others — you get to see every problem in a single run.
@@ -85,28 +85,27 @@ The draft state matters: users never see a half-populated release while builds r
 | --- | --- | --- |
 | Windows | `windows-latest` | `nsis` |
 | macOS (Apple Silicon) | `macos-latest` | `app`, `dmg` |
-| macOS (Intel) | `macos-15-intel` | `app`, `dmg` |
+| macOS (Intel) | `macos-latest` | `app`, `dmg` |
 | Linux | `ubuntu-latest` | `deb`, `appimage` |
 
-The two macOS rows are two independent native builds rather than one universal bundle: an arm64 dmg does not run on an Intel Mac at all, and Rosetta does not translate in that direction. `macos-15-intel` is the label GitHub introduced when it retired `macos-13`, announced as the last Intel image Actions will offer and available until August 2027. Shipping Intel past that date means cross-compiling `x86_64-apple-darwin` from the arm runner; building natively until then is what keeps `go test`, `cargo test` and the frontend suite running on the architecture that actually ships.
+The two macOS rows are two independent builds rather than one universal bundle: an arm64 dmg does not run on an Intel Mac at all, and Rosetta does not translate in that direction. The Apple Silicon row builds `aarch64-apple-darwin` natively; the Intel row cross-compiles `x86_64-apple-darwin` on the same `macos-latest` (arm64) image. The dedicated Intel runner is no longer used because GitHub's `macos-15-intel` is its last x86_64 image and is going away, while the arm64 images ship no Rosetta for x64 test binaries. Tests in that row therefore run on the arm64 host and the cross build only proves the x64 target compiles and links; the native exercise happens later in `package-managers.yml`, which installs and runs the artifact on a real Intel runner.
 
 Each target runs the same sequence:
 
 1. **Validate the signing secret.** If `TAURI_SIGNING_PRIVATE_KEY` is empty the job throws immediately — unsigned updater artifacts are never produced.
 2. **Linux system dependencies.** Linux only: `apt-get install` for `libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `patchelf`, `libgtk-3-dev`, `gcc-aarch64-linux-gnu`.
-3. **Toolchains.** pnpm 10.12.4, Node 22 (with pnpm cache), stable Rust, stable Go (cached on `sidecar/ai-switch-tsnet/go.sum`).
+3. **Toolchains.** pnpm 10.12.4, Node 22 (with pnpm cache), stable Rust.
 4. **Install dependencies.** `pnpm install --frozen-lockfile`.
-5. **Compute platform variables.** Reads the host triple from `rustc -vV` and derives the updater platform id (`windows-x86_64`, `darwin-aarch64`, `darwin-x86_64`, `linux-x86_64`), `APP_VERSION`, plus the sidecar and server binary paths. Nothing in the job hard-codes an architecture: both macOS targets run the identical steps and diverge on `RUNNER_ARCH`.
+5. **Compute platform variables.** Reads the host triple from `rustc -vV` and derives the updater platform id (`windows-x86_64`, `darwin-aarch64`, `darwin-x86_64`, `linux-x86_64`), `APP_VERSION`, plus the server binary path. Nothing in the job hard-codes an architecture: both macOS targets run the identical steps and diverge on the matrix `target`.
 6. **Frontend checks.** `pnpm typecheck`, `pnpm test:run`, `pnpm release:manifest:test`.
 7. **Build the frontend.** `pnpm build`.
-8. **Sidecar tests and build.** `go test ./...`, then `go build -trimpath -ldflags="-s -w"` into `src-tauri/binaries/ai-switch-tsnet-<triple><suffix>`, asserting the file actually exists afterwards.
-9. **Rust checks.** `pnpm rust:check`, `pnpm rust:test`.
-10. **Package with Tauri.** `pnpm tauri build --ci --bundles <that platform's formats>`.
-11. **Build the standalone server.** `pnpm server:build:release`.
-12. **Stage assets.** `scripts/stage-release-assets.mjs` renames the installers from `src-tauri/target/release/bundle` to `ai-switch-<version>-<platform>` (`.exe` always gets the `-setup` suffix), names the updater-only `.app.tar.gz` / `.nsis.zip` payloads `ai-switch-updater-<version>-<platform>`, and keeps every `.sig` beside the file it signs. The deb intermediates (`control.tar.gz`, `data.tar.gz`, `debian-binary`) and anything inside the built `.app` are skipped. Missing installers or missing signatures fail the step. The server and sidecar binaries are zipped separately as `ai-switch-server_<tag>_<platform>.zip` and `ai-switch-tsnet_<tag>_<platform>.zip`.
+8. **Rust checks.** `pnpm rust:check`, `pnpm rust:test`.
+9. **Package with Tauri.** `pnpm tauri build --ci --bundles <that platform's formats>`.
+10. **Build the standalone server.** `pnpm server:build:release`.
+11. **Stage assets.** `scripts/stage-release-assets.mjs` renames the installers from `src-tauri/target/release/bundle` to `ai-switch-<version>-<platform>` (`.exe` always gets the `-setup` suffix), names the updater-only `.app.tar.gz` / `.nsis.zip` payloads `ai-switch-updater-<version>-<platform>`, and keeps every `.sig` beside the file it signs. The deb intermediates (`control.tar.gz`, `data.tar.gz`, `debian-binary`) and anything inside the built `.app` are skipped. Missing installers or missing signatures fail the step. The server binary is zipped as `ai-switch-server_<tag>_<platform>.zip`.
 
-    The naming is not arbitrary: the GitHub release page sorts assets by name and folds all but the first few behind "Show all N assets". Putting the version right after `ai-switch-` sorts the installers ahead of `ai-switch-server_` and `ai-switch-tsnet_`, so the Windows `.exe` and the macOS `.dmg` people came for stay visible. `<platform>` stays the updater platform id rather than a friendlier `windows-x64` because the package-manager publishing picks its installers by that token (see below).
-13. **Upload artifacts.** Named by updater platform id, with `if-no-files-found: error`.
+    The naming is not arbitrary: the GitHub release page sorts assets by name and folds all but the first few behind "Show all N assets". Putting the version right after `ai-switch-` sorts the installers ahead of `ai-switch-server_`, so the Windows `.exe` and the macOS `.dmg` people came for stay visible. `<platform>` stays the updater platform id rather than a friendlier `windows-x64` because the package-manager publishing picks its installers by that token (see below).
+12. **Upload artifacts.** Named by updater platform id, with `if-no-files-found: error`.
 
 Note that CI reruns the full check suite on each target. A single release therefore executes the tests four times, which is how platform- and architecture-specific problems surface here rather than in the wild.
 
@@ -215,9 +214,8 @@ A successful run attaches the following to the GitHub Release, in the order the 
 - **Windows:** `ai-switch-<version>-windows-x86_64-setup.exe`
 - **macOS:** `ai-switch-<version>-darwin-aarch64.dmg` (Apple Silicon) and `ai-switch-<version>-darwin-x86_64.dmg` (Intel)
 - **Linux:** `ai-switch-<version>-linux-x86_64.AppImage` and `ai-switch-<version>-linux-x86_64.deb`
-- **Linux ARM64 standalone server:** `ai-switch-server_<tag>_linux-aarch64.zip` and the matching sidecar archive
+- **Linux ARM64 standalone server:** `ai-switch-server_<tag>_linux-aarch64.zip`
 - **Per target:** `ai-switch-server_<tag>_<platform>.zip` (standalone server)
-- **Per target:** `ai-switch-tsnet_<tag>_<platform>.zip` (Tailscale sidecar)
 - **macOS:** `ai-switch-updater-<version>-darwin-aarch64.app.tar.gz` and `ai-switch-updater-<version>-darwin-x86_64.app.tar.gz` (only the auto-updater downloads them)
 - **`latest.json`:** the Tauri updater manifest that drives desktop auto-updates
 - **Docker Hub:** `ijry/ai-switch:<version>`, `ijry/ai-switch:<major>.<minor>`, and `latest` for stable releases (prereleases never take `latest`)

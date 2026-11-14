@@ -142,7 +142,7 @@ Web 服务默认绑定 `127.0.0.1:19527`。桌面设置可改为 `0.0.0.0` 直�
 - **前端**：Tauri 2 + React 18 + TypeScript
 - **核心**：Rust crate `ai_switch_lib`，用到 axum、sqlx、rustls、rcgen、reqwest、portable-pty
 - **数据**：SQLite，23 个迁移，位于 `src-tauri/migrations`
-- **Sidecar**：Go 写的 `ai-switch-tsnet`，基于 Tailscale tsnet + Funnel，用于私有远程访问
+- **远程访问**：不内置任何网络组件，应用调用**系统安装的 `tailscale` CLI**，通过 Tailscale Funnel 把 Web 服务发布成公网 HTTPS 地址（仅公网模式，已移除私有 tailnet 模式）
 - **独立二进制**：`ai-switch-server`，给浏览器和移动端用
 
 架构细节见 [架构总览](/dev/architecture)。

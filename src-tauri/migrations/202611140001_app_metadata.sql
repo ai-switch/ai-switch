@@ -1,0 +1,9 @@
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS app_metadata (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key TEXT NOT NULL UNIQUE,
+  value TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);

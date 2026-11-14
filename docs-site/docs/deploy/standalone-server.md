@@ -41,12 +41,11 @@ pnpm server:build:release
 
 如果不想自己编译，每次正式发布都会在 GitHub Release 里附带按平台打包好的 `ai-switch-server` 压缩包，见 [发布流程](/dev/release)。
 
-发布包解压后的结构就是下面「前端资源怎么找」推荐的布局，`ai-switch-server`、`ai-switch-tsnet` 与 `web/` 已经放在一起，不需要再设 `AI_SWITCH_STATIC_DIR`：
+发布包解压后的结构就是下面「前端资源怎么找」推荐的布局，`ai-switch-server` 与 `web/` 已经放在一起，不需要再设 `AI_SWITCH_STATIC_DIR`：
 
 ```text
 ai-switch-server_v0.7.3_windows-x86_64/
 ├── ai-switch-server.exe
-├── ai-switch-tsnet.exe
 └── web/
     ├── index.html
     └── assets/...
@@ -64,13 +63,13 @@ ai-switch-server_v0.7.3_windows-x86_64/
 | `AI_SWITCH_STATIC_DIR` | 无 | 否 | 前端 `dist` 目录。仅当该目录下存在 `index.html` 时生效，否则回退到内置候选路径 |
 | `AI_SWITCH_TLS_CERT_PATH` | 无 | 与下一项成对 | 证书链 PEM 路径 |
 | `AI_SWITCH_TLS_KEY_PATH` | 无 | 与上一项成对 | 私钥 PEM 路径 |
-| `AI_SWITCH_TSNET_PATH` | 无 | 否 | Tailscale sidecar 可执行文件路径。默认在当前可执行文件同级目录找 `ai-switch-tsnet` |
 
 关于这张表的几点必要说明：
 
 - **`AI_SWITCH_TOKEN` 是必填项。** 未设置、只有空白字符、或短于 16 个字符时服务直接拒绝启动并打印原因。这是有意的：普通命令里就有能读出账号明文 API Key 的（如 `list_route_credentials`），没有令牌等于把凭据库对所有能访问该端口的人开放。
 - **TLS 两个路径必须同时给。** 只提供其中一个会以 `web.tls_paths_incomplete` 报错，服务不会启动。
 - **数据目录不可通过环境变量指定。** 服务器始终把数据写在当前用户主目录下的 `~/.ai-switch`。README 里出现过的 `AI_SWITCH_DATA_DIR` 在当前代码中**没有实现**，设置它不会有任何效果。需要换位置的话，请用运行账号的主目录或容器卷挂载来控制。
+- **远程访问要自己装 Tailscale。** 独立服务器不再携带任何网络 sidecar；想让它的 Web 服务从外网可达，需要在这台机器上自行安装官方的 `tailscale` CLI，见 [远程访问与 HTTPS](/deploy/remote-access)。
 
 ## 启动
 
@@ -178,9 +177,9 @@ AI_SWITCH_PORT=19527 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.co
 | | 桌面端 Web 服务 | 独立服务器 |
 | --- | --- | --- |
 | 配置来源 | `~/.ai-switch/web-service.json` + 设置界面 | 环境变量 |
-| 敏感命令闸门 | 直接桌面监听在启动后开放；环回地址配 Tailscale 时按状态动态判定 | 始终开放，因此令牌保护尤为关键 |
+| 敏感命令闸门 | 直接桌面监听在启动后开放；环回地址配 Tailscale Funnel 时按 Funnel 状态动态判定 | 始终开放，因此令牌保护尤为关键 |
 | 桌面独占命令 | 桌面窗口内可用 | 不可用（无原生桌面环境） |
-| Tailscale | 设置界面里开关与登录 | 需要自行提供 sidecar 可执行文件（`AI_SWITCH_TSNET_PATH` 或同级目录） |
+| Tailscale | 设置界面里开启与登录（调用系统 `tailscale` CLI） | 需要在这台机器上自行安装 Tailscale CLI（服务器不再附带 sidecar） |
 | 托盘与自动更新 | 有 | 无，需要自行做进程守护与升级 |
 
 因为独立服务器的敏感命令闸门不做动态判定，凭据导出、密钥读取、MCP 与技能安装这些命令在令牌校验通过后就都能调用。

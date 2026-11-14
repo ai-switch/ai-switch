@@ -20,13 +20,13 @@ async function bundleFixture(files) {
   return root;
 }
 
-test("installers sort before the server and sidecar archives", () => {
+test("installers sort before the server archive", () => {
   const published = [
     publishedAssetName("AI-Switch_0.8.0_x64-setup.exe", { platform: "windows-x86_64", version: "0.8.0" }).name,
     publishedAssetName("AI-Switch_0.8.0_aarch64.dmg", { platform: "darwin-aarch64", version: "0.8.0" }).name,
     publishedAssetName("AI-Switch_0.8.0_amd64.AppImage", { platform: "linux-x86_64", version: "0.8.0" }).name,
   ];
-  const extras = ["ai-switch-server_v0.8.0_windows-x86_64.zip", "ai-switch-tsnet_v0.8.0_windows-x86_64.zip"];
+  const extras = ["ai-switch-server_v0.8.0_windows-x86_64.zip"];
 
   // GitHub lists assets by name and hides the tail behind "Show all N assets",
   // so every installer has to sort ahead of the extra downloads.

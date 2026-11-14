@@ -3557,6 +3557,8 @@ export function AccountsScreen({
   const accountEdgeTimerRef = useRef<number | null>(null);
   const accountScrollRef = useRef<HTMLDivElement | null>(null);
   const [accountFilterMenuOpen, setAccountFilterMenuOpen] = useState(false);
+  // 表头复选框需要直接落到 DOM 上设 indeterminate（半选），React 没有受控属性。
+  const selectAllCheckboxRef = useRef<HTMLInputElement | null>(null);
   const [refreshMenuOpen, setRefreshMenuOpen] = useState(false);
   const [modelTestMenuOpen, setModelTestMenuOpen] = useState(false);
   const [modelTestMenuCopied, setModelTestMenuCopied] = useState<
@@ -5413,7 +5415,7 @@ export function AccountsScreen({
 
   const refreshSharedServiceStatus = () => Promise.all([
     queryClient.invalidateQueries({ queryKey: ["web-server-status"] }),
-    queryClient.invalidateQueries({ queryKey: ["tailscale-status"] }),
+    queryClient.invalidateQueries({ queryKey: ["tailscale-funnel-status"] }),
     queryClient.invalidateQueries({ queryKey: ["route-proxy-https-status"] }),
   ]);
   const startProxyMutation = useMutation({
@@ -6042,29 +6044,37 @@ export function AccountsScreen({
     setSelectedAccountIds(new Set());
   };
 
-  const selectAllVisibleAccounts = () => {
-    setSelectedAccountIds((current) => {
-      const next = new Set(current);
-      for (const credential of credentials) {
-        next.add(credential.id);
-      }
-      return next;
-    });
-  };
+  // 本页账号是否已全部选中。表头复选框据此决定自身状态与动作：部分选中时
+  // 显示半选（indeterminate），点击要么补齐成全选、要么清空当前页。判断只能
+  // 落在账号数组本身，不能读同一渲染周期里还没更新的派生值。
+  const visibleAccountIds = credentials.map((credential) => credential.id);
+  const selectedVisibleCount = visibleAccountIds.filter((id) => selectedAccountIds.has(id)).length;
+  const allVisibleAccountsSelected =
+    visibleAccountIds.length > 0 && selectedVisibleCount === visibleAccountIds.length;
+  const someVisibleAccountsSelected = selectedVisibleCount > 0 && !allVisibleAccountsSelected;
 
-  const invertVisibleAccountSelection = () => {
+  const toggleAllVisibleAccounts = () => {
     setSelectedAccountIds((current) => {
       const next = new Set(current);
-      for (const credential of credentials) {
-        if (next.has(credential.id)) {
-          next.delete(credential.id);
-        } else {
-          next.add(credential.id);
+      if (visibleAccountIds.every((id) => next.has(id))) {
+        for (const id of visibleAccountIds) {
+          next.delete(id);
+        }
+      } else {
+        for (const id of visibleAccountIds) {
+          next.add(id);
         }
       }
       return next;
     });
   };
+
+  // 半选态不是 React 的受控属性，得直接落到 DOM 节点上，否则复选框只会显示
+  // 「全选/未选」两态，看不出「选中了一部分」。
+  useEffect(() => {
+    const node = selectAllCheckboxRef.current;
+    if (node) node.indeterminate = someVisibleAccountsSelected;
+  }, [someVisibleAccountsSelected]);
 
   const setSelectedAccountsStatus = () => {
     if (selectedAccountIds.size === 0 || !batchStatus || batchStatusMutation.isPending) {
@@ -6954,36 +6964,6 @@ export function AccountsScreen({
               </div>
             </div>
             {!vectorView ? <div aria-label="账号列表操作" role="group" className="flex shrink-0 items-center gap-1.5 justify-self-end border-l border-stone-300/80 pl-2 sm:gap-2 sm:pl-3">
-            <div
-              aria-label="账号展示模式"
-              className="flex h-7 shrink-0 items-center gap-0.5 rounded-lg border border-stone-300 bg-white p-0.5 shadow-sm"
-              role="group"
-            >
-              {accountLayoutOptions.map((option) => {
-                const active = accountLayout === option.key;
-                return (
-                  <button
-                    aria-label={option.label}
-                    aria-pressed={active}
-                    className={`grid h-6 w-6 place-items-center rounded-md motion-control ${
-                      active
-                        ? "bg-stone-900 text-white shadow-sm"
-                        : "text-stone-600 hover:bg-stone-100"
-                    }`}
-                    key={option.key}
-                    onClick={() => selectAccountLayout(option.key)}
-                    title={option.label}
-                    type="button"
-                  >
-                    {option.key === "card" ? (
-                      <LayoutGrid aria-hidden="true" className="h-3.5 w-3.5" />
-                    ) : (
-                      <List aria-hidden="true" className="h-3.5 w-3.5" />
-                    )}
-                  </button>
-                );
-              })}
-            </div>
             {selectedAccountIds.size > 0 && (
               <button
                 aria-label="导出选中账号"
@@ -7064,6 +7044,44 @@ export function AccountsScreen({
                     <RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />
                     刷新账号列表
                   </button>
+                  {/* 列表/卡片切换原本单摆在工具栏上，现在收进刷新下拉：少一个
+                      常驻控件，切换动作也更靠近它影响的那张列表。 */}
+                  <div
+                    aria-label="账号展示模式"
+                    className="my-1 border-t border-stone-100 pt-1"
+                    role="group"
+                  >
+                    <p className="px-2.5 py-1 text-[11px] font-semibold text-stone-400">
+                      展示模式
+                    </p>
+                    {accountLayoutOptions.map((option) => {
+                      const active = accountLayout === option.key;
+                      return (
+                        <button
+                          aria-checked={active}
+                          aria-label={option.label}
+                          className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12px] font-semibold motion-control ${
+                            active ? "bg-stone-100 text-stone-950" : "text-stone-700 hover:bg-stone-50"
+                          }`}
+                          key={option.key}
+                          onClick={() => {
+                            selectAccountLayout(option.key);
+                            setRefreshMenuOpen(false);
+                          }}
+                          role="menuitemradio"
+                          type="button"
+                        >
+                          {option.key === "card" ? (
+                            <LayoutGrid aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                          ) : (
+                            <List aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                          )}
+                          <span className="min-w-0 flex-1">{option.label}</span>
+                          {active ? <Check aria-hidden="true" className="h-3.5 w-3.5 shrink-0" /> : null}
+                        </button>
+                      );
+                    })}
+                  </div>
                   <div
                     aria-label="显示内容自定义"
                     className="my-1 border-t border-stone-100 pt-1"
@@ -7347,12 +7365,35 @@ export function AccountsScreen({
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
           >
-      <section className="flex min-h-min flex-1 flex-col border-t border-stone-300/80 bg-transparent pt-2">
-        <div className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-2 border-y border-stone-300/80 bg-stone-100/90 px-2 py-1.5 backdrop-blur-sm">
+      <section className="flex min-h-min flex-1 flex-col border-t border-stone-300/80 bg-transparent pt-1">
+        <div className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-2 border-y border-stone-300/80 bg-stone-100/90 px-2 pb-1.5 pt-0.5 backdrop-blur-sm">
           <div className="min-w-0 flex-1">
-            <div aria-label="账号筛选条件" className="flex min-w-0 items-center justify-end gap-2" role="group">
+            {/* 来源筛选（provider）在左，批量名/账号筛选框在右，两端对齐。 */}
+            <div aria-label="账号筛选条件" className="flex min-w-0 items-center justify-between gap-2" role="group">
+              {!mediaView && (
+                <AccountSourceFilterBar
+                  items={accountSourceFilters}
+                  icons={sourceFilterIcons}
+                  activeKey={activeSourceFilterKey}
+                  onSelect={selectSourceFilter}
+                />
+              )}
+              {mediaView && (
+                <select
+                  aria-label="账号来源筛选"
+                  className="h-8 shrink-0 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-semibold text-stone-700 motion-control"
+                  onChange={(event) => { setAccountProviderFilter(event.target.value); setAccountPage(1); }}
+                  value={accountProviderFilter}
+                >
+                  <option value="">全部来源</option>
+                  {apiAccountProviders.map((item) => (
+                    <option key={`api-${item.value}`} value={item.value}>{item.label}</option>
+                  ))}
+                </select>
+              )}
+              <div className="flex min-w-0 shrink-0 items-center gap-1.5">
               <span className="shrink-0 text-[12px] font-semibold text-stone-600 max-[599px]:hidden">筛选：</span>
-              <div className="relative w-72 min-w-0 shrink" ref={accountFilterMenuRef}>
+              <div className="relative w-72 min-w-0" ref={accountFilterMenuRef}>
                 <div
                   className="flex min-h-8 w-full min-w-0 flex-wrap items-center gap-1.5 rounded-md border border-stone-300 bg-white px-2 py-1"
                   onClick={() => setAccountFilterMenuOpen(true)}
@@ -7432,27 +7473,7 @@ export function AccountsScreen({
                     )}
                 </MotionMenu>
               </div>
-              {!mediaView && (
-                <AccountSourceFilterBar
-                  items={accountSourceFilters}
-                  icons={sourceFilterIcons}
-                  activeKey={activeSourceFilterKey}
-                  onSelect={selectSourceFilter}
-                />
-              )}
-              {mediaView && (
-                <select
-                  aria-label="账号来源筛选"
-                  className="h-8 shrink-0 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-semibold text-stone-700 motion-control"
-                  onChange={(event) => { setAccountProviderFilter(event.target.value); setAccountPage(1); }}
-                  value={accountProviderFilter}
-                >
-                  <option value="">全部来源</option>
-                  {apiAccountProviders.map((item) => (
-                    <option key={`api-${item.value}`} value={item.value}>{item.label}</option>
-                  ))}
-                </select>
-              )}
+              </div>
             </div>
           </div>
         </div>
@@ -7579,23 +7600,27 @@ export function AccountsScreen({
             </div>
           )}
           {!credentialsQuery.isLoading && credentials.length > 0 && (
-            <div className="flex flex-wrap items-center justify-end gap-2">
-              <button
+            // 表头：一个复选框同时承担全选/清空，半选表示只选中了部分账号。
+            // 只保留复选框，不再单摆「全选」「反选」两个按钮。列表布局下用跟行
+            // 一样的四列网格，第一列留出拖拽手柄的宽度，复选框才能落在各行的勾
+            // 选列正上方；卡片布局只留复选框贴左。
+            <div
+              className={
+                cardLayout
+                  ? "flex items-center px-1"
+                  : "mx-1 grid grid-cols-[auto_auto_minmax(0,1fr)_auto] items-center gap-2 px-3"
+              }
+              data-testid="account-list-header"
+            >
+              {!cardLayout && <span aria-hidden="true" className="w-7" />}
+              <input
                 aria-label="全选当前页账号"
-                className="rounded-lg border border-stone-300 bg-white px-2 py-1 text-[12px] font-semibold text-stone-700 motion-control hover:bg-stone-50"
-                onClick={selectAllVisibleAccounts}
-                type="button"
-              >
-                全选
-              </button>
-              <button
-                aria-label="反选当前页账号"
-                className="rounded-lg border border-stone-300 bg-white px-2 py-1 text-[12px] font-semibold text-stone-700 motion-control hover:bg-stone-50"
-                onClick={invertVisibleAccountSelection}
-                type="button"
-              >
-                反选
-              </button>
+                checked={allVisibleAccountsSelected}
+                className="h-4 w-4 shrink-0 rounded border-stone-300 text-amber-500 focus:ring-blue-400"
+                onChange={toggleAllVisibleAccounts}
+                ref={selectAllCheckboxRef}
+                type="checkbox"
+              />
             </div>
           )}
           <div

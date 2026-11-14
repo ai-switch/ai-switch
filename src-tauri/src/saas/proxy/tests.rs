@@ -28,7 +28,7 @@ fn test_app_state(pool: SqlitePool) -> AppState {
         close_to_tray: Default::default(),
         route_proxy: Default::default(),
         web_service: Default::default(),
-        tailscale: Default::default(),
+        tailscale_funnel: Default::default(),
         terminals: Default::default(),
         terminal_hub: Default::default(),
         event_broadcaster: Default::default(),

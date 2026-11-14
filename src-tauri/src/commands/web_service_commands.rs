@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
 use tauri::State;
-use tauri_plugin_opener::OpenerExt;
 
 use crate::app_state::AppState;
 use crate::error::ApiError;
 use crate::services::route_proxy_service::{RouteProxyService, RouteProxyStatus};
-use crate::services::tailscale_service::{TailscaleLogin, TailscaleStatus};
 use crate::services::web_service::{WebServerStatus, WebService, WebServiceConfig};
+use crate::web::tailscale_funnel::FunnelStatus;
 
 #[tauri::command]
 pub async fn get_web_service_config(
@@ -48,7 +47,7 @@ pub async fn start_web_server(state: State<'_, AppState>) -> Result<WebServerSta
 
 #[tauri::command]
 pub async fn stop_web_server(state: State<'_, AppState>) -> Result<WebServerStatus, ApiError> {
-    Ok(WebService::stop(state.inner()).await)
+    WebService::stop(state.inner()).await.map_err(ApiError::from)
 }
 
 #[tauri::command]
@@ -61,8 +60,10 @@ pub async fn set_route_access(
 }
 
 #[tauri::command]
-pub async fn get_tailscale_status(state: State<'_, AppState>) -> Result<TailscaleStatus, ApiError> {
-    WebService::tailscale_status(state.inner())
+pub async fn get_tailscale_funnel_status(
+    state: State<'_, AppState>,
+) -> Result<FunnelStatus, ApiError> {
+    WebService::get_tailscale_funnel_status(state.inner())
         .await
         .map_err(ApiError::from)
 }
@@ -77,42 +78,48 @@ pub async fn create_mobile_pairing(
         .map_err(ApiError::from)
 }
 
+// The authorization URL surfaces through polled `FunnelStatus.authUrl`; the
+// frontend opens it (deduped, once per flow), so no Rust-side opener here.
 #[tauri::command]
-pub async fn start_tailscale_login(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<TailscaleLogin, ApiError> {
-    let mut login = WebService::start_tailscale_login(state.inner())
+pub async fn start_tailscale_login(state: State<'_, AppState>) -> Result<FunnelStatus, ApiError> {
+    WebService::start_tailscale_login(Arc::new(state.inner().clone()))
         .await
-        .map_err(ApiError::from)?;
-
-    if let Some(login_url) = login
-        .login_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        if let Err(error) = app.opener().open_url(login_url, None::<&str>) {
-            login.message = format!("Sign-in page ready, but browser open failed: {error}");
-        }
-    }
-
-    Ok(login)
+        .map_err(ApiError::from)
 }
 
 #[tauri::command]
 pub async fn start_tailscale_with_auth_key(
     state: State<'_, AppState>,
     auth_key: String,
-) -> Result<TailscaleStatus, ApiError> {
-    WebService::start_tailscale_with_auth_key(state.inner(), auth_key)
+) -> Result<FunnelStatus, ApiError> {
+    WebService::start_tailscale_with_auth_key(Arc::new(state.inner().clone()), auth_key)
         .await
         .map_err(ApiError::from)
 }
 
 #[tauri::command]
-pub async fn disconnect_tailscale(state: State<'_, AppState>) -> Result<TailscaleStatus, ApiError> {
-    WebService::disconnect_tailscale(state.inner())
+pub async fn enable_tailscale_funnel(
+    state: State<'_, AppState>,
+) -> Result<FunnelStatus, ApiError> {
+    WebService::enable_tailscale_funnel(Arc::new(state.inner().clone()))
+        .await
+        .map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub async fn disable_tailscale_funnel(
+    state: State<'_, AppState>,
+) -> Result<FunnelStatus, ApiError> {
+    WebService::disable_tailscale_funnel(state.inner())
+        .await
+        .map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub async fn cancel_tailscale_funnel_operation(
+    state: State<'_, AppState>,
+) -> Result<FunnelStatus, ApiError> {
+    WebService::cancel_tailscale_funnel_operation(state.inner())
         .await
         .map_err(ApiError::from)
 }
