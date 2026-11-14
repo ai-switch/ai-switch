@@ -306,6 +306,7 @@ mod tests {
         ExportRouteCredentialsInput {
             selection_context: RouteCredentialSelectionContext {
                 group_id: None,
+                group_ids: None,
                 platform: platform.to_string(),
                 pool_scope: scope,
             },

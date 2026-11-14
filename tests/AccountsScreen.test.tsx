@@ -772,19 +772,21 @@ describe("AccountsScreen", () => {
     vi.mocked(refreshRouteCredentialsQuota).mockResolvedValue([]);
     poolStateByPlatform = new Map<string, string[]>([["codex", []]]);
     vi.mocked(getRoutePool).mockImplementation(async (platform, groupId) => {
-      const selectedGroupId = groupId ?? `${platform}-default`;
+      // 统一账号池（G-P8 P4a）：所有对接平台共用同一个 codex 池的分组；
+      // platform 只决定客户端对接身份，不再产生各平台独立分组。
+      const selectedGroupId = groupId ?? "codex-default";
       const poolIds = poolStateByPlatform.get(platform) ?? [];
       const accountIds =
-        selectedGroupId === `${platform}-out`
+        selectedGroupId === "codex-out"
           ? ["cred-official-1", "cred-api-1"].filter((id) => !poolIds.includes(id))
-          : selectedGroupId === `${platform}-archived`
+          : selectedGroupId === "codex-archived"
             ? []
             : poolIds;
       return {
       platform,
-      groups: routePoolGroupsFixture(platform),
+      groups: routePoolGroupsFixture("codex"),
       group_id: selectedGroupId,
-      active_group_id: `${platform}-default`,
+      active_group_id: "codex-default",
       account_ids: accountIds,
       model_mode: "aggregate",
       baseline_models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
@@ -798,13 +800,16 @@ describe("AccountsScreen", () => {
       const poolIds = poolStateByPlatform.get(input.platform) ?? [];
       const source = await vi.mocked(listRouteCredentials)(input.platform);
       const scoped = source.filter((credential) => {
-        if (input.group_id === `${input.platform}-out`) {
+        // 与统一池的 getRoutePool mock 一致：视图组是 codex 系统组，
+        // 与发起请求的对接平台无关。
+        const groupId = input.group_id ?? "";
+        if (groupId.endsWith("-out")) {
           return !credential.archived_at && !poolIds.includes(credential.id);
         }
-        if (input.group_id === `${input.platform}-archived`) {
+        if (groupId.endsWith("-archived")) {
           return Boolean(credential.archived_at);
         }
-        if (input.group_id) {
+        if (groupId) {
           return !credential.archived_at && poolIds.includes(credential.id);
         }
         return input.pool_scope === "in_pool"
@@ -2601,6 +2606,144 @@ describe("AccountsScreen", () => {
     renderScreen();
     await userEvent.click(await screen.findByRole("button", { name: "卡片模式" }));
     expect(screen.getByTestId("account-list")).toHaveClass("grid", "flex-1", "content-start");
+  });
+
+  describe("legacy claude backup group presentation", () => {
+    const claudeGroupsFixture = (): RoutePoolGroup[] => [
+      {
+        id: "claude-default",
+        platform: "codex",
+        name: "默认组",
+        sort_order: 3,
+        is_internal: false,
+        is_active: false,
+        account_count: 2,
+        created_at: "2026-09-08T00:00:00Z",
+        updated_at: "2026-09-08T00:00:00Z",
+      },
+      {
+        id: "claude-out",
+        platform: "codex",
+        name: "未入池",
+        sort_order: 4,
+        is_internal: false,
+        is_active: false,
+        account_count: 1,
+        created_at: "2026-09-08T00:00:00Z",
+        updated_at: "2026-09-08T00:00:00Z",
+      },
+      {
+        id: "claude-archived",
+        platform: "codex",
+        name: "已归档",
+        sort_order: 5,
+        is_internal: false,
+        is_active: false,
+        account_count: 0,
+        created_at: "2026-09-08T00:00:00Z",
+        updated_at: "2026-09-08T00:00:00Z",
+      },
+    ];
+
+    async function renderBackupScreen(groups: RoutePoolGroup[]) {
+      poolStateByPlatform = new Map<string, string[]>([
+        ["codex", ["cred-official-1", "cred-api-1"]],
+      ]);
+      vi.mocked(getRoutePool).mockImplementation(async (platform, groupId) => {
+        const selectedGroupId = groupId ?? "codex-default";
+        return {
+          platform,
+          groups,
+          group_id: selectedGroupId,
+          active_group_id: "codex-default",
+          account_ids: poolStateByPlatform.get(platform) ?? [],
+          model_mode: "aggregate",
+          baseline_models: [],
+          default_baseline_models: [],
+          stats: statsFixture({ member_count: 2 }),
+        };
+      });
+      vi.mocked(listRouteCredentials).mockResolvedValue(credentialsFixture);
+      renderScreen("codex", "in_pool");
+      await waitFor(() =>
+        expect(vi.mocked(getRoutePool).mock.calls.length).toBeGreaterThan(0),
+      );
+    }
+
+    it("collapses the legacy claude trio into one backup entry at the end of the group bar", async () => {
+      const groups = [...routePoolGroupsFixture("codex"), ...claudeGroupsFixture()];
+      await renderBackupScreen(groups);
+
+      const footer = screen.getByTestId("account-workspace-status-bar");
+      await within(footer).findByRole("button", { name: /Claude(?:备份分组| backup group)/ });
+      // codex views stay; the legacy claude trio must collapse into one entry.
+      expect(within(footer).getByRole("button", { name: "默认组，当前激活" })).toBeInTheDocument();
+      expect(within(footer).queryByRole("button", { name: /^默认组 · 2 个账号/ })).not.toBeInTheDocument();
+      expect(within(footer).queryByRole("button", { name: /^未入池 · 1 个账号/ })).not.toBeInTheDocument();
+      expect(within(footer).queryByRole("button", { name: /^已归档 · 0 个账号 · / })).not.toBeInTheDocument();
+      // 备份入口是底栏最后一个分组按钮（新建分组按钮之前）。
+      const groupButtons = within(footer).getAllByRole("button").filter(
+        (button) => button.closest('[aria-label="账号分组"]') !== null,
+      );
+      expect(groupButtons.at(-2)).toBe(await within(footer).findByRole("button", { name: /Claude(?:备份分组| backup group)/ }));
+    });
+
+    it("merges accounts from every surviving legacy group in one list", async () => {
+      const groups = [...routePoolGroupsFixture("codex"), ...claudeGroupsFixture()];
+      await renderBackupScreen(groups);
+      await userEvent.click(await screen.findByRole("button", { name: /Claude(?:备份分组| backup group)/ }));
+
+      // The merged view asks the backend once for the union of the surviving
+      // legacy groups — no sub-view tabs, no per-group stitching.
+      const pageRequest = vi.mocked(listRouteCredentialPage).mock.calls.at(-1)?.[0];
+      expect(pageRequest?.group_ids).toEqual(["claude-default", "claude-out", "claude-archived"]);
+      expect(pageRequest?.group_id).toBeNull();
+
+      // Both legacy accounts render in the same list.
+      expect(await screen.findByText("Team Account")).toBeInTheDocument();
+      expect(screen.getByText("API Account")).toBeInTheDocument();
+      expect(screen.queryByRole("radiogroup", { name: /Claude备份分组子视图/ })).not.toBeInTheDocument();
+
+      // The container exposes no context-menu edit and no move/delete path.
+      const footer = screen.getByTestId("account-workspace-status-bar");
+      await fireEvent.contextMenu(within(footer).getByRole("button", { name: /Claude(?:备份分组| backup group)/ }));
+      expect(screen.queryByRole("dialog", { name: "编辑分组" })).not.toBeInTheDocument();
+    });
+
+    it("labels legacy claude groups in the move menu without folding same-named custom groups", async () => {
+      const groups = [
+        ...routePoolGroupsFixture("codex"),
+        ...claudeGroupsFixture(),
+        {
+          id: "custom-uuid",
+          platform: "codex",
+          name: "默认组",
+          sort_order: 9,
+          is_internal: false,
+          is_active: false,
+          account_count: 0,
+          created_at: "2026-09-08T00:00:00Z",
+          updated_at: "2026-09-08T00:00:00Z",
+        },
+      ];
+      await renderBackupScreen(groups);
+      await screen.findByText("Team Account");
+      await userEvent.click(screen.getByLabelText("选择 Team Account"));
+      const moveSelect = screen.getByLabelText("移动到分组");
+      const backupOptions = within(moveSelect)
+        .getAllByRole("option")
+        .filter((option) => option.getAttribute("value")?.startsWith("claude-"));
+      expect(backupOptions.map((option) => option.getAttribute("value"))).toEqual([
+        "claude-default",
+        "claude-out",
+        "claude-archived",
+      ]);
+      const customOption = within(moveSelect)
+        .getAllByRole("option")
+        .find((option) => option.getAttribute("value") === "custom-uuid");
+      expect(customOption).toBeDefined();
+      expect(customOption).toHaveTextContent("默认组");
+    });
   });
 
   it("fills the account list area and centers the empty state when no accounts exist", async () => {

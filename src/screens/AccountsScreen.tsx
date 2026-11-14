@@ -232,6 +232,12 @@ import {
 } from "../lib/agentRouterGpt6";
 import { getTransport, isDesktop, isTauriRuntime } from "../lib/transport";
 import { fetchRouteProxyModels } from "../lib/routeProxyModels";
+import {
+  CLAUDE_BACKUP_GROUP_IDS,
+  presentRoutePoolGroups,
+  type ClaudeBackupContainer,
+} from "../lib/routePoolGroupPresentation";
+import { useI18n } from "../lib/i18n";
 import { AUDIO_CAPABILITY, AUDIO_DIALECTS } from "../lib/audioPlatforms";
 import { IMAGE_ACCOUNT_PRESETS, IMAGE_CAPABILITY, IMAGE_DIALECTS, imageDialectLabel, imageUpstreamEndpoint } from "../lib/imagePlatforms";
 import { EndpointRow } from "../components/accounts/EndpointRow";
@@ -3800,7 +3806,41 @@ export function AccountsScreen({
   const [cooldownEditError, setCooldownEditError] = useState<string | null>(null);
   const modelTestStorageKey = modelTestAccount?.id ?? poolModelTestKey(activePlatform);
   const routeTestModel = modelTestModels[modelTestStorageKey]?.model ?? "";
-  const accountGroupId = selectedGroupId;
+  // 备份分组是纯展示的合并视图：底栏用这个哨兵 ID 标记「正在看备份」，账号列表
+  // 走 group_ids 多组查询。它永远不会提交给除分页/导出外的任何写接口。
+  const CLAUDE_BACKUP_VIEW_ID = "claude-backup-view";
+  // Pool membership only. Statistics moved to UsageOverviewPanel, so this key
+  // no longer carries a period filter — which also means the account-data
+  // invalidations keyed on ["route-pool", platform] match it again.
+  const routePoolQuery = useQuery({
+    queryKey: ["route-pool", activePlatform, selectedGroupId],
+    queryFn: () => getRoutePool(activePlatform, selectedGroupId, null, null, null),
+    placeholderData: keepPreviousData,
+    // 备份视图的哨兵 ID 不是真实分组：不让它打进 get_route_pool。
+    enabled: selectedGroupId !== CLAUDE_BACKUP_VIEW_ID,
+  });
+  const activeRoutePoolQuery = useQuery({
+    queryKey: ["route-pool", activePlatform, "active"],
+    queryFn: () => getRoutePool(activePlatform),
+  });
+  // 统一账号池：分组永远是 codex 池的（无论对接平台是谁），加载完成前的
+  // 占位组也用 codex 身份，避免平台前缀占位组与真实组 ID 不一致。
+  // 备份视图跳过所选组查询时，分组清单回落到常驻的 active 查询。
+  const routePoolGroups =
+    routePoolQuery.data?.groups ??
+    (selectedGroupId === CLAUDE_BACKUP_VIEW_ID ? activeRoutePoolQuery.data?.groups : undefined) ??
+    fallbackRoutePoolGroups("codex");
+  const { t } = useI18n();
+  const groupPresentation = useMemo(() => presentRoutePoolGroups(routePoolGroups), [routePoolGroups]);
+  const backupContainer: ClaudeBackupContainer | undefined = groupPresentation.backup;
+  const backupActiveChildId =
+    selectedGroupId && backupContainer?.children.some((child) => child.id === selectedGroupId)
+      ? selectedGroupId
+      : null;
+  const backupViewActive = selectedGroupId === CLAUDE_BACKUP_VIEW_ID;
+  const backupChildren = backupViewActive ? backupContainer?.children ?? [] : [];
+
+  const accountGroupId = backupViewActive ? null : selectedGroupId;
   const accountScope: RouteCredentialPoolScope =
     accountGroupId == null
       ? "in_pool"
@@ -4035,6 +4075,7 @@ export function AccountsScreen({
       activePlatform,
       accountScope,
       accountGroupId,
+      backupViewActive ? backupChildren.map((child) => child.id).join(",") : null,
       accountPage,
       accountPageSize,
       accountFilters,
@@ -4050,7 +4091,10 @@ export function AccountsScreen({
           page_size: accountPageSize,
           filters: accountFilters,
           pool_scope: accountScope,
-          group_id: accountGroupId,
+          // 备份视图：一次查询合并所有遗留组账号；分页/总数由后端 SQL 保证。
+          ...(backupViewActive
+            ? { group_id: null, group_ids: backupChildren.map((child) => child.id) }
+            : { group_id: accountGroupId }),
           capability: capabilityFilter ?? null,
           kind: effectiveKindFilter,
           provider: accountProviderFilter || null,
@@ -4137,19 +4181,6 @@ export function AccountsScreen({
     setModelTestModels((current) => pruneModelTestModelMap(current, liveIds, activePlatform));
   }, [activePlatform, allCredentials]);
 
-  // Pool membership only. Statistics moved to UsageOverviewPanel, so this key
-  // no longer carries a period filter — which also means the account-data
-  // invalidations keyed on ["route-pool", platform] match it again.
-  const routePoolQuery = useQuery({
-    queryKey: ["route-pool", activePlatform, selectedGroupId],
-    queryFn: () => getRoutePool(activePlatform, selectedGroupId, null, null, null),
-    placeholderData: keepPreviousData,
-  });
-  const activeRoutePoolQuery = useQuery({
-    queryKey: ["route-pool", activePlatform, "active"],
-    queryFn: () => getRoutePool(activePlatform),
-  });
-  const routePoolGroups = routePoolQuery.data?.groups ?? fallbackRoutePoolGroups(activePlatform);
 
   useEffect(() => {
     setSelectedGroupId(null);
@@ -4729,7 +4760,13 @@ export function AccountsScreen({
       return;
     }
     setExportRequest({
-      selection_context: { platform: activePlatform, pool_scope: accountScope, group_id: accountGroupId },
+      selection_context: {
+        platform: activePlatform,
+        pool_scope: accountScope,
+        group_id: accountGroupId,
+        // 备份视图：导出按合并后的多组范围取账号。
+        ...(backupViewActive ? { group_ids: backupChildren.map((child) => child.id) } : {}),
+      },
       credential_ids: Array.from(selectedAccountIds),
     });
   };
@@ -4840,7 +4877,9 @@ export function AccountsScreen({
     if (accountIds.length > 0) {
       if (joinPoolOnCreate) {
         const targetGroupId =
-          selectedGroupId ?? routePoolQuery.data?.group_id ?? routePoolQuery.data?.active_group_id;
+          !backupViewActive
+            ? selectedGroupId ?? routePoolQuery.data?.group_id ?? routePoolQuery.data?.active_group_id
+            : routePoolQuery.data?.group_id ?? routePoolQuery.data?.active_group_id;
         if (targetGroupId) {
           try {
             await moveRoutePoolGroupMembers({
@@ -5054,7 +5093,11 @@ export function AccountsScreen({
     mutationFn: ({ platform, group_id, account_ids }: RoutePoolMutationInput) =>
       moveRoutePoolGroupMembers({
         platform,
-        group_id: group_id ?? selectedGroupId ?? routePoolQuery.data?.group_id ?? "",
+        group_id:
+          group_id ??
+          (backupViewActive ? null : selectedGroupId) ??
+          routePoolQuery.data?.group_id ??
+          "",
         account_ids,
       }),
     onMutate: () => {
@@ -5078,7 +5121,7 @@ export function AccountsScreen({
       void invalidateAccountData();
     },
     onError: (error) => {
-      if (routePoolQuery.data) {
+      if (routePoolQuery.data && !backupViewActive) {
         setDraftPoolIds(new Set(routePoolQuery.data.account_ids));
       }
       setRoutePoolFeedback({
@@ -6116,7 +6159,7 @@ export function AccountsScreen({
     getScrollContainer: () => accountScrollRef.current,
     onEdgeHold: scheduleAccountEdgePage,
     onEdgeLeave: cancelAccountEdgePage,
-    disabled: reorderMutation.isPending,
+    disabled: reorderMutation.isPending || backupViewActive,
     layout: cardLayout ? "grid" : "vertical",
   });
   const dragMovedIndex = accountDragSort.activeId
@@ -6404,6 +6447,9 @@ export function AccountsScreen({
     if (groupId === selectedGroupId && accountView === "in_pool") {
       return;
     }
+    accountDragSort.cancel();
+    setOpenActionMenuId(null);
+    setKeyboardDragId(null);
     setSelectedGroupId(groupId);
     setAccountView("in_pool");
   };
@@ -7465,11 +7511,21 @@ export function AccountsScreen({
                     value=""
                   >
                     <option value="">移动到分组</option>
-                    {routePoolGroups.map((group) => (
-                      <option key={group.id} value={group.id}>
-                        {group.name}
-                      </option>
-                    ))}
+                    {groupPresentation.items.map((item) =>
+                      item.kind === "group" ? (
+                        <option key={item.group.id} value={item.group.id}>
+                          {item.group.name}
+                        </option>
+                      ) : (
+                        <optgroup key={item.key} label={t("accounts.backupGroup.optgroup")}>
+                          {item.children.map((child) => (
+                            <option key={child.id} value={child.id}>
+                              {t("accounts.backupGroup.optgroup")} · {child.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ),
+                    )}
                   </select>
                   </>
                 <button
@@ -8419,7 +8475,40 @@ export function AccountsScreen({
           data-testid="account-workspace-status-bar"
         >
           <div aria-label="账号分组" className="flex h-7 max-w-[65%] shrink-0 items-center gap-0.5 overflow-x-auto rounded-lg border border-stone-200 bg-white p-0.5 shadow-sm" role="group">
-            {routePoolGroups.map((group) => {
+            {groupPresentation.items.map((item) => {
+              if (item.kind === "backup") {
+                const backupSelected =
+                  backupActiveChildId !== null &&
+                  item.children.some((child) => child.id === backupActiveChildId);
+                const containsActive = item.children.some((child) => child.is_active);
+                const backupLabel = `${t("accounts.backupGroup.label")}${containsActive ? ` · ${t("accounts.backupGroup.containsActive")}` : ""}`;
+                return (
+                  <button
+                    aria-label={backupLabel}
+                    aria-pressed={backupSelected}
+                    className={`relative inline-flex h-6 shrink-0 items-center justify-center rounded-md px-1.5 text-[11px] font-semibold motion-control ${backupSelected ? "bg-stone-900 text-white shadow-sm" : "text-stone-600 hover:bg-stone-100"}`}
+                    data-testid="claude-backup-group-button"
+                    key={item.key}
+                    onClick={() => selectRouteGroup(CLAUDE_BACKUP_VIEW_ID)}
+                    title={backupLabel}
+                    type="button"
+                  >
+                    <span className="whitespace-nowrap">{t("accounts.backupGroup.label")}</span>
+                    {containsActive ? (
+                      <span aria-hidden="true" className="ml-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400 ring-1 ring-amber-500/40" />
+                    ) : null}
+                    {backupSelected ? (
+                      <motion.span
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-x-1 bottom-0 h-0.5 rounded-full bg-amber-400"
+                        layoutId="account-view-active-indicator"
+                        transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                      />
+                    ) : null}
+                  </button>
+                );
+              }
+              const group = item.group;
               const selected = group.id === selectedGroupId;
               return (
                 <button

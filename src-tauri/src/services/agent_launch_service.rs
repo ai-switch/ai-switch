@@ -137,6 +137,7 @@ impl AgentLaunchService {
             &ids,
             &RouteCredentialSelectionContext {
                 group_id: None,
+                group_ids: None,
                 platform: platform.as_str().to_string(),
                 pool_scope: RouteCredentialPoolScope::InPool,
             },

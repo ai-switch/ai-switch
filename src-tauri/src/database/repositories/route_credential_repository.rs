@@ -176,8 +176,22 @@ fn push_pool_scope_predicate(
     builder: &mut QueryBuilder<Sqlite>,
     scope: RouteCredentialPoolScope,
     group_id: Option<&str>,
+    group_ids: &[String],
 ) {
     builder.push(" AND ");
+    if !group_ids.is_empty() {
+        // 只读多组合并视图：成员属于任一分组即命中。一条 EXISTS 同时喂给
+        // 计数、条目与翻页边界，分页语义与单组查询一致。
+        builder.push(
+            "EXISTS (SELECT 1 FROM route_pool_members rpm WHERE rpm.route_credential_id = rc.id AND rpm.group_id IN (",
+        );
+        let mut separated = builder.separated(", ");
+        for id in group_ids {
+            separated.push_bind(id.clone());
+        }
+        separated.push_unseparated("))");
+        return;
+    }
     if let Some(group_id) = group_id {
         builder.push("EXISTS (SELECT 1 FROM route_pool_members rpm WHERE rpm.route_credential_id = rc.id AND rpm.group_id = ");
         builder.push_bind(group_id.to_string());
@@ -231,7 +245,7 @@ async fn boundary_id(
     let mut query =
         QueryBuilder::<Sqlite>::new("SELECT rc.id FROM route_credentials rc WHERE rc.platform = ");
     query.push_bind(&request.platform);
-    push_pool_scope_predicate(&mut query, request.pool_scope, request.group_id.as_deref());
+    push_pool_scope_predicate(&mut query, request.pool_scope, request.group_id.as_deref(), request.group_ids.as_deref().unwrap_or(&[]));
     push_filter_predicate(&mut query, &request.filters);
     push_capability_predicate(&mut query, request.capability.as_deref());
     push_source_predicate(&mut query, request.kind.as_deref(), request.provider.as_deref());
@@ -966,6 +980,7 @@ impl RouteCredentialRepository {
             &mut query,
             selection.pool_scope,
             selection.group_id.as_deref(),
+            selection.group_ids.as_deref().unwrap_or(&[]),
         );
         query.push(" ORDER BY rc.sort_order ASC, rc.created_at DESC, rc.id ASC");
 
@@ -1158,6 +1173,14 @@ impl RouteCredentialRepository {
                 details: None,
                 recoverable: true,
             })?;
+        request
+            .validate_group_selection()
+            .map_err(|message| AppError::Validation {
+                code: "validation.route_credential_group_selection",
+                message,
+                details: None,
+                recoverable: true,
+            })?;
         let requested_page = request.normalized_page();
 
         let mut count_query = QueryBuilder::<Sqlite>::new(
@@ -1168,6 +1191,7 @@ impl RouteCredentialRepository {
             &mut count_query,
             request.pool_scope,
             request.group_id.as_deref(),
+            request.group_ids.as_deref().unwrap_or(&[]),
         );
         push_filter_predicate(&mut count_query, &request.filters);
         push_capability_predicate(&mut count_query, request.capability.as_deref());
@@ -1199,6 +1223,7 @@ impl RouteCredentialRepository {
             &mut item_query,
             request.pool_scope,
             request.group_id.as_deref(),
+            request.group_ids.as_deref().unwrap_or(&[]),
         );
         push_filter_predicate(&mut item_query, &request.filters);
         push_capability_predicate(&mut item_query, request.capability.as_deref());
@@ -1304,7 +1329,7 @@ impl RouteCredentialRepository {
         let all_ids: Vec<String> = rows.iter().map(|(id, _, _, _)| id.clone()).collect();
         let mut filtered_query = QueryBuilder::<Sqlite>::new("SELECT rc.id FROM route_credentials rc WHERE rc.platform = ");
         filtered_query.push_bind(&input.platform);
-        push_pool_scope_predicate(&mut filtered_query, input.pool_scope, input.group_id.as_deref());
+        push_pool_scope_predicate(&mut filtered_query, input.pool_scope, input.group_id.as_deref(), &[]);
         push_filter_predicate(&mut filtered_query, &input.filters);
         push_capability_predicate(&mut filtered_query, input.capability.as_deref());
         push_source_predicate(&mut filtered_query, input.kind.as_deref(), input.provider.as_deref());
@@ -1415,6 +1440,7 @@ impl RouteCredentialRepository {
                 filters: input.filters,
                 pool_scope: input.pool_scope,
                 group_id: input.group_id,
+                group_ids: None,
                 capability: input.capability,
                 provider: input.provider,
                 kind: input.kind,
@@ -2572,6 +2598,7 @@ mod tests {
             filters: Vec::new(),
             pool_scope,
             group_id: None,
+                group_ids: None,
             capability: None,
             provider: None,
             kind: None,
@@ -2590,7 +2617,8 @@ mod tests {
         assert_eq!(serde_json::to_value(&page.items[0]).unwrap()["provider"], "openrouter");
         let listed = RouteCredentialRepository::list_by_platform(&pool, "codex").await.unwrap();
         assert_eq!(serde_json::to_value(&listed[0]).unwrap()["provider"], "openrouter");
-        let selected = RouteCredentialRepository::list_by_ids(&pool, &[created.id.clone()], &RouteCredentialSelectionContext { platform: "codex".to_string(), group_id: None, pool_scope: RouteCredentialPoolScope::OutOfPool }).await.unwrap();
+        let selected = RouteCredentialRepository::list_by_ids(&pool, &[created.id.clone()], &RouteCredentialSelectionContext { platform: "codex".to_string(), group_id: None,
+                group_ids: None, pool_scope: RouteCredentialPoolScope::OutOfPool }).await.unwrap();
         assert_eq!(serde_json::to_value(&selected[0]).unwrap()["provider"], "openrouter");
     }
 
@@ -2677,6 +2705,7 @@ mod tests {
                 filters: Vec::new(),
                 pool_scope: RouteCredentialPoolScope::InPool,
                 group_id: Some(alternate_group),
+                group_ids: None,
                 capability: None,
             provider: None,
             kind: None,
@@ -2687,6 +2716,109 @@ mod tests {
 
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id, alternate_account);
+    }
+
+    /// 备份视图一次看多个分组的账号：成员属于**任一**列出分组即命中，
+    /// 计数与条目共用同一谓词，去重（一个账号同时在两个组里只出现一次）。
+    #[tokio::test]
+    async fn page_unions_accounts_across_multiple_groups() {
+        let pool = crate::database::create_memory_pool().await.unwrap();
+        crate::database::run_migrations(&pool).await.unwrap();
+        let first = create_api_credential(&pool, "codex", "First").await.id;
+        let second = create_api_credential(&pool, "codex", "Second").await.id;
+        let outside = create_api_credential(&pool, "codex", "Outside").await.id;
+        let legacy_one =
+            crate::database::repositories::route_pool_repository::RoutePoolRepository::create_group(
+                &pool, "codex", "Claude备份一", false,
+            )
+            .await
+            .unwrap();
+        let legacy_two =
+            crate::database::repositories::route_pool_repository::RoutePoolRepository::create_group(
+                &pool, "codex", "Claude备份二", false,
+            )
+            .await
+            .unwrap();
+        let active_group = crate::database::repositories::route_pool_repository::RoutePoolRepository::active_group_id(&pool, "codex")
+            .await
+            .unwrap()
+            .unwrap();
+        crate::database::repositories::route_pool_repository::RoutePoolRepository::replace_group_members(
+            &pool, "codex", &active_group, &[outside.clone()],
+        )
+        .await
+        .unwrap();
+        crate::database::repositories::route_pool_repository::RoutePoolRepository::replace_group_members(
+            &pool, "codex", &legacy_one, &[first.clone()],
+        )
+        .await
+        .unwrap();
+        crate::database::repositories::route_pool_repository::RoutePoolRepository::replace_group_members(
+            &pool, "codex", &legacy_two, &[first.clone(), second.clone()],
+        )
+        .await
+        .unwrap();
+
+        let page = RouteCredentialRepository::page(
+            &pool,
+            RouteCredentialPageRequest {
+                platform: "codex".to_string(),
+                page: 1,
+                page_size: 20,
+                filters: Vec::new(),
+                pool_scope: RouteCredentialPoolScope::InPool,
+                group_id: None,
+                group_ids: Some(vec![legacy_one.clone(), legacy_two.clone()]),
+                capability: None,
+                provider: None,
+                kind: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // First belongs to both groups and must appear exactly once; the pool's
+        // own member (outside) must not leak into the merged view.
+        assert_eq!(page.total, 2);
+        let ids: Vec<&str> = page.items.iter().map(|item| item.id.as_str()).collect();
+        assert!(ids.contains(&first.as_str()));
+        assert!(ids.contains(&second.as_str()));
+        assert!(!ids.contains(&outside.as_str()));
+        assert_eq!(ids.len(), ids.iter().collect::<std::collections::HashSet<_>>().len(), "no duplicates across groups");
+    }
+
+    #[tokio::test]
+    async fn page_rejects_multi_group_request_with_single_group_or_empty_list() {
+        let pool = crate::database::create_memory_pool().await.unwrap();
+        crate::database::run_migrations(&pool).await.unwrap();
+        let base = |group_ids: Option<Vec<String>>, group_id: Option<String>| RouteCredentialPageRequest {
+            platform: "codex".to_string(),
+            page: 1,
+            page_size: 20,
+            filters: Vec::new(),
+            pool_scope: RouteCredentialPoolScope::InPool,
+            group_id,
+            group_ids,
+            capability: None,
+            provider: None,
+            kind: None,
+        };
+
+        let both = RouteCredentialRepository::page(
+            &pool,
+            base(Some(vec!["codex-default".to_string()]), Some("codex-default".to_string())),
+        )
+        .await
+        .expect_err("group_ids and group_id are mutually exclusive");
+        assert!(matches!(both, AppError::Validation { .. }));
+
+        let empty = RouteCredentialRepository::page(
+            &pool,
+            base(Some(Vec::new()), None),
+        )
+        .await
+        .expect_err("an explicit empty group list must not fall back to the whole pool");
+        assert!(matches!(empty, AppError::Validation { .. }));
     }
 
     /// 按能力过滤只留**声明了**该能力的账号。
@@ -2728,6 +2860,7 @@ mod tests {
                 filters: Vec::new(),
                 pool_scope: RouteCredentialPoolScope::OutOfPool,
                 group_id: None,
+                group_ids: None,
                 capability: Some("image.generate".to_string()),
                 provider: None,
                 kind: None,
@@ -2772,6 +2905,7 @@ mod tests {
                 filters: Vec::new(),
                 pool_scope: RouteCredentialPoolScope::OutOfPool,
                 group_id: None,
+                group_ids: None,
                 capability: None,
             provider: None,
             kind: None,
@@ -3409,6 +3543,7 @@ mod tests {
             &all_ids,
             &RouteCredentialSelectionContext {
                 group_id: None,
+                group_ids: None,
                 platform: "codex".to_string(),
                 pool_scope: RouteCredentialPoolScope::InPool,
             },
@@ -3435,6 +3570,7 @@ mod tests {
             &all_ids,
             &RouteCredentialSelectionContext {
                 group_id: None,
+                group_ids: None,
                 platform: "codex".to_string(),
                 pool_scope: RouteCredentialPoolScope::OutOfPool,
             },
@@ -3465,6 +3601,7 @@ mod tests {
             &[],
             &RouteCredentialSelectionContext {
                 group_id: None,
+                group_ids: None,
                 platform: "codex".to_string(),
                 pool_scope: RouteCredentialPoolScope::InPool,
             },

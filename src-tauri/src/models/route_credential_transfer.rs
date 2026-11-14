@@ -17,6 +17,9 @@ fn default_true() -> bool {
 pub struct RouteCredentialSelectionContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    /// 只读多组合并视图（备份分组）：导出时覆盖任一列出分组的成员。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_ids: Option<Vec<String>>,
     pub platform: String,
     pub pool_scope: RouteCredentialPoolScope,
 }
@@ -415,6 +418,7 @@ mod tests {
         assert_exact_json(
             &RouteCredentialSelectionContext {
                 group_id: None,
+                group_ids: None,
                 platform: "grok".to_string(),
                 pool_scope: RouteCredentialPoolScope::OutOfPool,
             },

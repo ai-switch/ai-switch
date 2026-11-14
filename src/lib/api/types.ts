@@ -453,6 +453,8 @@ export type TransferPlatformChoice = {
 
 export type RouteCredentialSelectionContext = {
   group_id?: string | null;
+  /** 只读多组合并视图（备份分组）：导出覆盖任一列出分组的成员。 */
+  group_ids?: string[] | null;
   platform: string;
   pool_scope: RouteCredentialPoolScope;
 };
@@ -638,6 +640,8 @@ export type RouteCredentialPageRequest = {
   filters: string[];
   pool_scope: RouteCredentialPoolScope;
   group_id?: string | null;
+  /** 只读多组合并视图（备份分组）：成员属于任一列出分组即命中；与 group_id 互斥。 */
+  group_ids?: string[] | null;
   /// 只列声明了该能力的账号（`model_mappings[*].capabilities`）。codex 页的
   /// 「生图」段靠它把生图账号从池里筛出来；不传则与从前完全一致。
   capability?: string | null;

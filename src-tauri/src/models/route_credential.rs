@@ -594,6 +594,11 @@ pub struct RouteCredentialPageRequest {
     pub pool_scope: RouteCredentialPoolScope,
     #[serde(default)]
     pub group_id: Option<String>,
+    /// 只读多组合并视图：成员属于**任一**列出分组即命中。备份分组用——
+    /// 与 `group_id` 互斥，显式空列表会被拒绝（不能静默退回全池）。
+    /// 计数、条目与翻页边界共用同一谓词，分页语义与单组查询完全一致。
+    #[serde(default)]
+    pub group_ids: Option<Vec<String>>,
     /// 只保留「声明了该能力」的账号 —— 即 `config_json.model_mappings[*].capabilities`
     /// 里含它（大小写不敏感）。codex 页的模态分段器用它把**生图账号**从池里筛出来。
     ///
@@ -615,6 +620,17 @@ impl RouteCredentialPageRequest {
 
     pub fn normalized_page(&self) -> i64 {
         self.page.max(1)
+    }
+
+    /// 多组与单组互斥；显式空列表不是「全池」，直接拒绝。
+    pub fn validate_group_selection(&self) -> Result<(), String> {
+        if self.group_ids.is_some() && self.group_id.is_some() {
+            return Err("group_ids and group_id are mutually exclusive".to_string());
+        }
+        if self.group_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+            return Err("group_ids must not be empty".to_string());
+        }
+        Ok(())
     }
 }
 
