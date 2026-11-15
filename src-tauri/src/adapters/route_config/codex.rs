@@ -293,6 +293,9 @@ fn apply_provider_auth(provider: &mut Table, input: &RouteConfigInput) {
         provider.remove("experimental_bearer_token");
         provider.remove("env_key");
         set_platform_header(provider, Some("codex"));
+        // Keep ChatGPT Authorization for Codex login features while separately
+        // authenticating the local gateway with its own key.
+        provider["http_headers"]["x-api-key"] = value(&input.route_proxy_key);
     } else {
         provider["name"] = value("AI Switch Route Proxy");
         provider.remove("requires_openai_auth");
@@ -332,6 +335,7 @@ fn set_platform_header(provider: &mut Table, platform: Option<&str>) {
         None => {
             let emptied = if let Some(headers) = provider["http_headers"].as_table_like_mut() {
                 headers.remove(HEADER);
+                headers.remove("x-api-key");
                 headers.is_empty()
             } else {
                 false
@@ -375,6 +379,15 @@ mod tests {
     const CHATGPT_AUTH: &str = r#"{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"access_token":"oauth-access","refresh_token":"rt","id_token":"id","account_id":"acct"}}"#;
     /// What an `apikey`-mode file looks like: no ChatGPT tokens to fall back on.
     const APIKEY_AUTH: &str = r#"{"OPENAI_API_KEY":"sk-upstream","auth_mode":"apikey"}"#;
+
+    #[test]
+    fn preserved_chatgpt_login_still_authenticates_with_a_local_key() {
+        let document = render(None, true);
+        assert_eq!(
+            document["model_providers"]["ai-switch"]["http_headers"]["x-api-key"].as_str(),
+            Some(input(true).route_proxy_key.as_str())
+        );
+    }
 
     fn input(keep_login_state: bool) -> RouteConfigInput {
         RouteConfigInput {
@@ -502,7 +515,7 @@ mod tests {
         );
         assert!(
             provider.get("http_headers").is_none(),
-            "the platform header was ours; it must not linger once the key is back"
+            "the platform header and the local key were ours; they must not linger once the key is back"
         );
     }
 

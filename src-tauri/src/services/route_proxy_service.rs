@@ -5876,6 +5876,16 @@ async fn lookup_platform_by_proxy_key(
 }
 
 pub fn extract_inbound_api_key(headers: &HeaderMap, query: Option<&str>) -> Option<String> {
+    // Codex may keep its ChatGPT login in Authorization while authenticating
+    // this local listener with x-api-key. An explicit nonempty key is decisive:
+    // if it is invalid, callers must reject it rather than try another identity.
+    if let Some(key) = headers.get("x-api-key").and_then(|value| value.to_str().ok()) {
+        let key = key.trim();
+        if !key.is_empty() {
+            return Some(key.to_string());
+        }
+    }
+
     if let Some(value) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -5892,7 +5902,7 @@ pub fn extract_inbound_api_key(headers: &HeaderMap, query: Option<&str>) -> Opti
         }
     }
 
-    for name in ["x-api-key", "api-key", "x-goog-api-key"] {
+    for name in ["api-key", "x-goog-api-key"] {
         if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
@@ -18039,6 +18049,26 @@ data: [DONE]\n\n";
             extract_inbound_api_key(&HeaderMap::new(), Some("key=sk-ai-switch-query&x=1"))
                 .as_deref(),
             Some("sk-ai-switch-query")
+        );
+    }
+
+    #[test]
+    fn x_api_key_is_decisive_over_a_chatgpt_bearer_token() {
+        // The keep-login Codex provider carries the ChatGPT token in
+        // Authorization and the local proxy key in x-api-key. The key is what
+        // identifies this instance, so it must win even when both are present.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer chatgpt-oauth-access"),
+        );
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_static("sk-ai-switch-local"),
+        );
+        assert_eq!(
+            extract_inbound_api_key(&headers, None).as_deref(),
+            Some("sk-ai-switch-local")
         );
     }
 
