@@ -6388,10 +6388,10 @@ describe("AccountsScreen", () => {
     expect(screen.getByLabelText("网络连接 / 超时的额外重试次数")).toHaveValue(null);
 
     await userEvent.click(
-      screen.getByRole("button", { name: "一键设为容量类重试100次、间隔5000毫秒" }),
+      screen.getByRole("button", { name: "一键设为容量类重试100次、间隔500毫秒" }),
     );
     expect(screen.getByLabelText("容量不足 / 高负载的额外重试次数")).toHaveValue(100);
-    expect(screen.getByLabelText("容量类重试间隔（毫秒）")).toHaveValue(5000);
+    expect(screen.getByLabelText("容量类重试间隔（毫秒）")).toHaveValue(500);
 
     await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
     await waitFor(() => expect(updateRouteCredential).toHaveBeenCalled());
@@ -6404,7 +6404,7 @@ describe("AccountsScreen", () => {
         capacity: 100,
         semantic: null,
       },
-      capacity_retry_interval_ms: 5000,
+      capacity_retry_interval_ms: 500,
       max_retry_elapsed_seconds: 0,
     });
   });

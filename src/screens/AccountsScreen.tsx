@@ -10245,19 +10245,19 @@ export function AccountsScreen({
                           {row.key === "capacity" ? (
                             <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-amber-200 pt-2">
                               <button
-                                aria-label="一键设为容量类重试100次、间隔5000毫秒"
+                                aria-label="一键设为容量类重试100次、间隔500毫秒"
                                 className="rounded-md border border-amber-300 bg-white px-2 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100"
                                 onClick={() => {
                                   setEditClassRetryLimits((previous) => ({
                                     ...previous,
                                     capacity: "100",
                                   }));
-                                  setEditCapacityRetryIntervalMs("5000");
+                                  setEditCapacityRetryIntervalMs("500");
                                   setEditFailurePolicyError(null);
                                 }}
                                 type="button"
                               >
-                                一键设为 100 次 / 5 秒
+                                一键设为 100 次 / 500 毫秒
                               </button>
                               <label className="flex items-center gap-1.5 text-[11px] font-medium text-stone-700">
                                 容量类重试间隔（毫秒）
