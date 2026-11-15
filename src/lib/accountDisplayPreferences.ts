@@ -1,4 +1,5 @@
 export type AccountDisplayPreferences = {
+  showProvider: boolean;
   showAccountType: boolean;
   showModelList: boolean;
   showRequestStats: boolean;
@@ -10,6 +11,10 @@ export type AccountDisplayPreferences = {
 export const ACCOUNT_DISPLAY_PREFERENCES_STORAGE_KEY = "ai-switch.account-display-preferences";
 
 export const DEFAULT_ACCOUNT_DISPLAY_PREFERENCES: AccountDisplayPreferences = {
+  // Off by default: a pool row's own name already says where it comes from, and
+  // the violet source tag made every row read like a provider catalog. Turn it
+  // on from the refresh dropdown when the source matters at a glance.
+  showProvider: false,
   showAccountType: false,
   showModelList: true,
   showRequestStats: true,
@@ -37,6 +42,7 @@ function readPreferences(value: unknown): AccountDisplayPreferences {
       ? (record[key] as boolean)
       : DEFAULT_ACCOUNT_DISPLAY_PREFERENCES[key];
   return {
+    showProvider: read("showProvider"),
     showAccountType: read("showAccountType"),
     showModelList: read("showModelList"),
     showRequestStats: read("showRequestStats"),

@@ -7092,6 +7092,7 @@ export function AccountsScreen({
                     </p>
                     {(
                       [
+                        ["showProvider", "账号来源"],
                         ["showAccountType", "账号类型（API/Token）"],
                         ["showModelList", "模型列表"],
                         ["showRequestStats", "请求统计"],
@@ -8096,12 +8097,14 @@ export function AccountsScreen({
                             {credential.kind === "api" ? "API" : "Token"}
                           </span>
                         ) : null}
-                        <span
-                          className="rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-semibold text-violet-800"
-                          title={`账号来源：${accountProviderLabel(accountProvider(credential))}`}
-                        >
-                          {accountProviderLabel(accountProvider(credential))}
-                        </span>
+                        {accountDisplayPreferences.showProvider ? (
+                          <span
+                            className="rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-semibold text-violet-800"
+                            title={`账号来源：${accountProviderLabel(accountProvider(credential))}`}
+                          >
+                            {accountProviderLabel(accountProvider(credential))}
+                          </span>
+                        ) : null}
                         {credential.archived_at && (
                           <span className="rounded-full bg-stone-200 px-2 py-0.5 text-[11px] font-semibold text-stone-700">
                             已归档

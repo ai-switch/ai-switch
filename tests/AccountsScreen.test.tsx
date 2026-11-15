@@ -1265,10 +1265,13 @@ describe("AccountsScreen", () => {
     const modelList = screen.getByLabelText("显示模型列表");
     const requestStats = screen.getByLabelText("显示请求统计");
     const relayGroupName = screen.getByLabelText("显示API Key 用户组名");
+    const provider = screen.getByLabelText("显示账号来源");
     expect(accountType).not.toBeChecked();
     expect(modelList).toBeChecked();
     expect(requestStats).toBeChecked();
     expect(relayGroupName).not.toBeChecked();
+    // 账号来源徽标默认隐藏，需要时才在刷新下拉里打开。
+    expect(provider).not.toBeChecked();
 
     await userEvent.click(accountType);
     await userEvent.click(modelList);
@@ -1280,6 +1283,7 @@ describe("AccountsScreen", () => {
     expect(screen.queryByText("暂无请求")).not.toBeInTheDocument();
     expect(window.localStorage.getItem(ACCOUNT_DISPLAY_PREFERENCES_STORAGE_KEY)).toBe(
       JSON.stringify({
+        showProvider: false,
         showAccountType: true,
         showModelList: false,
         showRequestStats: false,
@@ -4136,6 +4140,11 @@ describe("AccountsScreen", () => {
         filter_options: [],
       };
     });
+    // 账号来源徽标默认不显示；开启「显示内容自定义 → 账号来源」后才出现。
+    window.localStorage.setItem(
+      "ai-switch.account-display-preferences",
+      JSON.stringify({ showProvider: true }),
+    );
     renderScreen();
     expect(await screen.findByTitle("账号来源：Claude")).toBeInTheDocument();
     expect(screen.getByTitle("账号来源：OpenRouter")).toBeInTheDocument();

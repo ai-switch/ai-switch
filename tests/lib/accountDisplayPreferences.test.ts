@@ -10,6 +10,7 @@ describe("account display preferences", () => {
   it("uses the requested defaults when no preference has been saved", () => {
     const storage = { getItem: () => null };
     expect(loadAccountDisplayPreferences(storage)).toEqual({
+      showProvider: false,
       showAccountType: false,
       showModelList: true,
       showRequestStats: true,
@@ -18,6 +19,7 @@ describe("account display preferences", () => {
       showRelayGroupName: false,
     });
     expect(DEFAULT_ACCOUNT_DISPLAY_PREFERENCES).toEqual({
+      showProvider: false,
       showAccountType: false,
       showModelList: true,
       showRequestStats: true,
@@ -34,6 +36,7 @@ describe("account display preferences", () => {
         : null,
     };
     expect(loadAccountDisplayPreferences(storage)).toEqual({
+      showProvider: false,
       showAccountType: true,
       showModelList: false,
       showRequestStats: true,
@@ -49,10 +52,11 @@ describe("account display preferences", () => {
   it("persists the selected display preferences", () => {
     let saved = "";
     saveAccountDisplayPreferences(
-      { showAccountType: true, showModelList: false, showRequestStats: false, showLatencyStats: true, showResetTime: true, showRelayGroupName: true },
+      { showProvider: true, showAccountType: true, showModelList: false, showRequestStats: false, showLatencyStats: true, showResetTime: true, showRelayGroupName: true },
       { setItem: (_key, value) => { saved = value; } },
     );
     expect(JSON.parse(saved)).toEqual({
+      showProvider: true,
       showAccountType: true,
       showModelList: false,
       showRequestStats: false,
@@ -68,6 +72,7 @@ describe("account display preferences", () => {
     // so each field has to fall back on its own.
     const storage = { getItem: () => '{"showAccountType":true,"showModelList":false}' };
     expect(loadAccountDisplayPreferences(storage)).toEqual({
+      showProvider: false,
       showAccountType: true,
       showModelList: false,
       // Only the absent ones fall back.
@@ -85,6 +90,7 @@ describe("account display preferences", () => {
     };
     const loaded = loadAccountDisplayPreferences(storage);
     expect(loaded).toEqual({
+      showProvider: false,
       showAccountType: false,
       showModelList: false,
       showRequestStats: true,
