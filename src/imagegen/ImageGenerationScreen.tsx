@@ -20,6 +20,8 @@ export function ImageGenerationScreen() {
   const [assetUrls, setAssetUrls] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [newSessionTitle, setNewSessionTitle] = useState("");
 
   const refreshSessions = async () => {
     const next = await imagegenApi.listSessions();
@@ -78,14 +80,16 @@ export function ImageGenerationScreen() {
   }, [conversation]);
 
   const createSession = async () => {
-    const title = window.prompt(t("imagegen.sessionName"), t("imagegen.newSessionTitle"))?.trim();
-    if (!title) return;
+    const title = newSessionTitle.trim();
+    if (!title || busy) return;
     setBusy(true);
     setError(null);
     try {
       const created = await imagegenApi.createSession({ title, platform });
       await refreshSessions();
       setActiveId(created.id);
+      setNewSessionOpen(false);
+      setNewSessionTitle("");
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -149,8 +153,54 @@ export function ImageGenerationScreen() {
             <p>{t("imagegen.kicker")}</p>
             <h1>{t("imagegen.title")}</h1>
           </div>
-          <button onClick={() => void createSession()} title={t("imagegen.newSession")} type="button"><Plus /></button>
+          <button
+            aria-label={t("imagegen.newSession")}
+            disabled={busy}
+            onClick={() => {
+              setNewSessionTitle(t("imagegen.newSessionTitle"));
+              setNewSessionOpen(true);
+            }}
+            title={t("imagegen.newSession")}
+            type="button"
+          ><Plus /></button>
         </div>
+        {newSessionOpen && (
+          <form
+            aria-label={t("imagegen.newSession")}
+            className="mt-3 space-y-2 rounded-xl border border-stone-200 bg-white p-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void createSession();
+            }}
+          >
+            <label className="grid gap-1 text-xs font-semibold text-stone-600">
+              <span>{t("imagegen.sessionName")}</span>
+              <input
+                autoFocus
+                className="min-w-0 rounded-lg border border-stone-200 bg-white px-2 py-1.5 text-sm text-stone-900"
+                disabled={busy}
+                onChange={(event) => setNewSessionTitle(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape" && !busy) setNewSessionOpen(false);
+                }}
+                value={newSessionTitle}
+              />
+            </label>
+            <div className="flex flex-wrap justify-end gap-2 text-xs">
+              <button
+                className="rounded-lg border border-stone-200 px-2 py-1.5 text-stone-700"
+                disabled={busy}
+                onClick={() => setNewSessionOpen(false)}
+                type="button"
+              >{t("imagegen.cancel")}</button>
+              <button
+                className="rounded-lg bg-stone-900 px-2 py-1.5 font-semibold text-white disabled:opacity-40"
+                disabled={busy || !newSessionTitle.trim()}
+                type="submit"
+              >{t("imagegen.newSession")}</button>
+            </div>
+          </form>
+        )}
         <label className="imagegen-field">
           <span>{t("imagegen.platform")}</span>
           <select disabled={Boolean(conversation)} onChange={(event) => setPlatform(event.target.value as "codex" | "gemini")} value={platform}>
