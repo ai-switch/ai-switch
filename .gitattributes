@@ -18,3 +18,12 @@
 # Keep diffs readable and stop merge attempts on generated lockfiles.
 pnpm-lock.yaml -diff linguist-generated
 Cargo.lock -diff linguist-generated
+
+# Bundled client artwork is hashed byte-for-byte by tests/AgentLogo.test.tsx
+# against the recorded upstream SHA256s. A Windows runner checks out with
+# core.autocrlf=true, which rewrites unattributed SVGs to CRLF and breaks those
+# hashes, so the artwork needs an explicit attribute. Scoped to public/brand on
+# purpose: the other tracked SVGs (docs favicons) are committed with CRLF and
+# shipped as-is.
+public/brand/*.svg text eol=lf
+*.png binary
