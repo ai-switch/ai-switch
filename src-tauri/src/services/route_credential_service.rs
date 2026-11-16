@@ -69,6 +69,21 @@ impl RouteCredentialService {
         Ok(apply_activity_counts(credentials, activity))
     }
 
+    /// 只读脱敏摘要：可视化目录用，绝不包含凭据载荷或配置。
+    pub async fn list_summaries(
+        pool: &SqlitePool,
+        activity: &RouteCredentialActivityRegistry,
+        platform: &str,
+    ) -> Result<Vec<crate::models::route_credential::RouteProxyAccountSummary>, AppError> {
+        let platform = PlatformId::parse(platform)?;
+        PlatformCapabilityService::require(platform, PlatformOperation::RouteCredentials)?;
+        let mut accounts = RouteCredentialRepository::list_summaries(pool).await?;
+        for account in &mut accounts {
+            account.active_request_count = activity.snapshot(&account.id);
+        }
+        Ok(accounts)
+    }
+
     pub async fn get(pool: &SqlitePool, id: String) -> Result<RouteCredential, AppError> {
         let credential = RouteCredentialRepository::get(pool, &id).await?;
         Ok(attach_model_states(pool, vec![credential])

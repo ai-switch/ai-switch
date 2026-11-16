@@ -6,6 +6,7 @@ import {
   Info,
   Images,
   Menu,
+  Network,
   PlugZap,
   Settings2,
   Sparkles,
@@ -484,6 +485,13 @@ export function AppLayout({
                   />
                 )}
                 <NavButton
+                  active={activeScreen === "Traffic"}
+                  collapsed={sidebarContentCollapsed}
+                  icon={Network}
+                  label={t("nav.traffic")}
+                  onClick={() => handleNavigate("Traffic")}
+                />
+                <NavButton
                   active={activeScreen === "MCP"}
                   collapsed={sidebarContentCollapsed}
                   icon={PlugZap}
@@ -534,7 +542,8 @@ export function AppLayout({
 
         <section
           className={`col-start-2 box-border h-full min-h-0 min-w-0 bg-stone-100 ${
-            accountWorkspaceActive ? "overflow-hidden p-0" : "overflow-y-auto p-2 sm:p-3"
+            accountWorkspaceActive || activeScreen === "ClientSetup" ? "overflow-hidden p-0"
+              : activeScreen === "Traffic" ? "overflow-hidden p-2 sm:p-3" : "overflow-y-auto p-2 sm:p-3"
           }`}
         >
           {children}

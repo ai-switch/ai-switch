@@ -1,6 +1,7 @@
 use super::{
     base_url_root, base_url_with_v1, client_home, existing_text, generated_invalid,
-    invalid_existing_config, ClientModel, RouteConfigInput, TargetAdapter, TargetInspection,
+    invalid_existing_config, route_proxy_key_matches, ClientModel, RouteConfigInput, TargetAdapter,
+    TargetInspection,
 };
 use crate::{error::AppError, models::platform::PlatformId};
 use serde_json::{json, Map, Value};
@@ -131,12 +132,12 @@ impl ZCodeAdapter {
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .unwrap_or_default();
-            let key_matches = !api_key.is_empty()
-                && (api_key == input.route_proxy_key
-                    || input
-                        .route_proxy_key_aliases
-                        .iter()
-                        .any(|alias| alias == api_key));
+            let key_matches = route_proxy_key_matches(
+                api_key,
+                self.client_key(),
+                &input.route_proxy_key,
+                &input.route_proxy_key_aliases,
+            );
             (base_matches && key_matches)
                 .then(|| Self::provider_id_of(rule).map(str::to_string))
                 .flatten()
@@ -912,6 +913,57 @@ mod tests {
         assert_eq!(rules.len(), 1, "{json}");
         assert_eq!(rules[0]["providerId"], "hand-made");
         assert_eq!(rules[0]["config"]["access"]["apiKey"], CODEX_KEY);
+    }
+
+    #[test]
+    fn adoption_recognizes_suffixed_and_legacy_keys() {
+        // Three shapes are all the same user's entry: the raw base key written
+        // before client suffixes existed, a rotated raw alias, and the suffixed
+        // alias this client wrote before the last rotation.
+        for configured in [
+            CODEX_KEY,
+            "sk-ai-switch-previous",
+            "sk-ai-switch-previous.zcode",
+        ] {
+            let existing = format!(
+                r#"{{
+  "schemaVersion": 1,
+  "config": {{
+    "providerConfigRules": {{
+      "providerRules": [{{
+        "providerId": "hand-made",
+        "providerName": "Ai-Switch",
+        "config": {{
+          "group": "standard-personal",
+          "access": {{ "type": "api-key", "apiKey": "{configured}" }},
+          "api": {{ "type": "openai-responses", "baseUrl": "http://127.0.0.1:19527/v1" }}
+        }}
+      }}]
+    }},
+    "modelConfigRules": {{ "providerModelRules": [], "manualProviderModelRules": [] }}
+  }}
+}}"#
+            );
+
+            let mut with_alias = input(&["gpt-5.6-sol"]);
+            with_alias.route_proxy_key = format!("{CODEX_KEY}.zcode");
+            with_alias.route_proxy_key_aliases = vec!["sk-ai-switch-previous".to_string()];
+            let bytes = codex_adapter()
+                .render(
+                    Path::new("provider_config.json"),
+                    Some(existing.as_bytes()),
+                    &with_alias,
+                )
+                .expect("render");
+            let json: Value = serde_json::from_slice(&bytes).expect("valid JSON");
+            let rules = json["config"]["providerConfigRules"]["providerRules"]
+                .as_array()
+                .expect("provider rules");
+
+            assert_eq!(rules.len(), 1, "no duplicate for {configured}: {json}");
+            assert_eq!(rules[0]["providerId"], "hand-made");
+            assert_eq!(rules[0]["config"]["access"]["apiKey"], format!("{CODEX_KEY}.zcode"));
+        }
     }
 
     #[test]

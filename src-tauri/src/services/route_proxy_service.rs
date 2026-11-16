@@ -1,5 +1,9 @@
 use crate::database::repositories::route_credential_model_repository::RouteCredentialModelRepository;
+use crate::adapters::route_config::TargetAdapterRegistry;
 use crate::database::repositories::route_credential_repository::RouteCredentialRepository;
+use crate::services::route_proxy_active_attempts::{
+    ActiveProxyAttemptGuard, RouteProxyActiveAttemptRegistry,
+};
 use crate::services::route_credential_service::RouteCredentialService;
 use crate::database::repositories::route_pool_repository::RoutePoolRepository;
 use crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository;
@@ -461,8 +465,11 @@ pub enum RouteProxyTransport {
 pub struct RouteProxyRuntimeState {
     inner: Arc<Mutex<RouteProxyInner>>,
     activity: RouteCredentialActivityRegistry,
+    active_attempts: RouteProxyActiveAttemptRegistry,
     live_log: RouteProxyLiveLog,
     request_body_limit_mib: Arc<AtomicU32>,
+    #[cfg(test)]
+    test_listen_port: u16,
 }
 
 impl Default for RouteProxyRuntimeState {
@@ -470,10 +477,13 @@ impl Default for RouteProxyRuntimeState {
         Self {
             inner: Arc::default(),
             activity: RouteCredentialActivityRegistry::default(),
+            active_attempts: RouteProxyActiveAttemptRegistry::default(),
             live_log: RouteProxyLiveLog::default(),
             request_body_limit_mib: Arc::new(AtomicU32::new(
                 DEFAULT_ROUTE_PROXY_REQUEST_BODY_LIMIT_MIB,
             )),
+            #[cfg(test)]
+            test_listen_port: 0,
         }
     }
 }
@@ -569,6 +579,7 @@ pub(crate) struct ProxyAppState {
     model_match_mode: ModelMatchMode,
     key_cache: Arc<Mutex<RouteProxyKeyCache>>,
     activity: RouteCredentialActivityRegistry,
+    active_attempts: RouteProxyActiveAttemptRegistry,
     live_log: RouteProxyLiveLog,
     codex_history: CodexReasoningCache,
     /// Deadlines for upstream requests. A field rather than a constant read at
@@ -620,6 +631,14 @@ impl ProxyAppState {
     pub(crate) fn with_model_match_mode(mut self, mode: ModelMatchMode) -> Self {
         self.model_match_mode = mode;
         self
+    }
+
+    pub(crate) fn active_attempts_enabled(&self, path: &str) -> bool {
+        self.access_scope.is_none()
+            && !is_openai_images_path(path)
+            && !is_audio_speech_path(path)
+            && !is_audio_transcribe_path(path)
+            && !is_video_generation_path(path)
     }
 
     fn default_upstream_timeouts() -> OutboundTimeouts {
@@ -678,6 +697,10 @@ impl RouteProxyRuntimeState {
     pub fn live_log(&self) -> RouteProxyLiveLog {
         self.live_log.clone()
     }
+
+    pub fn active_attempts(&self) -> RouteProxyActiveAttemptRegistry {
+        self.active_attempts.clone()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -734,6 +757,7 @@ pub(crate) fn build_proxy_state(
         model_match_mode: ModelMatchMode::ClientFacing,
         key_cache: Arc::new(Mutex::new(RouteProxyKeyCache::default())),
         activity: runtime.activity.clone(),
+        active_attempts: runtime.active_attempts.clone(),
         live_log: runtime.live_log.clone(),
         codex_history: CodexReasoningCache::default(),
         upstream_timeouts: ProxyAppState::default_upstream_timeouts(),
@@ -894,7 +918,10 @@ impl RouteProxyService {
             .fallback(any(proxy_handler))
             .with_state(app_state);
 
+        #[cfg(not(test))]
         let http_listener = bind_route_proxy_listener().await?;
+        #[cfg(test)]
+        let http_listener = bind_route_proxy_listener_from(state.test_listen_port).await?;
         let http = spawn_listener(http_listener, app.clone(), None).await?;
         let http_port = http.port;
         inner.http = Some(http);
@@ -912,7 +939,11 @@ impl RouteProxyService {
                 certificate_pem_path.as_path(),
                 private_key_pem_path.as_path(),
             ));
-            match bind_route_proxy_listener_from(http_port.saturating_add(1)).await {
+            #[cfg(not(test))]
+            let https_port = http_port.saturating_add(1);
+            #[cfg(test)]
+            let https_port = if state.test_listen_port == 0 { 0 } else { http_port.saturating_add(1) };
+            match bind_route_proxy_listener_from(https_port).await {
                 Ok(https_listener) => match spawn_listener(https_listener, app, tls).await {
                     Ok(https) => inner.https = Some(https),
                     Err(error) => inner.https_error = Some(describe_https_failure(&error)),
@@ -932,6 +963,7 @@ impl RouteProxyService {
         if inner.shared.is_some() && inner.http.is_none() && inner.https.is_none() {
             return Ok(inner.status());
         }
+        state.active_attempts.clear();
         inner.shutdown_all().await;
         Ok(inner.status())
     }
@@ -1155,15 +1187,40 @@ pub(crate) async fn forward_request(
     uri: axum::http::Uri,
     body: Body,
 ) -> Result<Response, String> {
+    let generation = state.active_attempts.generation();
+    let request = forward_request_in_generation(state, method, headers, uri, body, generation);
+    if state.access_scope.is_some() {
+        return request.await;
+    }
+    // Listener shutdown alone does not cancel Axum's accepted connections.
+    // Race the whole request, including retry backoff, against its service era.
+    tokio::select! {
+        biased;
+        _ = state.active_attempts.cancelled(generation) => Err("route_proxy.stopped: AI service stopped".to_string()),
+        response = request => response,
+    }
+}
+
+async fn forward_request_in_generation(
+    state: &ProxyAppState,
+    method: Method,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Body,
+    generation: u64,
+) -> Result<Response, String> {
     let pool = &state.pool;
     let path = uri.path().to_string();
     let query = uri.query().map(|value| value.to_string());
     let trace_id = route_proxy_trace_id(&headers);
     let inbound_key = extract_inbound_api_key(&headers, query.as_deref());
-    let platform_id = resolve_platform(state, &headers, inbound_key.as_deref())
+    let (platform_id, client_key) = resolve_platform_with_client(state, inbound_key.as_deref())
         .await
         .map_err(format_app_error)?;
     let platform = platform_id.as_str().to_string();
+    let tracked = state.active_attempts_enabled(&path)
+        && !trace_id.as_deref().is_some_and(|trace| state.active_attempts.is_internal_trace(trace));
+    let activity_request_id = tracked.then(|| uuid::Uuid::new_v4().to_string());
     let routing_rule =
         PlatformCapabilityService::require(platform_id, PlatformOperation::GenericApiRouting)
             .map_err(format_app_error)?;
@@ -1465,6 +1522,7 @@ pub(crate) async fn forward_request(
                     let metadata = route_proxy_request_metadata(
                         attempt,
                         &platform,
+                        client_key,
                         selected,
                         &path,
                         None,
@@ -1488,6 +1546,7 @@ pub(crate) async fn forward_request(
                     emit_live_log(
                         state,
                         &platform,
+                        client_key,
                         selected,
                         attempt,
                         &path,
@@ -1532,6 +1591,7 @@ pub(crate) async fn forward_request(
                     emit_live_log(
                         state,
                         &platform,
+                        client_key,
                         &credential,
                         attempt,
                         &path,
@@ -1609,6 +1669,7 @@ pub(crate) async fn forward_request(
                 let metadata = route_proxy_request_metadata(
                     attempt,
                     &platform,
+                    client_key,
                     &credential,
                     &path,
                     None,
@@ -1632,6 +1693,7 @@ pub(crate) async fn forward_request(
                 emit_live_log(
                     state,
                     &platform,
+                    client_key,
                     &credential,
                     attempt,
                     &path,
@@ -1693,6 +1755,12 @@ pub(crate) async fn forward_request(
             &parse_json_object(&credential.config_json, "config").unwrap_or(Value::Null),
         )
         .unwrap_or(outbound_body);
+        let mut active_attempt = activity_request_id.as_deref().and_then(|request_id| {
+            state.active_attempts.begin_in_generation(generation, request_id, &platform, client_key, &credential.id, &credential.display_name)
+        });
+        if activity_request_id.is_some() && active_attempt.is_none() {
+            return Err("route_proxy.stopped: AI service stopped".to_string());
+        }
         let upstream = client
             .request(request_method.clone(), &target_url)
             .headers(map_to_reqwest_headers(&request_headers))
@@ -1703,6 +1771,7 @@ pub(crate) async fn forward_request(
         let upstream = match upstream {
             Ok(response) => response,
             Err(error) => {
+                drop(active_attempt.take());
                 let error_message = describe_upstream_transport_error(
                     &credential.display_name,
                     "upstream request failed",
@@ -1719,6 +1788,7 @@ pub(crate) async fn forward_request(
                 let metadata = route_proxy_request_metadata(
                     attempt,
                     &platform,
+                    client_key,
                     &credential,
                     &path,
                     Some(&target_url),
@@ -1742,6 +1812,7 @@ pub(crate) async fn forward_request(
                 emit_live_log(
                     state,
                     &platform,
+                    client_key,
                     &credential,
                     attempt,
                     &path,
@@ -1792,6 +1863,7 @@ pub(crate) async fn forward_request(
             let (raw, output) = match prime_audio_stream(&mut stream, &mut adapter).await {
                 Ok(primed) => primed,
                 Err((message, raw)) => {
+                    drop(active_attempt.take());
                     let error_message = format!("{}: {message}", credential.display_name);
                     let failure_class = class_for_body(status, Some(&raw));
                     let terminal = handle_stream_prime_failure(
@@ -1802,6 +1874,7 @@ pub(crate) async fn forward_request(
                         &error_message,
                         StreamPrimeContext {
                             attempt,
+                            client_key,
                             path: &path,
                             target_url: &target_url,
                             status,
@@ -1847,6 +1920,10 @@ pub(crate) async fn forward_request(
                 state: state.clone(),
                 credential: credential.clone(),
                 platform: platform.clone(),
+                client_key: client_key.map(str::to_string),
+                activity_request_id: activity_request_id.clone(),
+                activity_generation: generation,
+                active_attempt: active_attempt.take(),
                 attempt,
                 path: path.clone(),
                 target_url: target_url.clone(),
@@ -2115,6 +2192,7 @@ pub(crate) async fn forward_request(
                 }
             };
             if let Some((error_message, retry_delay)) = prime_failure {
+                drop(active_attempt.take());
                 let failure_class = class_for_body(
                     status,
                     (!primed.is_empty()).then_some(primed.as_slice()),
@@ -2145,6 +2223,7 @@ pub(crate) async fn forward_request(
                     &error_message,
                     StreamPrimeContext {
                         attempt,
+                        client_key,
                         path: &path,
                         target_url: &target_url,
                         status,
@@ -2210,6 +2289,10 @@ pub(crate) async fn forward_request(
                 state: state.clone(),
                 credential: credential.clone(),
                 platform: platform.clone(),
+                client_key: client_key.map(str::to_string),
+                activity_request_id: activity_request_id.clone(),
+                activity_generation: generation,
+                active_attempt: active_attempt.take(),
                 attempt,
                 path: path.clone(),
                 target_url: target_url.clone(),
@@ -2248,7 +2331,9 @@ pub(crate) async fn forward_request(
             return proxy_upstream_stream_response(status, upstream_headers, body);
         }
 
-        let mut response_bytes = match upstream.bytes().await {
+        let buffered_body = upstream.bytes().await;
+        drop(active_attempt.take());
+        let mut response_bytes = match buffered_body {
             Ok(bytes) => bytes,
             Err(error) => {
                 let error_message = describe_upstream_transport_error(
@@ -2267,6 +2352,7 @@ pub(crate) async fn forward_request(
                 let metadata = route_proxy_request_metadata(
                     attempt,
                     &platform,
+                    client_key,
                     &credential,
                     &path,
                     Some(&target_url),
@@ -2290,6 +2376,7 @@ pub(crate) async fn forward_request(
                 emit_live_log(
                     state,
                     &platform,
+                    client_key,
                     &credential,
                     attempt,
                     &path,
@@ -2389,6 +2476,7 @@ pub(crate) async fn forward_request(
                     let metadata = route_proxy_request_metadata(
                         attempt,
                         &platform,
+                        client_key,
                         &credential,
                         &path,
                         Some(&target_url),
@@ -2415,6 +2503,7 @@ pub(crate) async fn forward_request(
                     emit_live_log(
                         state,
                         &platform,
+                        client_key,
                         &credential,
                         attempt,
                         &path,
@@ -2495,6 +2584,7 @@ pub(crate) async fn forward_request(
         let metadata = route_proxy_request_metadata(
             attempt,
             &platform,
+            client_key,
             &credential,
             &path,
             Some(&target_url),
@@ -2530,6 +2620,7 @@ pub(crate) async fn forward_request(
         emit_live_log(
             state,
             &platform,
+            client_key,
             &credential,
             attempt,
             &path,
@@ -3066,6 +3157,10 @@ fn route_proxy_request_metadata(
     // Which try this row records: 1 for the first send, 2 for the first retry.
     attempt: usize,
     platform: &str,
+    // Which client the request came from, when its key named one. `None` is a
+    // config written before client suffixes existed; it is recorded as
+    // `unknown` rather than guessed from a spoofable user agent.
+    client_key: Option<&str>,
     credential: &SelectedCredential,
     entry_path: &str,
     target_url: Option<&str>,
@@ -3080,6 +3175,7 @@ fn route_proxy_request_metadata(
 ) -> String {
     let mut metadata = serde_json::json!({
         "platform": platform,
+        "client_key": client_key.unwrap_or("unknown"),
         "route_credential_id": credential.id,
         "route_credential_name": credential.display_name,
         "entry_path": entry_path,
@@ -3170,6 +3266,7 @@ fn route_proxy_response_body_metadata(
 fn emit_live_log(
     state: &ProxyAppState,
     platform: &str,
+    client_key: Option<&str>,
     credential: &SelectedCredential,
     attempt: usize,
     path: &str,
@@ -3205,6 +3302,7 @@ fn emit_live_log(
         id: uuid::Uuid::new_v4().to_string(),
         trace_id: trace_id.map(str::to_string),
         platform: platform.to_string(),
+        client_key: client_key.map(str::to_string),
         credential_id: credential.id.clone(),
         credential_name: credential.display_name.clone(),
         attempt,
@@ -3846,6 +3944,7 @@ fn should_stream_upstream_response(
 /// The per-request values a streamed response still has to report once it ends.
 struct StreamPrimeContext<'a> {
     attempt: usize,
+    client_key: Option<&'a str>,
     path: &'a str,
     target_url: &'a str,
     status: StatusCode,
@@ -3898,6 +3997,7 @@ async fn handle_stream_prime_failure(
     let metadata = route_proxy_request_metadata(
         context.attempt,
         platform,
+        context.client_key,
         credential,
         context.path,
         Some(context.target_url),
@@ -3921,6 +4021,7 @@ async fn handle_stream_prime_failure(
     emit_live_log(
         state,
         platform,
+        context.client_key,
         credential,
         context.attempt,
         context.path,
@@ -4037,6 +4138,12 @@ struct StreamCompletion {
     state: ProxyAppState,
     credential: SelectedCredential,
     platform: String,
+    /// Which client the request came from, when its key named one. Carried to
+    /// the final record so a completion reports the same origin as its attempt.
+    client_key: Option<String>,
+    activity_request_id: Option<String>,
+    activity_generation: u64,
+    active_attempt: Option<ActiveProxyAttemptGuard>,
     attempt: usize,
     path: String,
     target_url: String,
@@ -4102,6 +4209,10 @@ impl StreamCompletion {
             state,
             credential,
             platform,
+            client_key,
+            activity_request_id: _,
+            activity_generation,
+            active_attempt,
             attempt,
             path,
             target_url,
@@ -4122,6 +4233,7 @@ impl StreamCompletion {
             upstream_query: _upstream_query,
             _activity_lease,
         } = self;
+        drop(active_attempt);
 
         let preview = observer.preview().to_vec();
         let outcome = observer.finish();
@@ -4149,6 +4261,7 @@ impl StreamCompletion {
         let metadata = route_proxy_request_metadata(
             attempt,
             &platform,
+            client_key.as_deref(),
             &credential,
             &path,
             Some(&target_url),
@@ -4173,6 +4286,7 @@ impl StreamCompletion {
         emit_live_log(
             &state,
             &platform,
+            client_key.as_deref(),
             &credential,
             attempt,
             &path,
@@ -4196,7 +4310,9 @@ impl StreamCompletion {
             Some(outcome.reasoning_deltas),
         );
 
-        if quota_failure_recorded {
+        if quota_failure_recorded
+            || (state.access_scope.is_none() && state.active_attempts.generation() != activity_generation)
+        {
             return;
         }
 
@@ -4832,7 +4948,7 @@ impl StreamPump {
         }
 
         let mut rejected = HashSet::new();
-        let (credential, status, stream, resume_bridge, resume_custom_tools) = 'candidates: loop {
+        let (credential, status, stream, resume_bridge, resume_custom_tools, active_attempt) = 'candidates: loop {
             let Some(credential) = pick_continuation_credential(
                 &state,
                 &platform,
@@ -4905,6 +5021,16 @@ impl StreamPump {
                 &parse_json_object(&credential.config_json, "config").unwrap_or(Value::Null),
             )
             .unwrap_or(built.body);
+            let active_attempt = self.guard.completion.as_ref().and_then(|completion| {
+                completion.activity_request_id.as_deref().and_then(|request_id| {
+                    state.active_attempts.begin_in_generation(completion.activity_generation, request_id, &platform, completion.client_key.as_deref(), &credential.id, &credential.display_name)
+                })
+            });
+            if self.guard.completion.as_ref().is_some_and(|completion| completion.activity_request_id.is_some())
+                && active_attempt.is_none()
+            {
+                return false;
+            }
             let response = match client
                 .post(&built.target_url)
                 .headers(map_to_reqwest_headers(&request_headers))
@@ -4977,6 +5103,7 @@ impl StreamPump {
                 stream,
                 resume_bridge,
                 resume_custom_tools,
+                active_attempt,
             );
         };
         eprintln!(
@@ -5057,6 +5184,9 @@ impl StreamPump {
             }
         };
         self.stream = stream;
+        if let Some(completion) = self.guard.completion.as_mut() {
+            completion.active_attempt = active_attempt;
+        }
         self.current_credential = credential;
         self.current_status = status;
         self.quota_error_handled = false;
@@ -5129,6 +5259,30 @@ struct AudioStreamPump {
     done: bool,
 }
 
+fn cancel_stream_on_gateway_stop(
+    stream: impl futures_util::Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send + 'static,
+    cancellation: Option<(RouteProxyActiveAttemptRegistry, u64)>,
+) -> impl futures_util::Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send + 'static {
+    let cancelled = async move {
+        match cancellation {
+            Some((registry, generation)) => registry.cancelled(generation).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    futures_util::stream::unfold(
+        (Box::pin(stream), Box::pin(cancelled)),
+        |(mut stream, mut cancelled)| async move {
+            tokio::select! {
+                biased;
+                _ = &mut cancelled => None,
+                next = futures_util::StreamExt::next(&mut stream) => {
+                    next.map(|chunk| (chunk, (stream, cancelled)))
+                }
+            }
+        },
+    )
+}
+
 /// 音频不能续写或合成文本收尾：只转帧，完整 done + EOF 才记成功。
 fn observed_audio_stream(
     first_chunk: axum::body::Bytes,
@@ -5136,6 +5290,9 @@ fn observed_audio_stream(
     adapter: crate::audiogen::stream::SpeechStreamAdapter,
     completion: StreamCompletion,
 ) -> impl futures_util::Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send + 'static {
+    let cancellation = completion.state.access_scope.is_none().then(|| {
+        (completion.state.active_attempts.clone(), completion.activity_generation)
+    });
     let pump = AudioStreamPump {
         stream,
         adapter,
@@ -5145,7 +5302,7 @@ fn observed_audio_stream(
         },
         done: false,
     };
-    futures_util::stream::unfold(pump, |mut pump| async move {
+    let observed = futures_util::stream::unfold(pump, |mut pump| async move {
         loop {
             if let Some(chunk) = pump.first_chunk.take() {
                 return Some((Ok(chunk), pump));
@@ -5202,7 +5359,8 @@ fn observed_audio_stream(
                 }
             }
         }
-    })
+    });
+    cancel_stream_on_gateway_stop(observed, cancellation)
 }
 
 fn observed_upstream_stream(
@@ -5219,6 +5377,9 @@ fn observed_upstream_stream(
         futures_util::stream::once(async move { Ok(first_chunk) }),
         rest,
     ));
+    let cancellation = completion.state.access_scope.is_none().then(|| {
+        (completion.state.active_attempts.clone(), completion.activity_generation)
+    });
     let salvage_enabled = RouteCredentialFailurePolicy::from_config_json(
         &completion.credential.config_json,
     )
@@ -5244,7 +5405,7 @@ fn observed_upstream_stream(
         salvaged: false,
         salvage_enabled,
     };
-    futures_util::stream::unfold(pump, |mut pump| async move {
+    let observed = futures_util::stream::unfold(pump, |mut pump| async move {
         loop {
             // 换流前攒下的字节（断流 item 的合成 done）先发出去，保证它排在
             // 续写流的第一条事件之前。
@@ -5339,6 +5500,9 @@ fn observed_upstream_stream(
                 }
                 ended => {
                     if !pump.upstream_ended {
+                        if let Some(completion) = pump.guard.completion.as_mut() {
+                            drop(completion.active_attempt.take());
+                        }
                         pump.upstream_error = ended
                             .and_then(Result::err)
                             .map(|error| format!("upstream stream failed: {error}"));
@@ -5465,7 +5629,8 @@ fn observed_upstream_stream(
                 }
             }
         }
-    })
+    });
+    cancel_stream_on_gateway_stop(observed, cancellation)
 }
 
 /// 选一个账号来做这一轮续写。
@@ -5515,6 +5680,7 @@ impl Drop for StreamCompletionGuard {
         let Some(mut completion) = self.completion.take() else {
             return;
         };
+        drop(completion.active_attempt.take());
         if completion.audio_raw_preview.is_some() {
             completion.observer.mark_stream_failed();
         }
@@ -5801,33 +5967,59 @@ fn route_proxy_error_status(message: &str) -> StatusCode {
     }
 }
 
+/// Split a written client key into its platform base and client identity.
+///
+/// A client config carries `<base>.<client_key>`; the stored platform key is
+/// always the unsuffixed base. Only a tail that names a registered client is
+/// treated as a suffix — an unknown or empty tail stays part of the key so it
+/// cannot be silently stripped into a valid key.
+pub(crate) fn split_route_proxy_client_key(key: &str) -> (&str, Option<&'static str>) {
+    let Some((head, tail)) = key.rsplit_once('.') else {
+        return (key, None);
+    };
+    if head.is_empty() {
+        return (key, None);
+    }
+    // `client_keys` returns `&'static str` borrowed from each adapter's own
+    // string literal, so a match maps straight back to the static lifetime.
+    let registry = TargetAdapterRegistry::new();
+    for client_key in registry.client_keys() {
+        if client_key == tail {
+            return (head, Some(client_key));
+        }
+    }
+    (key, None)
+}
+
 async fn resolve_platform(
     state: &ProxyAppState,
     headers: &HeaderMap,
     inbound_key: Option<&str>,
 ) -> Result<PlatformId, AppError> {
+    resolve_platform_with_client(state, inbound_key).await.map(|(platform, _)| platform)
+}
+
+/// Platform plus the client identity a suffixed key carries, if any.
+async fn resolve_platform_with_client(
+    state: &ProxyAppState,
+    inbound_key: Option<&str>,
+) -> Result<(PlatformId, Option<&'static str>), AppError> {
     if let Some(scope) = &state.access_scope {
-        return Ok(scope.platform);
+        return Ok((scope.platform, None));
     }
     // Preferred: stable per-platform local proxy key written into CLI configs.
     // Keys are cached in memory and refreshed at most every 30s.
     if let Some(key) = inbound_key {
-        if let Some(platform) = lookup_platform_by_proxy_key(state, key).await? {
-            return PlatformId::parse(&platform);
+        let (base, client) = split_route_proxy_client_key(key);
+        if let Some(platform) = lookup_platform_by_proxy_key(state, base).await? {
+            return Ok((PlatformId::parse(&platform)?, client));
         }
-    }
-
-    if let Some(value) = headers
-        .get(ROUTE_PROXY_PLATFORM_HEADER)
-        .and_then(|value| value.to_str().ok())
-    {
-        return PlatformId::parse(value);
     }
 
     if inbound_key.is_some() {
         return Err(AppError::Validation {
             code: "route_proxy.key_invalid",
-            message: "route_proxy.key_invalid: Local route proxy key is invalid, expired, or belongs to another ai-switch instance; provide a valid local route proxy key with Authorization: Bearer, x-api-key, or x-ai-switch-platform".to_string(),
+            message: "route_proxy.key_invalid: Local route proxy key is invalid, expired, or belongs to another ai-switch instance; provide a valid local route proxy key with Authorization: Bearer, x-api-key, api-key, x-goog-api-key, or the key query parameter".to_string(),
             details: None,
             recoverable: true,
         });
@@ -5835,7 +6027,7 @@ async fn resolve_platform(
 
     Err(AppError::Validation {
         code: "route_proxy.platform_unresolved",
-        message: "Route proxy platform could not be resolved; provide the local route proxy key with Authorization: Bearer, x-api-key, or x-ai-switch-platform".to_string(),
+        message: "Local AI listener requires a local API key; provide it with Authorization: Bearer, x-api-key, api-key, x-goog-api-key, or the key query parameter".to_string(),
         details: None,
         recoverable: true,
     })
@@ -10262,6 +10454,10 @@ async fn insert_route_credential_request_event(
 }
 
 #[cfg(test)]
+#[path = "route_proxy_service/active_attempt_tests.rs"]
+mod active_attempt_tests;
+
+#[cfg(test)]
 #[path = "route_proxy_service/live_responses_test.rs"]
 mod live_responses_test;
 
@@ -11836,7 +12032,38 @@ mod tests {
         );
 
         RouteProxyService::stop(&runtime).await.expect("stop");
+
+    #[tokio::test]
+    async fn independent_test_runtimes_do_not_compete_with_the_installed_gateway() {
+        let pool = create_memory_pool().await.unwrap();
+        let first = RouteProxyRuntimeState::default();
+        let second = RouteProxyRuntimeState::default();
+        let a = RouteProxyService::start(&first, pool.clone(), RouteProxyTransport::HttpOnly).await.unwrap();
+        let b = RouteProxyService::start(&second, pool, RouteProxyTransport::HttpOnly).await.unwrap();
+        assert_ne!(a.port, b.port);
+        assert_ne!(a.port, Some(DEFAULT_ROUTE_PROXY_PORT));
+        RouteProxyService::stop(&first).await.unwrap();
+        RouteProxyService::stop(&second).await.unwrap();
     }
+
+    #[tokio::test]
+    async fn start_fails_when_default_route_proxy_port_is_unavailable() {
+        // If another listener already owns the default port, it is the conflict
+        // fixture; otherwise keep our own socket alive until start returns.
+        let _default_port_guard = TcpListener::bind((BIND_HOST, DEFAULT_ROUTE_PROXY_PORT)).await.ok();
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        let mut runtime = RouteProxyRuntimeState::default();
+        runtime.test_listen_port = DEFAULT_ROUTE_PROXY_PORT;
+        let result = RouteProxyService::start(&runtime, pool, RouteProxyTransport::HttpOnly).await;
+        // Release an accidentally started listener before asserting the regression.
+        RouteProxyService::stop(&runtime).await.expect("stop");
+        let error = result.expect_err("default port conflicts must fail");
+        assert!(error.to_string().contains("127.0.0.1:19527"));
+        assert!(!RouteProxyService::status(&runtime).await.running);
+    }
+
+        }
 
     #[tokio::test]
     async fn https_serves_on_its_own_port_beside_a_still_working_http_listener() {
@@ -14054,6 +14281,7 @@ mod tests {
         let metadata: Value = serde_json::from_str(&route_proxy_request_metadata(
             1,
             "codex",
+            Some("zcode"),
             &credential,
             "/v1/responses",
             Some("https://api.example.com/v1/chat/completions"),
@@ -14074,6 +14302,36 @@ mod tests {
             "the legacy key keeps its old meaning for older readers"
         );
         assert_eq!(metadata["upstream_path"], "/v1/chat/completions");
+        // A suffixed key names its client; the row has to carry it so the usage
+        // detail can say which agent made the request.
+        assert_eq!(metadata["client_key"], "zcode");
+    }
+
+    #[test]
+    fn request_metadata_marks_an_unsuffixed_key_as_unknown_origin() {
+        // Configs written before client suffixes existed are still valid keys,
+        // but their origin is genuinely unknown; guessing it from a spoofable
+        // user agent would be worse than saying so.
+        let credential = streaming_gate_credential("api");
+        let metadata: Value = serde_json::from_str(&route_proxy_request_metadata(
+            1,
+            "codex",
+            None,
+            &credential,
+            "/v1/responses",
+            None,
+            Some(200),
+            true,
+            None,
+            Instant::now(),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .expect("metadata json");
+
+        assert_eq!(metadata["client_key"], "unknown");
     }
 
     /// "Is the proxy retrying, or is the upstream failing?" is not answerable
@@ -14086,6 +14344,7 @@ mod tests {
             serde_json::from_str(&route_proxy_request_metadata(
                 attempt,
                 "codex",
+                None,
                 &credential,
                 "/v1/responses",
                 None,
@@ -18194,6 +18453,7 @@ data: [DONE]\n\n";
             model_match_mode: ModelMatchMode::ClientFacing,
             key_cache: Arc::new(Mutex::new(RouteProxyKeyCache::default())),
             activity: RouteCredentialActivityRegistry::default(),
+            active_attempts: RouteProxyActiveAttemptRegistry::default(),
             live_log: RouteProxyLiveLog::default(),
             codex_history: CodexReasoningCache::default(),
             upstream_timeouts: ProxyAppState::default_upstream_timeouts(),
@@ -18219,6 +18479,40 @@ data: [DONE]\n\n";
     }
 
     #[tokio::test]
+    async fn split_route_proxy_client_key_recognizes_only_registered_clients() {
+        // Registered client keys: the suffix is stripped and returned.
+        for (key, base, client) in [
+            ("sk-ai-switch-abc.codex", "sk-ai-switch-abc", Some("codex")),
+            ("sk-ai-switch-abc.zcode", "sk-ai-switch-abc", Some("zcode")),
+            (
+                "sk-ai-switch-abc.claude_code",
+                "sk-ai-switch-abc",
+                Some("claude_code"),
+            ),
+            ("sk-ai-switch-abc.workbuddy_ai", "sk-ai-switch-abc", Some("workbuddy_ai")),
+        ] {
+            assert_eq!(
+                split_route_proxy_client_key(key),
+                (base, client),
+                "{key}"
+            );
+        }
+
+        // No suffix, an unknown suffix, an empty suffix, and a base that itself
+        // contains a dot all stay whole: an unrecognized tail must not be
+        // stripped, or a wrong key could pass authentication.
+        for key in [
+            "sk-ai-switch-abc",
+            "sk-ai-switch-abc.not_a_client",
+            "sk-ai-switch-abc.",
+            "sk-ai-switch-abc.codex.extra",
+            ".codex",
+        ] {
+            assert_eq!(split_route_proxy_client_key(key), (key, None), "{key}");
+        }
+    }
+
+    #[tokio::test]
     async fn resolve_platform_without_key_or_header_fails_closed() {
         use crate::database::{create_memory_pool, run_migrations};
 
@@ -18230,6 +18524,7 @@ data: [DONE]\n\n";
             model_match_mode: ModelMatchMode::ClientFacing,
             key_cache: Arc::new(Mutex::new(RouteProxyKeyCache::default())),
             activity: RouteCredentialActivityRegistry::default(),
+            active_attempts: RouteProxyActiveAttemptRegistry::default(),
             live_log: RouteProxyLiveLog::default(),
             codex_history: CodexReasoningCache::default(),
             upstream_timeouts: ProxyAppState::default_upstream_timeouts(),
@@ -18261,6 +18556,7 @@ data: [DONE]\n\n";
             model_match_mode: ModelMatchMode::ClientFacing,
             key_cache: Arc::new(Mutex::new(RouteProxyKeyCache::default())),
             activity: RouteCredentialActivityRegistry::default(),
+            active_attempts: RouteProxyActiveAttemptRegistry::default(),
             live_log: RouteProxyLiveLog::default(),
             codex_history: CodexReasoningCache::default(),
             upstream_timeouts: ProxyAppState::default_upstream_timeouts(),
@@ -18289,14 +18585,11 @@ data: [DONE]\n\n";
     }
 
     #[tokio::test]
-    async fn resolve_platform_accepts_a_chatgpt_token_when_the_header_names_the_platform() {
+    async fn resolve_platform_rejects_a_chatgpt_token_even_when_the_header_names_the_platform() {
         use crate::database::{create_memory_pool, run_migrations};
 
-        // The "keep Codex login" provider carries no proxy key, so the inbound
-        // Authorization is the user's ChatGPT token. Without this fallback every
-        // such request would be rejected as an invalid key. The token itself is
-        // only used for identification — `build_upstream_request` overwrites the
-        // header with the pooled credential's own key.
+        // Official OAuth tokens remain upstream credentials. A public request
+        // still needs the local proxy key; a platform header grants no authority.
         let pool = create_memory_pool().await.expect("pool");
         run_migrations(&pool).await.expect("migrations");
         let state = ProxyAppState {
@@ -18305,6 +18598,7 @@ data: [DONE]\n\n";
             model_match_mode: ModelMatchMode::ClientFacing,
             key_cache: Arc::new(Mutex::new(RouteProxyKeyCache::default())),
             activity: RouteCredentialActivityRegistry::default(),
+            active_attempts: RouteProxyActiveAttemptRegistry::default(),
             live_log: RouteProxyLiveLog::default(),
             codex_history: CodexReasoningCache::default(),
             upstream_timeouts: ProxyAppState::default_upstream_timeouts(),
@@ -18319,10 +18613,83 @@ data: [DONE]\n\n";
         );
         headers.insert(ROUTE_PROXY_PLATFORM_HEADER, HeaderValue::from_static("codex"));
 
-        let platform = resolve_platform(&state, &headers, Some("eyJhbGciOiJSUzI1NiJ9.chatgpt-access-token"))
+        let error = resolve_platform(&state, &headers, Some("eyJhbGciOiJSUzI1NiJ9.chatgpt-access-token"))
             .await
-            .expect("header identifies the platform even without a matching key");
-        assert_eq!(platform, PlatformId::Codex);
+            .expect_err("platform headers must not authorize public requests");
+        assert!(matches!(error, AppError::Validation { code: "route_proxy.key_invalid", .. }));
+    }
+
+    #[tokio::test]
+    async fn codex_login_uses_explicit_local_key_without_falling_back_from_an_invalid_key() {
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "local-test-key")
+            .await.unwrap();
+        let state = build_proxy_state(pool, &RouteProxyRuntimeState::default());
+        for (explicit_key, bearer, expected) in [
+            (Some("local-test-key"), Some("chatgpt-token"), StatusCode::OK),
+            (Some("invalid-local-key"), Some("local-test-key"), StatusCode::UNAUTHORIZED),
+            (Some("local-test-key"), None, StatusCode::OK),
+            (None, Some("local-test-key"), StatusCode::OK),
+            (Some("   "), Some("local-test-key"), StatusCode::OK),
+            (None, Some("chatgpt-token"), StatusCode::UNAUTHORIZED),
+        ] {
+            let mut headers = HeaderMap::new();
+            if let Some(key) = explicit_key {
+                headers.insert("x-api-key", HeaderValue::from_str(key).unwrap());
+            }
+            if let Some(token) = bearer {
+                headers.insert("authorization", HeaderValue::from_str(&format!("Bearer {token}")).unwrap());
+            }
+            headers.insert(ROUTE_PROXY_PLATFORM_HEADER, HeaderValue::from_static("codex"));
+            let response = proxy_handler(
+                AxumState(state.clone()), Method::GET, headers,
+                "/v1/models".parse().unwrap(), Body::empty(),
+            ).await;
+            assert_eq!(response.status(), expected, "x-api-key={explicit_key:?}, bearer={bearer:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn public_proxy_platform_header_cannot_bypass_local_key_authentication() {
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        RouteProxyKeyRepository::ensure_platform_key(&pool, "codex", "local-test-key")
+            .await.unwrap();
+        let state = build_proxy_state(pool, &RouteProxyRuntimeState::default());
+        for key in [None, Some("invalid-key"), Some("eyJhbGciOiJSUzI1NiJ9.official-token")] {
+            let mut headers = HeaderMap::new();
+            headers.insert(ROUTE_PROXY_PLATFORM_HEADER, HeaderValue::from_static("codex"));
+            if let Some(key) = key {
+                headers.insert("authorization", HeaderValue::from_str(&format!("Bearer {key}")).unwrap());
+            }
+            let response = proxy_handler(
+                AxumState(state.clone()), Method::GET, headers,
+                "/v1/models".parse().unwrap(), Body::empty(),
+            ).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "key={key:?}");
+        }
+
+        for header in ["authorization", "x-api-key", "api-key", "x-goog-api-key"] {
+            let mut headers = HeaderMap::new();
+            // A valid local key wins even over a forged/unknown platform header.
+            headers.insert(ROUTE_PROXY_PLATFORM_HEADER, HeaderValue::from_static("not-a-platform"));
+            headers.insert(header, HeaderValue::from_static(if header == "authorization" {
+                "Bearer local-test-key"
+            } else {
+                "local-test-key"
+            }));
+            let response = proxy_handler(
+                AxumState(state.clone()), Method::GET, headers,
+                "/v1/models".parse().unwrap(), Body::empty(),
+            ).await;
+            assert_eq!(response.status(), StatusCode::OK, "header={header}");
+        }
+        let response = proxy_handler(
+            AxumState(state), Method::GET, HeaderMap::new(),
+            "/v1/models?key=local-test-key".parse().unwrap(), Body::empty(),
+        ).await;
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[test]

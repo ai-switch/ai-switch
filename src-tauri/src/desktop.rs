@@ -41,8 +41,9 @@ use commands::route_pool_commands::{
     update_route_pool_group,
 };
 use commands::route_proxy_commands::{
-    get_claude_slot_plan, get_route_proxy_key, get_route_proxy_status, route_config_write_is_stale,
-    start_route_proxy, stop_route_proxy, write_route_proxy_configs,
+    get_claude_slot_plan, get_route_proxy_active_attempts, get_route_proxy_key,
+    get_route_proxy_pool_member_ids, get_route_proxy_status, list_route_proxy_account_summaries,
+    route_config_write_is_stale, start_route_proxy, stop_route_proxy, write_route_proxy_configs,
 };
 use commands::route_proxy_diagnostics_commands::save_route_proxy_diagnostics_export;
 use commands::route_proxy_https_commands::{
@@ -460,6 +461,10 @@ pub fn run() {
                 .set_emitter(EventEmitter::Tauri(app.handle().clone()));
             state
                 .route_proxy
+                .active_attempts()
+                .set_emitter(EventEmitter::Tauri(app.handle().clone()));
+            state
+                .route_proxy
                 .live_log()
                 .set_emitter(EventEmitter::Tauri(app.handle().clone()));
             // Mirror the live log to disk so the turn that went wrong is still
@@ -631,6 +636,9 @@ pub fn run() {
             stop_route_proxy,
             get_route_proxy_status,
             get_route_proxy_key,
+            get_route_proxy_pool_member_ids,
+            get_route_proxy_active_attempts,
+            list_route_proxy_account_summaries,
             get_claude_slot_plan,
             write_route_proxy_configs,
             get_client_direct_modes,

@@ -430,6 +430,16 @@ impl RouteModelTestService {
         route_proxy_base_url: &str,
         root_certificate_pem: Option<&[u8]>,
     ) -> Result<RoutePoolModelTestOutcome, AppError> {
+        Self::test_model_through_proxy_with_activity(pool, request, route_proxy_base_url, root_certificate_pem, None).await
+    }
+
+    pub async fn test_model_through_proxy_with_activity(
+        pool: &SqlitePool,
+        request: RoutePoolModelTestRequest,
+        route_proxy_base_url: &str,
+        root_certificate_pem: Option<&[u8]>,
+        activity: Option<&crate::services::route_proxy_active_attempts::RouteProxyActiveAttemptRegistry>,
+    ) -> Result<RoutePoolModelTestOutcome, AppError> {
         let requested_account_id = request
             .account_id
             .as_deref()
@@ -508,6 +518,7 @@ impl RouteModelTestService {
         );
         let entry_url = join_proxy_entry_url(route_proxy_base_url, &entry_path);
         let trace_id = Uuid::new_v4().to_string();
+        let _internal_trace = activity.map(|registry| registry.mark_internal_trace(&trace_id));
         let proxy_key = RouteProxyService::get_or_create_platform_key(pool, &platform).await?;
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));

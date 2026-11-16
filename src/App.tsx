@@ -40,6 +40,7 @@ import { SaasAdmin } from "./saas";
 import { ImageGenerationScreen } from "./imagegen/ImageGenerationScreen";
 import { ClientSetupScreen, type ClientSetupFocus } from "./screens/ClientSetupScreen";
 import { CodexChannelsScreen } from "./screens/CodexChannelsScreen";
+import { TrafficScreen } from "./screens/TrafficScreen";
 import { adminCall } from "./saas/api";
 import { getSettings } from "./lib/api/client";
 
@@ -64,6 +65,7 @@ const implementedScreens = new Set([
   "MCP",
   "Skills",
   "Stats",
+  "Traffic",
   "About",
   "Vibe",
 ]);
@@ -256,6 +258,7 @@ export function App() {
                         modality={accountModality}
                         onOpenClientSetup={(platform, clientKey) => openClientSetup({ platform, clientKey })}
                         onOpenSessions={openSessions}
+                        onOpenTraffic={() => navigate("Traffic")}
                         onPoolScopeFocusConsumed={handlePoolScopeFocusConsumed}
                         onProviderFilterFocusConsumed={handleProviderFilterFocusConsumed}
                         poolScopeFocus={poolScopeFocus}
@@ -299,6 +302,7 @@ export function App() {
                     <UsageOverviewPanel standalone />
                   </section>
                 )}
+                {screen === "Traffic" && <TrafficScreen onBack={() => navigate(modalityScreenById.general)} />}
                 {screen === "About" && <AboutScreen />}
                 {screen === "Log" && <OperationLogScreen />}
                   {!implementedScreens.has(screen) && (

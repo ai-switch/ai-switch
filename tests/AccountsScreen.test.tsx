@@ -3271,39 +3271,92 @@ describe("AccountsScreen", () => {
     expect(screen.getByText("已移动 1 个账号。")).toBeInTheDocument();
   });
 
-  it("toggles the whole page from the account list header checkbox", async () => {
+  it.each(["列表模式", "卡片模式"] as const)("selects, inverts and clears accounts from the action strip in %s", async (layout) => {
     renderScreen();
+    await screen.findByLabelText("选择 Team Account");
+    if (layout === "卡片模式") await selectAccountLayout(layout);
 
-    const selectAll = await screen.findByLabelText("全选当前页账号");
-    // 表头复选框长在列表表头里，不再是列表上方单摆的按钮。
-    expect(within(screen.getByTestId("account-list-header")).getByLabelText("全选当前页账号")).toBe(
-      selectAll,
-    );
-    expect(selectAll).not.toBeChecked();
+    expect(screen.queryByRole("checkbox", { name: "全选当前页账号" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "账号选择操作" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("批量设置状态")).not.toBeInTheDocument();
 
-    await userEvent.click(selectAll);
-    expect(screen.getByText("已选 2 个账号")).toBeInTheDocument();
-    expect(screen.getByLabelText("选择 Team Account")).toBeChecked();
-    expect(screen.getByLabelText("选择 API Account")).toBeChecked();
-    expect(selectAll).toBeChecked();
-    expect((selectAll as HTMLInputElement).indeterminate).toBe(false);
-
-    // 取消其中一个：表头复选框转入半选（indeterminate），此时点击它补齐成全选。
     await userEvent.click(screen.getByLabelText("选择 Team Account"));
     expect(screen.getByText("已选 1 个账号")).toBeInTheDocument();
-    await waitFor(() => expect((selectAll as HTMLInputElement).indeterminate).toBe(true));
-    expect(selectAll).not.toBeChecked();
+    const actions = screen.getByRole("group", { name: "账号选择操作" });
+    const buttons = within(actions).getAllByRole("button");
+    expect(buttons.map((button) => button.textContent)).toEqual(["全选", "反选", "取消选择"]);
+    const selectAll = within(actions).getByRole("button", { name: "全选当前页账号" });
+    const invert = within(actions).getByRole("button", { name: "反选当前页账号" });
+    const clear = within(actions).getByRole("button", { name: "取消账号选择" });
+    expect(selectAll).toBeEnabled();
+    expect(invert).toBeEnabled();
+    expect(clear).toBeEnabled();
 
+    await userEvent.click(selectAll);
     await userEvent.click(selectAll);
     expect(screen.getByText("已选 2 个账号")).toBeInTheDocument();
     expect(screen.getByLabelText("选择 Team Account")).toBeChecked();
     expect(screen.getByLabelText("选择 API Account")).toBeChecked();
 
-    // 本页已全选时再点，清空本页选择，提示条随之消失。
-    await userEvent.click(selectAll);
+    await userEvent.click(screen.getByLabelText("选择 Team Account"));
+    await userEvent.click(invert);
+    expect(screen.getByText("已选 1 个账号")).toBeInTheDocument();
+    expect(screen.getByLabelText("选择 Team Account")).toBeChecked();
+    expect(screen.getByLabelText("选择 API Account")).not.toBeChecked();
+
+    await userEvent.click(clear);
     expect(screen.queryByText(/已选 \d+ 个账号/)).not.toBeInTheDocument();
     expect(screen.getByLabelText("选择 Team Account")).not.toBeChecked();
     expect(screen.getByLabelText("选择 API Account")).not.toBeChecked();
+    expect(screen.queryByRole("group", { name: "账号选择操作" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("批量设置状态")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByLabelText("选择 API Account"));
+    const reopened = screen.getByRole("group", { name: "账号选择操作" });
+    await userEvent.click(within(reopened).getByRole("button", { name: "全选当前页账号" }));
+    await userEvent.click(within(reopened).getByRole("button", { name: "反选当前页账号" }));
+    expect(screen.queryByText(/已选 \d+ 个账号/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "账号选择操作" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByLabelText("选择 Team Account"));
+    expect(screen.getByRole("group", { name: "账号选择操作" })).toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText("选择 Team Account"));
+    expect(screen.queryByRole("group", { name: "账号选择操作" })).not.toBeInTheDocument();
+  });
+
+  it("changes only the current page with select-all and invert while clear removes every selection", async () => {
+    vi.mocked(listRouteCredentials).mockResolvedValue(Array.from({ length: 21 }, (_, index) => ({
+      ...credentialsFixture[1], id: `page-account-${index}`, display_name: `Page Account ${index}`,
+    })));
+    vi.mocked(listRouteCredentialPage).mockImplementation(async (input) => {
+      const source = await listRouteCredentials(input.platform);
+      const start = (input.page - 1) * input.page_size;
+      return {
+        items: source.slice(start, start + input.page_size), total: source.length,
+        page: input.page, page_count: 2, page_size: input.page_size,
+        previous_page_account_id: null, next_page_account_id: null,
+        filter_options: [], official_account_count: 0,
+      };
+    });
+    renderScreen();
+    await userEvent.click(await screen.findByLabelText("选择 Page Account 0"));
+    const statusBar = screen.getByTestId("account-workspace-status-bar");
+    await userEvent.click(within(statusBar).getByRole("button", { name: "下一页账号" }));
+    await screen.findByLabelText("选择 Page Account 20");
+    await waitFor(() => expect(screen.queryByLabelText("选择 Page Account 0")).not.toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole("button", { name: "全选当前页账号" }));
+    expect(screen.getByText("已选 2 个账号")).toBeInTheDocument();
+    expect(screen.getByLabelText("选择 Page Account 20")).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "反选当前页账号" }));
+    expect(screen.getByText("已选 1 个账号")).toBeInTheDocument();
+    expect(screen.getByLabelText("选择 Page Account 20")).not.toBeChecked();
+
+    await userEvent.click(within(statusBar).getByRole("button", { name: "上一页账号" }));
+    expect(await screen.findByLabelText("选择 Page Account 0")).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "取消账号选择" }));
+    expect(screen.getByLabelText("选择 Page Account 0")).not.toBeChecked();
+    expect(screen.queryByText(/已选 \d+ 个账号/)).not.toBeInTheDocument();
   });
 
   it("shows the stored failure response for error and cooldown accounts", async () => {

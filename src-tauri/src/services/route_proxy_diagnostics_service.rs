@@ -368,6 +368,7 @@ mod tests {
             id: id.to_string(),
             trace_id: None,
             platform: "codex".to_string(),
+            client_key: None,
             credential_id: "cred".to_string(),
             credential_name: "Cred".to_string(),
             attempt: 0,

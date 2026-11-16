@@ -2,6 +2,7 @@ import { Update } from "@tauri-apps/plugin-updater";
 import { getTransport } from "../transport";
 import type {
   AccountStatus,
+  ActiveProxyAttemptSnapshot,
   AgentLaunchOption,
   AppSettings,
   AppSettingsView,
@@ -29,6 +30,7 @@ import type {
   NewOfficialAccount,
   OfficialAccount,
   PlatformCapability,
+  RouteProxyAccountSummary,
   ExportRouteCredentialsInput,
   RouteCredentialExportResult,
   ImportRouteCredentialsInput,
@@ -383,6 +385,18 @@ export function getRouteProxyStatus(): Promise<RouteProxyStatus> {
 
 export function getRouteProxyKey(platform: string): Promise<string> {
   return invoke("get_route_proxy_key", { platform });
+}
+
+export function getRouteProxyPoolMemberIds(): Promise<string[]> {
+  return invoke("get_route_proxy_pool_member_ids");
+}
+
+export function getRouteProxyActiveAttempts(): Promise<ActiveProxyAttemptSnapshot> {
+  return invoke("get_route_proxy_active_attempts");
+}
+
+export function listRouteProxyAccountSummaries(platform: string): Promise<RouteProxyAccountSummary[]> {
+  return invoke("list_route_proxy_account_summaries", { platform });
 }
 
 export function getRouteProxyHttpsStatus(): Promise<RouteProxyHttpsStatus> {

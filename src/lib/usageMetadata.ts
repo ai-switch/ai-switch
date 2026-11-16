@@ -22,6 +22,8 @@ export type ParsedUsageMetadata = {
   errorMessage: string | null;
   requestedModel: string | null;
   upstreamModel: string | null;
+  /** Which client config made the request; null when the row has no origin. */
+  clientKey: string | null;
   /** Upstream body preview, already truncated by the proxy before storage. */
   responseBody: string | null;
 };
@@ -33,6 +35,7 @@ const EMPTY_FIELDS = {
   errorMessage: null,
   requestedModel: null,
   upstreamModel: null,
+  clientKey: null,
   responseBody: null,
 } as const;
 
@@ -180,6 +183,7 @@ export function parseUsageMetadata(metadataJson: string): ParsedUsageMetadata {
     errorMessage: field(record, "error_message"),
     requestedModel: field(record, "requested_model"),
     upstreamModel: field(record, "upstream_model"),
+    clientKey: field(record, "client_key"),
     // Still encoded at this point — the caller decodes what it actually shows,
     // so a compressed preview is never thrown away by a parse that only wanted
     // the model names.

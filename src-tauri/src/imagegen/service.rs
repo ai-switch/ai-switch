@@ -189,13 +189,12 @@ impl ImageGenerationService {
         size: &str,
         quality: &str,
     ) -> Result<(Option<String>, Vec<super::protocol::GeneratedImage>), String> {
-        let proxy = build_proxy_state(state.pool.clone(), &state.route_proxy);
+        let platform = crate::models::platform::PlatformId::parse(platform)
+            .map_err(|error| error.to_string())?;
+        let proxy = build_proxy_state(state.pool.clone(), &state.route_proxy)
+            .with_platform_scope(platform);
         let mut headers = HeaderMap::new();
         headers.insert("content-type", HeaderValue::from_static("application/json"));
-        headers.insert(
-            "x-ai-switch-platform",
-            HeaderValue::from_str(platform).map_err(|error| error.to_string())?,
-        );
         let body = openai_images_body(model, prompt, count, size, quality);
         let response = forward_request(
             &proxy,
@@ -332,5 +331,58 @@ mod tests {
         let captures = captures.lock().unwrap();
         assert_eq!(captures[0], ("/v1/images/generations".to_string(), Some("Bearer image-upstream-key".to_string())));
         assert_eq!(captures[1], ("/asset.png".to_string(), None));
+    }
+
+    #[tokio::test]
+    async fn native_image_generation_routes_without_header_bypass_and_records_usage() {
+        let captured = Arc::new(Mutex::new(Vec::<(HeaderMap, Value)>::new()));
+        let sink = captured.clone();
+        let app = Router::new().fallback(move |headers: HeaderMap, Json(body): Json<Value>| {
+            let sink = sink.clone();
+            async move {
+                sink.lock().unwrap().push((headers, body));
+                Json(json!({"id":"local-image", "data":[{"b64_json":"aW1hZ2U="}]}))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let credential = RouteCredentialRepository::create(
+            &pool, "codex", "api", "image mock", None, "ok", None,
+            r#"{"api_key":"image-upstream-key"}"#,
+            &json!({"base_url":base_url,"interface_format":"openai","model_mappings":[{
+                "from":"image-alias","to":"gpt-image-1","capabilities":["image.generate"]
+            }]}).to_string(), "{}",
+        ).await.unwrap();
+        RoutePoolRepository::replace_members(&pool, "codex", &[credential.id]).await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState {
+            paths: crate::paths::AppPaths::from_data_dir(temp.path().to_path_buf()),
+            pool,
+            saas: Default::default(),
+            config_writes: Default::default(),
+            deeplink_protocols: Default::default(),
+            close_to_tray: Default::default(),
+            route_proxy: Default::default(),
+            web_service: Default::default(),
+            tailscale_funnel: Default::default(),
+            terminals: Default::default(),
+            terminal_hub: Default::default(),
+            event_broadcaster: Default::default(),
+        };
+        let result = ImageGenerationService::execute(
+            &state, "codex", "image-alias", "a cat", 1, "1024x1024", "auto",
+        ).await;
+        upstream.abort();
+        let (id, images) = result.expect("trusted native image request");
+        assert_eq!(id.as_deref(), Some("local-image"));
+        assert_eq!(images.len(), 1);
+        let records = captured.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].1["model"], "gpt-image-1");
+        assert_eq!(records[0].0["authorization"], "Bearer image-upstream-key");
+        assert!(!records[0].0.contains_key("x-ai-switch-platform"));
     }
 }

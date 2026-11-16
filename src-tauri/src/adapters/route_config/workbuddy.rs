@@ -1,6 +1,6 @@
 use super::{
-    client_home, existing_text, generated_invalid, invalid_existing_config, ClientModel,
-    RouteConfigInput, TargetAdapter, TargetInspection,
+    client_home, existing_text, generated_invalid, invalid_existing_config,
+    route_proxy_key_matches, ClientModel, RouteConfigInput, TargetAdapter, TargetInspection,
 };
 use crate::{
     error::AppError,
@@ -207,12 +207,12 @@ impl WorkBuddyAdapter {
             .and_then(Value::as_str)
             .map(str::trim)
             .unwrap_or_default();
-        let key_matches = !api_key.is_empty()
-            && (api_key == input.route_proxy_key
-                || input
-                    .route_proxy_key_aliases
-                    .iter()
-                    .any(|alias| alias == api_key));
+        let key_matches = route_proxy_key_matches(
+            api_key,
+            self.client_key(),
+            &input.route_proxy_key,
+            &input.route_proxy_key_aliases,
+        );
         url_matches && key_matches
     }
 
@@ -790,6 +790,48 @@ mod tests {
         assert_eq!(ids(&json), vec!["AISwitch:gpt-5.6-sol"]);
         assert_eq!(json["models"][0]["apiKey"], CODEX_KEY);
         assert_eq!(json["models"][0]["aiSwitch"]["managed"], true);
+    }
+
+    #[test]
+    fn a_suffixed_or_legacy_key_is_adopted_rather_than_duplicated() {
+        // The raw base key predates client suffixes; the suffixed alias is what
+        // this client wrote before the last rotation. Both are the same entry.
+        for configured in [
+            CODEX_KEY,
+            "sk-ai-switch-previous",
+            "sk-ai-switch-previous.workbuddy",
+        ] {
+            let existing = format!(
+                r#"{{
+  "models": [
+    {{
+      "id": "gpt-5.6-sol",
+      "name": "My Local Proxy",
+      "url": "http://127.0.0.1:19527/v1/chat/completions",
+      "apiKey": "{configured}"
+    }}
+  ]
+}}"#
+            );
+
+            let mut with_alias = input(&["gpt-5.6-sol"]);
+            with_alias.route_proxy_key = format!("{CODEX_KEY}.workbuddy");
+            with_alias.route_proxy_key_aliases = vec!["sk-ai-switch-previous".to_string()];
+            let bytes = codex_adapter()
+                .render(Path::new("models.json"), Some(existing.as_bytes()), &with_alias)
+                .expect("render");
+            let json: Value = serde_json::from_slice(&bytes).expect("valid JSON");
+
+            assert_eq!(
+                ids(&json),
+                vec!["AISwitch:gpt-5.6-sol"],
+                "no duplicate for {configured}: {json}"
+            );
+            assert_eq!(
+                json["models"][0]["apiKey"],
+                format!("{CODEX_KEY}.workbuddy")
+            );
+        }
     }
 
     #[test]

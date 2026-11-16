@@ -223,9 +223,27 @@ async fn shared_fallback(
         };
         // This listener can be exposed beyond loopback. The platform header is
         // a privileged diagnostic override, not an alternative to API-key auth.
-        if !crate::web::auth::is_authorized(&headers, &context.token) {
+        let admin_authorized = crate::web::auth::is_authorized(&headers, &context.token);
+        if !admin_authorized {
             headers.remove("x-ai-switch-platform");
         }
+        // Panel diagnostics keep the header override, but only while the inbound
+        // key is the panel token itself; any real proxy key must keep resolving
+        // its own platform (and suffixed client identity) under strict rules.
+        let proxy_state = if admin_authorized
+            && key.as_deref().map_or(true, |key| key == context.token.as_str())
+        {
+            match headers
+                .get("x-ai-switch-platform")
+                .and_then(|value| value.to_str().ok())
+                .map(crate::models::platform::PlatformId::parse)
+            {
+                Some(Ok(platform)) => proxy_state.with_platform_scope(platform),
+                _ => proxy_state,
+            }
+        } else {
+            proxy_state
+        };
         return proxy_handler(
             axum::extract::State(proxy_state),
             method,

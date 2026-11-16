@@ -34,6 +34,48 @@ use zcode::ZCodeAdapter;
 
 pub(super) const INVALID_EXISTING_CONFIG_CODE: &str = "validation.route_config_existing_invalid";
 
+/// The key one client's config carries for a platform.
+///
+/// Every client of a platform shares that platform's base key; the suffix is
+/// what lets the gateway tell ZCode's traffic from Codex CLI's. The stored key
+/// and every rotated alias stay unsuffixed, so this is applied only when
+/// writing a client config.
+pub fn route_proxy_key_for_client(base_key: &str, client_key: &str) -> String {
+    format!("{base_key}.{client_key}")
+}
+
+/// Whether a configured key belongs to this client of this platform.
+///
+/// Configs written before client suffixes existed carry the raw base key, and a
+/// rotated config carries an old raw base key. Both are the same user's entry,
+/// so adoption has to recognize them instead of adding a duplicate; a suffixed
+/// historical alias is accepted for the same reason.
+///
+/// `current_key` is whatever the writer is about to emit, so it may already
+/// carry this client's suffix. Its base is compared too, which is what lets a
+/// legacy raw config be adopted in place.
+pub(super) fn route_proxy_key_matches(
+    configured: &str,
+    client_key: &str,
+    current_key: &str,
+    aliases: &[String],
+) -> bool {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        return false;
+    }
+    let base = current_key
+        .strip_suffix(&format!(".{client_key}"))
+        .unwrap_or(current_key);
+    let suffixed = route_proxy_key_for_client(base, client_key);
+    if configured == current_key || configured == suffixed || configured == base {
+        return true;
+    }
+    aliases.iter().any(|alias| {
+        configured == alias || configured == route_proxy_key_for_client(alias, client_key)
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteConfigInput {
     pub base_url: String,
@@ -246,6 +288,20 @@ impl TargetAdapterRegistry {
     pub fn adapters(&self) -> &[Arc<dyn TargetAdapter>] {
         &self.adapters
     }
+
+    /// Every distinct `client_key` a written config can carry, deduplicated and
+    /// sorted. The gateway checks a key suffix against this before trusting it,
+    /// so the list has to come from the registry rather than be retyped.
+    pub fn client_keys(&self) -> Vec<&'static str> {
+        let mut keys: Vec<&'static str> = self
+            .adapters
+            .iter()
+            .map(|adapter| adapter.client_key())
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
 }
 
 impl Default for TargetAdapterRegistry {
@@ -311,6 +367,29 @@ mod tests {
 
     const BASE_URL: &str = "http://127.0.0.1:43111";
     const ROUTE_PROXY_KEY: &str = "sk-ai-switch-test";
+
+    #[test]
+    fn route_proxy_key_for_client_appends_client_without_changing_the_base() {
+        assert_eq!(
+            route_proxy_key_for_client("sk-ai-switch-0123456789abcdef", "zcode"),
+            "sk-ai-switch-0123456789abcdef.zcode"
+        );
+        assert_eq!(
+            route_proxy_key_for_client("sk-ai-switch-0123456789abcdef", "codex"),
+            "sk-ai-switch-0123456789abcdef.codex"
+        );
+    }
+
+    #[test]
+    fn key_adoption_does_not_accept_a_second_client_suffix() {
+        let aliases = vec!["sk-old".to_string()];
+        for configured in ["sk-current", "sk-current.zcode", "sk-old", "sk-old.zcode"] {
+            assert!(route_proxy_key_matches(configured, "zcode", "sk-current.zcode", &aliases));
+        }
+        for configured in ["sk-current.zcode.zcode", "sk-current.workbuddy", "sk-old.workbuddy", ""] {
+            assert!(!route_proxy_key_matches(configured, "zcode", "sk-current.zcode", &aliases), "{configured}");
+        }
+    }
 
     fn input() -> RouteConfigInput {
         RouteConfigInput {

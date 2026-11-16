@@ -339,6 +339,19 @@ impl AccountProvider {
     }
 }
 
+/// Display-only account data; never includes credential payloads or settings.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, PartialEq, Eq)]
+pub struct RouteProxyAccountSummary {
+    pub id: String,
+    pub platform: String,
+    pub display_name: String,
+    pub route_priority: i64,
+    pub kind: String,
+    pub status: String,
+    pub max_concurrency: i64,
+    pub active_request_count: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, PartialEq)]
 pub struct RouteCredential {
     pub id: String,

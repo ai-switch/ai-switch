@@ -930,6 +930,7 @@ export type RouteProxyLiveLogEntry = {
   id: string;
   trace_id?: string | null;
   platform: string;
+  client_key?: string | null;
   credential_id: string;
   credential_name: string;
   attempt: number;
@@ -964,6 +965,40 @@ export type RouteProxyLiveLogEntry = {
    *  丢内容，不等于逐字节原样（回显字段可能已被摘要化）。旧数据可能缺失。 */
   truncated_stages?: string[] | null;
   created_at: string;
+};
+
+export type ActiveProxyAttempt = {
+  request_id: string;
+  attempt_id: string;
+  platform: string;
+  client_key: string;
+  credential_id: string;
+  credential_name: string;
+  started_at: string;
+};
+
+export type ActiveProxyAttemptSnapshot = {
+  epoch: string;
+  sequence: number;
+  active: ActiveProxyAttempt[];
+};
+
+export type ActiveProxyAttemptEvent = {
+  epoch: string;
+  sequence: number;
+  action: "started" | "finished";
+  attempt: ActiveProxyAttempt;
+};
+
+export type RouteProxyAccountSummary = {
+  id: string;
+  platform: string;
+  display_name: string;
+  route_priority: number;
+  kind: string;
+  status: string;
+  max_concurrency: number;
+  active_request_count: number;
 };
 
 export type RoutePoolRouteRequest = {

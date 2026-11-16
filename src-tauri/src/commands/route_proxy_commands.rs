@@ -38,6 +38,40 @@ pub async fn get_route_proxy_key(
 }
 
 #[tauri::command]
+pub async fn get_route_proxy_pool_member_ids(
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, ApiError> {
+    crate::database::repositories::route_pool_repository::RoutePoolRepository::list_member_ids(
+        &state.pool,
+        "codex",
+    )
+    .await
+    .map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub async fn get_route_proxy_active_attempts(
+    state: State<'_, AppState>,
+) -> Result<crate::services::route_proxy_active_attempts::ActiveProxyAttemptSnapshot, ApiError> {
+    Ok(state.route_proxy.active_attempts().snapshot())
+}
+
+#[tauri::command]
+pub async fn list_route_proxy_account_summaries(
+    state: State<'_, AppState>,
+    platform: String,
+) -> Result<Vec<crate::models::route_credential::RouteProxyAccountSummary>, ApiError> {
+    let activity = state.route_proxy.activity();
+    crate::services::route_credential_service::RouteCredentialService::list_summaries(
+        &state.pool,
+        &activity,
+        &platform,
+    )
+    .await
+    .map_err(ApiError::from)
+}
+
+#[tauri::command]
 pub async fn write_route_proxy_configs(
     state: State<'_, AppState>,
     base_url: Option<String>,

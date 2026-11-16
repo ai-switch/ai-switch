@@ -1,6 +1,4 @@
-import { Bot, Briefcase, Plug, Terminal, Waves, type LucideIcon } from "lucide-react";
-import { AgentBrandMark, isAgentBrandKey } from "../components/brand/AgentBrandMark";
-import { AgentIcon, type AgentIconPlatform } from "../components/brand/AgentIcon";
+import { AgentLogo } from "../components/brand/AgentLogo";
 
 /**
  * 客户端接入页现在是**一张统一列表**，没有平台 tab。
@@ -73,48 +71,7 @@ type ClientIconProps = {
   className?: string;
 };
 
-/**
- * 卡片图标：有官方内联 SVG 的七个生态走 `AgentIcon`；其余第三方 Agent 用
- * 各自品牌色的矢量字标；都没匹配上才退回按客户端族给线性图标。
- */
+/** Shared offline client artwork for setup cards and the live routing view. */
 export function ClientIcon({ clientKey, className = "h-5 w-5" }: ClientIconProps) {
-  const brand = brandIconPlatform(clientKey);
-  if (brand) {
-    return <AgentIcon className={className} platform={brand} />;
-  }
-  if (isAgentBrandKey(clientKey)) {
-    return <AgentBrandMark className={className} clientKey={clientKey} />;
-  }
-  const Icon = fallbackIcon(clientKey);
-  return <Icon aria-hidden="true" className={className} />;
-}
-
-function brandIconPlatform(clientKey: string): AgentIconPlatform | null {
-  switch (clientKey) {
-    case "codex":
-      return "codex";
-    case "claude":
-    case CLAUDE_CODE_CLIENT_KEY:
-      return "claude";
-    case "gemini":
-      return "gemini";
-    case "grok":
-      return "grok";
-    case "opencode":
-      return "opencode";
-    case "openclaw":
-      return "openclaw";
-    case "hermes":
-      return "hermes";
-    default:
-      return null;
-  }
-}
-
-function fallbackIcon(clientKey: string): LucideIcon {
-  if (clientKey.startsWith("deepseek_harness")) return Waves;
-  if (clientKey.startsWith("workbuddy")) return Briefcase;
-  if (clientKey.startsWith("qoder")) return Terminal;
-  if (clientKey === "zcode" || clientKey.startsWith("codebuddy")) return Bot;
-  return Plug;
+  return <AgentLogo clientKey={clientKey} className={className} />;
 }

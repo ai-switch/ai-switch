@@ -1,6 +1,6 @@
 use super::{
-    existing_text, generated_invalid, invalid_existing_config, ClientModel, RouteConfigInput,
-    TargetAdapter, TargetInspection,
+    existing_text, generated_invalid, invalid_existing_config, route_proxy_key_matches, ClientModel,
+    RouteConfigInput, TargetAdapter, TargetInspection,
 };
 use crate::{error::AppError, models::platform::PlatformId};
 use serde_json::{json, Map, Value};
@@ -162,12 +162,12 @@ impl QoderCliAdapter {
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .unwrap_or_default();
-                let key_matches = !api_key.is_empty()
-                    && (api_key == input.route_proxy_key
-                        || input
-                            .route_proxy_key_aliases
-                            .iter()
-                            .any(|alias| alias == api_key));
+                let key_matches = route_proxy_key_matches(
+                    api_key,
+                    self.client_key(),
+                    &input.route_proxy_key,
+                    &input.route_proxy_key_aliases,
+                );
                 base_matches && key_matches
             })
             .map(|(key, _)| key.clone())
@@ -778,6 +778,48 @@ mod tests {
         assert_eq!(entry["apiKey"], CODEX_KEY);
         // A stray sampling key would make Qoder discard the whole provider.
         assert!(entry.get("temperature").is_none());
+    }
+
+    #[test]
+    fn adoption_recognizes_suffixed_and_legacy_keys() {
+        for configured in [
+            CODEX_KEY,
+            "sk-ai-switch-previous",
+            "sk-ai-switch-previous.qoder_cli",
+        ] {
+            let existing = format!(
+                r#"{{
+  "providers": {{
+    "my-proxy": {{
+      "type": "openai-compatible",
+      "displayName": "My Renamed Proxy",
+      "baseUrl": "http://127.0.0.1:19527/v1",
+      "apiKey": "{configured}"
+    }}
+  }}
+}}"#
+            );
+
+            let mut with_alias = input(&["gpt-5.6-sol"]);
+            with_alias.route_proxy_key = format!("{CODEX_KEY}.qoder_cli");
+            with_alias.route_proxy_key_aliases = vec!["sk-ai-switch-previous".to_string()];
+            let bytes = codex_adapter()
+                .render(Path::new("settings.json"), Some(existing.as_bytes()), &with_alias)
+                .expect("render");
+            let json: Value = serde_json::from_slice(&bytes).expect("valid JSON");
+            let providers = json["providers"].as_object().expect("providers");
+
+            assert_eq!(
+                providers.len(),
+                1,
+                "no duplicate for {configured}: {json}"
+            );
+            assert_eq!(
+                json["providers"]["my-proxy"]["apiKey"],
+                format!("{CODEX_KEY}.qoder_cli")
+            );
+            assert!(json["providers"].get("ai-switch-codex").is_none());
+        }
     }
 
     #[test]

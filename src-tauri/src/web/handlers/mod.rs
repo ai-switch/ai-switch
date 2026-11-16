@@ -1092,6 +1092,26 @@ pub async fn dispatch_command(
                     .map_err(to_error)?,
             )
         }
+        "get_route_proxy_pool_member_ids" => to_value(
+            crate::database::repositories::route_pool_repository::RoutePoolRepository::list_member_ids(
+                &state.pool,
+                "codex",
+            )
+            .await
+            .map_err(to_error)?,
+        ),
+        "get_route_proxy_active_attempts" => {
+            to_value(state.route_proxy.active_attempts().snapshot())
+        }
+        "list_route_proxy_account_summaries" => {
+            let platform = required_string_arg(&args, "platform")?;
+            let activity = state.route_proxy.activity();
+            to_value(
+                RouteCredentialService::list_summaries(&state.pool, &activity, &platform)
+                    .await
+                    .map_err(to_error)?,
+            )
+        }
         "get_route_proxy_https_status" => to_value(
             RouteProxyHttpsService::status_for_state(state.as_ref())
                 .await

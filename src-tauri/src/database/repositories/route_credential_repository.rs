@@ -3,7 +3,7 @@ use crate::error::AppError;
 use crate::models::route_credential::{
     RecoveryCandidate, ReorderRouteCredentialInput, RouteCredential, RouteCredentialFailurePolicy,
     RouteCredentialFilterOption, RouteCredentialPage, RouteCredentialPageRequest,
-    RouteCredentialPoolScope, UpdateRouteCredentialInput,
+    RouteCredentialPoolScope, RouteProxyAccountSummary, UpdateRouteCredentialInput,
     DEFAULT_ROUTE_CREDENTIAL_ERROR_STATUS_ENABLED, DEFAULT_ROUTE_CREDENTIAL_MAX_CONCURRENCY,
     DEFAULT_ROUTE_CREDENTIAL_PRIORITY,
 };
@@ -584,6 +584,24 @@ async fn create_with_connection(
 }
 
 impl RouteCredentialRepository {
+    pub async fn list_summaries(pool: &SqlitePool) -> Result<Vec<RouteProxyAccountSummary>, AppError> {
+        sqlx::query_as::<_, RouteProxyAccountSummary>(
+            "SELECT id, platform, display_name, route_priority, kind, status,
+                    max_concurrency, 0 AS active_request_count
+             FROM route_credentials WHERE platform = ?
+             ORDER BY route_priority, display_name, id",
+        )
+        .bind(super::route_pool_repository::UNIFIED_POOL_PLATFORM)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database {
+            code: "database.route_credential_summaries",
+            message: "Could not load account summaries".to_string(),
+            details: Some(error.to_string()),
+            recoverable: true,
+        })
+    }
+
     pub async fn create(
         pool: &SqlitePool,
         platform: &str,

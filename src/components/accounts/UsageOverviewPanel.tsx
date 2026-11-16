@@ -313,6 +313,10 @@ function RequestDetail({ row }: { row: UsageOverviewRow }) {
           }
         />
         <DetailField label="平台" value={row.provider} />
+        {/* Which client config sent the request. Rows written before client
+            suffixes existed, and internally scoped traffic, have no origin —
+            saying unknown beats inventing one from a user agent. */}
+        <DetailField label="客户端" value={metadata?.clientKey ?? "unknown"} />
         <DetailField label="模型" value={row.model} />
         {mapping ? <DetailField label="模型映射" value={mapping} /> : null}
         <DetailField label="账号" value={row.account_name ?? "未经代理"} />

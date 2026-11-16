@@ -97,6 +97,11 @@ pub struct RouteProxyLiveLogEntry {
     pub id: String,
     pub trace_id: Option<String>,
     pub platform: String,
+    /// Which client config this attempt came from, when the request's key named
+    /// one. `None` covers requests written before client suffixes existed and
+    /// internally scoped traffic; defaulted so older persisted lines still load.
+    #[serde(default)]
+    pub client_key: Option<String>,
     pub credential_id: String,
     pub credential_name: String,
     pub attempt: usize,
@@ -734,6 +739,7 @@ mod tests {
             id: id.to_string(),
             trace_id: None,
             platform: platform.to_string(),
+            client_key: None,
             credential_id: "cred".to_string(),
             credential_name: "Cred".to_string(),
             attempt: 0,

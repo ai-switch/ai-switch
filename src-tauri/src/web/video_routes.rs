@@ -428,10 +428,13 @@ async fn resolve_video_platform(
 ) -> Result<String, Response> {
     let from_key = match crate::services::route_proxy_service::extract_inbound_api_key(headers, query)
     {
-        Some(key) => RouteProxyKeyRepository::get_platform_by_key(pool, &key)
-            .await
-            .ok()
-            .flatten(),
+        Some(key) => {
+            let (base, _) = crate::services::route_proxy_service::split_route_proxy_client_key(&key);
+            RouteProxyKeyRepository::get_platform_by_key(pool, base)
+                .await
+                .ok()
+                .flatten()
+        }
         None => None,
     };
     // key 命中就以它为准；没命中（本地 token、SaaS key、或压根没带）再退回头/体字段。
@@ -767,6 +770,11 @@ mod tests {
                 .as_deref(),
             Some("codex")
         );
+
+        for (suffixed, accepted) in [(format!("{key}.zcode"), true), (format!("{key}.not_a_client"), false)] {
+            headers.insert(AUTHORIZATION, format!("Bearer {suffixed}").parse().unwrap());
+            assert_eq!(resolve_video_platform(&pool, &headers, None, b"{}").await.is_ok(), accepted);
+        }
 
         // 无效 key 且没有头/体字段 → 拒绝
         let mut bogus = HeaderMap::new();

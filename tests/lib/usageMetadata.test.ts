@@ -24,6 +24,7 @@ describe("parseUsageMetadata", () => {
         trace_id: "trace-1",
         requested_model: "claude-opus-5",
         upstream_model: "opus-upstream",
+        client_key: "claude_code",
         response_body: '{"id":"msg_a"}',
       }),
     );
@@ -35,10 +36,19 @@ describe("parseUsageMetadata", () => {
     expect(parsed.durationMs).toBe("1842");
     expect(parsed.requestedModel).toBe("claude-opus-5");
     expect(parsed.upstreamModel).toBe("opus-upstream");
+    expect(parsed.clientKey).toBe("claude_code");
     expect(parsed.responseBody).toBe('{"id":"msg_a"}');
     expect(parsed.errorMessage).toBeNull();
     // Keys with no named field of their own stay visible through `formatted`.
     expect(parsed.formatted).toContain('"path": "/v1/messages"');
+  });
+
+  it("reports a missing client_key as null rather than inventing one", () => {
+    // Rows written before client suffixes existed carry no origin; the panel
+    // shows that as unknown instead of guessing from a user agent.
+    const parsed = parseUsageMetadata(JSON.stringify({ path: "/v1/responses" }));
+
+    expect(parsed.clientKey).toBeNull();
   });
 
   it("prefers the compressed preview over the legacy plain one", () => {

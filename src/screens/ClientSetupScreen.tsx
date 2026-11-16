@@ -660,216 +660,231 @@ export function ClientSetupScreen({
   };
 
   return (
-    <div className="mx-auto w-full max-w-4xl px-4 py-5">
-      <header className="flex items-start gap-3">
-        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-stone-900 text-white">
-          <Plug aria-hidden="true" className="h-5 w-5" />
-        </span>
-        <div className="min-w-0">
-          <h1 className="text-lg font-semibold leading-tight tracking-tight text-stone-950">
-            客户端接入
-          </h1>
-          <p className="mt-1 text-[13px] leading-5 text-stone-600">
-            把同一个算力池接入常用 Agent：勾选要写入的客户端一键写入；其他工具手动复制端点参数。
-          </p>
-        </div>
-      </header>
-
-      {configWriteStale ? (
-        <p
-          className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] font-semibold text-amber-950"
-          role="status"
-        >
-          配置已变更，需重新写入才会生效。
-        </p>
-      ) : null}
-
-      {outcomes.length > 0 ? (
-        <div className="mt-4 space-y-1 rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-[12px] text-stone-600">
-          <div className="flex items-start justify-between gap-3">
-            <p className="font-semibold text-stone-950">配置写入结果</p>
-            <button
-              aria-label="关闭配置写入结果"
-              className="text-stone-400 motion-control hover:text-stone-700"
-              onClick={() => setOutcomes([])}
-              type="button"
-            >
-              ✕
-            </button>
-          </div>
-          {outcomes.map((outcome) => (
-            <div
-              className="rounded-lg border border-stone-200 bg-white px-2.5 py-2"
-              key={`${outcome.operation_id}:${outcome.target_key}:${outcome.snapshot_id ?? "none"}`}
-            >
-              <p>
-                {clientByTargetKey.get(outcome.target_key)?.display_name ?? outcome.target_key} ·{" "}
-                {outcome.platform}: {outcome.path || "未解析路径"} ({outcome.status})
-              </p>
-              <p className="mt-1 font-mono text-[11px] text-stone-500">
-                operation {outcome.operation_id} · snapshot {outcome.snapshot_id ?? "none"}
-              </p>
-              {outcome.error_code ? (
-                <p className="mt-1 font-mono text-[11px] text-red-600">{outcome.error_code}</p>
-              ) : null}
-            </div>
-          ))}
-          {outcomes.some(
-            (outcome) => clientByTargetKey.get(outcome.target_key)?.restart_required,
-          ) ? (
-            <p className="text-[11px] text-stone-500">
-              写入后需重启{" "}
-              {Array.from(
-                new Set(
-                  outcomes
-                    .map((outcome) => clientByTargetKey.get(outcome.target_key))
-                    .filter((client) => client?.restart_required)
-                    .map((client) => client?.display_name ?? ""),
-                ),
-              ).join("、")}{" "}
-              才生效（它不监听配置文件变化）。
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-
-      {writeError ? (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      <form className="flex min-h-0 flex-1 flex-col" onSubmit={submit}>
         <div
-          className="mt-4 flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-[12px] font-semibold text-red-700"
-          role="alert"
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+          data-testid="client-setup-scroll-region"
         >
-          <p>{writeError}</p>
-          <button
-            aria-label="关闭配置写入错误"
-            className="text-red-400 motion-control hover:text-red-700"
-            onClick={() => setWriteError(null)}
-            type="button"
-          >
-            ✕
-          </button>
-        </div>
-      ) : null}
+          <div className="mx-auto w-full max-w-4xl px-4 py-5">
+            <header className="flex items-start gap-3">
+              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-stone-900 text-white">
+                <Plug aria-hidden="true" className="h-5 w-5" />
+              </span>
+              <div className="min-w-0">
+                <h1 className="text-lg font-semibold leading-tight tracking-tight text-stone-950">
+                  客户端接入
+                </h1>
+                <p className="mt-1 text-[13px] leading-5 text-stone-600">
+                  把同一个算力池接入常用 Agent：勾选要写入的客户端一键写入；其他工具手动复制端点参数。
+                </p>
+              </div>
+            </header>
 
-      <form className="mt-4 grid gap-4" onSubmit={submit}>
-        <ModelModePicker
-          disabled={writing || setModelModeMutation.isPending}
-          mode={routePoolQuery.data?.model_mode ?? "precise"}
-          onChange={(mode) => setModelModeMutation.mutate(mode)}
-        />
-
-        <div className="grid gap-1.5">
-          <span className="text-[11px] font-semibold text-stone-600">智能体接入目标</span>
-          <p className="text-[11px] leading-5 text-stone-500">
-            账号池始终只有同一个。卡片上的接口格式决定写入时走哪组适配器与哪把接入 Key；
-            Claude Code 只有固定的 /model 槽位，需要单独设置。
-          </p>
-        </div>
-
-        {capabilityDisabledReason ? (
-          <p
-            className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-950"
-            role="alert"
-          >
-            {capabilityDisabledReason}
-          </p>
-        ) : null}
-
-        {clientsQuery.isLoading ? (
-          <p className="text-[12px] text-stone-500">读取客户端列表中...</p>
-        ) : clients.length === 0 ? (
-          <p className="rounded-xl bg-stone-50 px-3.5 py-3 text-xs leading-5 text-stone-600">
-            暂无可写入的客户端。
-          </p>
-        ) : (
-          <ul className="grid list-none gap-2 sm:grid-cols-2">{clients.map(renderClientCard)}</ul>
-        )}
-
-        {deepSeekHarnessSelected ? (
-          <label className="grid gap-1.5 rounded-xl bg-stone-50 px-3.5 py-3 text-xs text-stone-700">
-            <span className="text-[11px] font-semibold text-stone-600">DSH 配置文件路径</span>
-            <input
-              aria-label="DSH 配置文件路径"
-              className="h-8 rounded-md border border-stone-200 bg-white px-2.5 font-mono text-[11px] text-stone-800 outline-none placeholder:font-sans placeholder:text-stone-400 focus:border-blue-400"
-              disabled={Boolean(capabilityDisabledReason) || writing}
-              onChange={(event) => setDeepSeekHarnessPathOverride(event.target.value)}
-              placeholder={
-                selected.includes("deepseek_harness_desktop")
-                  ? "留空使用 ~/.dsh/profiles/desktop/cordis.patch.yml"
-                  : "留空使用 ~/.dsh/settings.yaml"
-              }
-              type="text"
-              value={deepSeekHarnessPath}
-            />
-            <span className="text-[11px] leading-5 text-stone-500">
-              需要绝对路径；留空时写回 DeepSeek Harness 默认位置。
-            </span>
-          </label>
-        ) : null}
-
-        {directSelectedClients.length > 0 ? (
-          <p
-            className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-3 text-xs leading-5 text-amber-950"
-            role="note"
-          >
-            本次写入成功后将结束{" "}
-            {directSelectedClients.map((client) => client.display_name).join("、")}
-            {" "}的直连模式，切回算力池；请重启该客户端。未勾选的客户端配置与认证保持不变。
-          </p>
-        ) : null}
-        {restartClients.length > 0 ? (
-          <p className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-3 text-xs leading-5 text-amber-950">
-            写入后需重启 {restartClients.map((client) => client.display_name).join("、")}{" "}
-            才生效（它不监听配置文件变化）。
-          </p>
-        ) : null}
-
-        <details className="rounded-xl border border-stone-200 bg-white px-3.5 py-3">
-          <summary className="cursor-pointer text-[12px] font-semibold text-stone-700">
-            手动配置参数（内置支持之外的 Agent）
-          </summary>
-          <div className="mt-3 grid gap-2.5">
-            <p className="text-xs leading-5 text-stone-500">
-              把下面的参数手动填进它自己的设置里，一样走当前算力池。
-            </p>
-            <div className="grid gap-2.5 rounded-md bg-stone-50 px-3.5 py-3">
-              <EndpointRow label="Base URL" value={httpEndpoint} />
-              {httpsEndpoint ? <EndpointRow label="HTTPS Base URL" value={httpsEndpoint} /> : null}
-              <EndpointRow label="API Key" secret value={routeServiceReady ? routeProxyKeyQuery.data ?? null : null} />
-              {imageEndpoint ? <EndpointRow label="图片端点" value={imageEndpoint} /> : null}
-            </div>
-            {imageEndpoint ? (
-              <p className="text-[11px] leading-5 text-stone-500">
-                图片端点走同一个池、同一张 key。可用的生图模型：
-                {poolImageModels.join("、")}。图片编辑（/v1/images/edits）目前只支持
-                interface_format 为 openai 的账号。
+            {configWriteStale ? (
+              <p
+                className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] font-semibold text-amber-950"
+                role="status"
+              >
+                配置已变更，需重新写入才会生效。
               </p>
             ) : null}
-            <p className="text-[11px] leading-5 text-stone-500">
-              {httpsEndpoint
-                ? "正常情况用上面的 Base URL（HTTP）即可。HTTPS 端点只给确实需要 TLS 的特殊场景，且客户端必须信任本地根证书。"
-                : routeProxyQuery.data?.https_error
-                  ? "正常情况用上面的 Base URL（HTTP）即可。HTTPS 端点本次未能启动，原因见设置里的 HTTPS 面板。"
-                  : "正常情况用上面的 Base URL（HTTP）即可。需要 TLS 的特殊场景可在设置里开启 HTTPS，它会另占一个端口。"}
-            </p>
-            <p className="text-[11px] leading-5 text-amber-800">
-              这里给出的是主接入 Key（Codex / Chat 协议族）。勾选写入时，网关会按每个客户端的接口格式自动填入对应的
-              Key；Anthropic Messages 客户端使用另一把 Key，已随配置一并写入，无需手工复制。
-            </p>
-          </div>
-        </details>
 
-        <div className="flex items-center justify-end gap-2 border-t border-stone-200 pt-3">
-          <span className="mr-auto text-[11px] text-stone-500">
-            只写入勾选的客户端，其他客户端的配置文件不会被改动。
-          </span>
-          <button
-            className="h-9 rounded-md bg-stone-900 px-4 text-sm font-semibold text-white motion-control hover:bg-stone-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={Boolean(capabilityDisabledReason) || writing || selected.length === 0}
-            type="submit"
-          >
-            {writing ? "写入中..." : "写入"}
-          </button>
+            {outcomes.length > 0 ? (
+              <div className="mt-4 space-y-1 rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-[12px] text-stone-600">
+                <div className="flex items-start justify-between gap-3">
+                  <p className="font-semibold text-stone-950">配置写入结果</p>
+                  <button
+                    aria-label="关闭配置写入结果"
+                    className="text-stone-400 motion-control hover:text-stone-700"
+                    onClick={() => setOutcomes([])}
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+                {outcomes.map((outcome) => (
+                  <div
+                    className="rounded-lg border border-stone-200 bg-white px-2.5 py-2"
+                    key={`${outcome.operation_id}:${outcome.target_key}:${outcome.snapshot_id ?? "none"}`}
+                  >
+                    <p>
+                      {clientByTargetKey.get(outcome.target_key)?.display_name ?? outcome.target_key} ·{" "}
+                      {outcome.platform}: {outcome.path || "未解析路径"} ({outcome.status})
+                    </p>
+                    <p className="mt-1 font-mono text-[11px] text-stone-500">
+                      operation {outcome.operation_id} · snapshot {outcome.snapshot_id ?? "none"}
+                    </p>
+                    {outcome.error_code ? (
+                      <p className="mt-1 font-mono text-[11px] text-red-600">{outcome.error_code}</p>
+                    ) : null}
+                  </div>
+                ))}
+                {outcomes.some(
+                  (outcome) => clientByTargetKey.get(outcome.target_key)?.restart_required,
+                ) ? (
+                  <p className="text-[11px] text-stone-500">
+                    写入后需重启{" "}
+                    {Array.from(
+                      new Set(
+                        outcomes
+                          .map((outcome) => clientByTargetKey.get(outcome.target_key))
+                          .filter((client) => client?.restart_required)
+                          .map((client) => client?.display_name ?? ""),
+                      ),
+                    ).join("、")}{" "}
+                    才生效（它不监听配置文件变化）。
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
+            {writeError ? (
+              <div
+                className="mt-4 flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-[12px] font-semibold text-red-700"
+                role="alert"
+              >
+                <p>{writeError}</p>
+                <button
+                  aria-label="关闭配置写入错误"
+                  className="text-red-400 motion-control hover:text-red-700"
+                  onClick={() => setWriteError(null)}
+                  type="button"
+                >
+                  ✕
+                </button>
+              </div>
+            ) : null}
+
+            <div className="mt-4 grid gap-4">
+              <ModelModePicker
+                disabled={writing || setModelModeMutation.isPending}
+                mode={routePoolQuery.data?.model_mode ?? "precise"}
+                onChange={(mode) => setModelModeMutation.mutate(mode)}
+              />
+
+              <div className="grid gap-1.5">
+                <span className="text-[11px] font-semibold text-stone-600">智能体接入目标</span>
+                <p className="text-[11px] leading-5 text-stone-500">
+                  账号池始终只有同一个。卡片上的接口格式决定写入时走哪组适配器与哪把接入 Key；
+                  Claude Code 只有固定的 /model 槽位，需要单独设置。
+                </p>
+              </div>
+
+              {capabilityDisabledReason ? (
+                <p
+                  className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-950"
+                  role="alert"
+                >
+                  {capabilityDisabledReason}
+                </p>
+              ) : null}
+
+              {clientsQuery.isLoading ? (
+                <p className="text-[12px] text-stone-500">读取客户端列表中...</p>
+              ) : clients.length === 0 ? (
+                <p className="rounded-xl bg-stone-50 px-3.5 py-3 text-xs leading-5 text-stone-600">
+                  暂无可写入的客户端。
+                </p>
+              ) : (
+                <ul className="grid list-none gap-2 sm:grid-cols-2">{clients.map(renderClientCard)}</ul>
+              )}
+
+              {deepSeekHarnessSelected ? (
+                <label className="grid gap-1.5 rounded-xl bg-stone-50 px-3.5 py-3 text-xs text-stone-700">
+                  <span className="text-[11px] font-semibold text-stone-600">DSH 配置文件路径</span>
+                  <input
+                    aria-label="DSH 配置文件路径"
+                    className="h-8 rounded-md border border-stone-200 bg-white px-2.5 font-mono text-[11px] text-stone-800 outline-none placeholder:font-sans placeholder:text-stone-400 focus:border-blue-400"
+                    disabled={Boolean(capabilityDisabledReason) || writing}
+                    onChange={(event) => setDeepSeekHarnessPathOverride(event.target.value)}
+                    placeholder={
+                      selected.includes("deepseek_harness_desktop")
+                        ? "留空使用 ~/.dsh/profiles/desktop/cordis.patch.yml"
+                        : "留空使用 ~/.dsh/settings.yaml"
+                    }
+                    type="text"
+                    value={deepSeekHarnessPath}
+                  />
+                  <span className="text-[11px] leading-5 text-stone-500">
+                    需要绝对路径；留空时写回 DeepSeek Harness 默认位置。
+                  </span>
+                </label>
+              ) : null}
+
+              {directSelectedClients.length > 0 ? (
+                <p
+                  className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-3 text-xs leading-5 text-amber-950"
+                  role="note"
+                >
+                  本次写入成功后将结束{" "}
+                  {directSelectedClients.map((client) => client.display_name).join("、")}
+                  {" "}的直连模式，切回算力池；请重启该客户端。未勾选的客户端配置与认证保持不变。
+                </p>
+              ) : null}
+              {restartClients.length > 0 ? (
+                <p className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-3 text-xs leading-5 text-amber-950">
+                  写入后需重启 {restartClients.map((client) => client.display_name).join("、")}{" "}
+                  才生效（它不监听配置文件变化）。
+                </p>
+              ) : null}
+
+              <details className="rounded-xl border border-stone-200 bg-white px-3.5 py-3">
+                <summary className="cursor-pointer text-[12px] font-semibold text-stone-700">
+                  手动配置参数（内置支持之外的 Agent）
+                </summary>
+                <div className="mt-3 grid gap-2.5">
+                  <p className="text-xs leading-5 text-stone-500">
+                    把下面的参数手动填进它自己的设置里，一样走当前算力池。
+                  </p>
+                  <div className="grid gap-2.5 rounded-md bg-stone-50 px-3.5 py-3">
+                    <EndpointRow label="Base URL" value={httpEndpoint} />
+                    {httpsEndpoint ? <EndpointRow label="HTTPS Base URL" value={httpsEndpoint} /> : null}
+                    <EndpointRow label="API Key" secret value={routeServiceReady ? routeProxyKeyQuery.data ?? null : null} />
+                    {imageEndpoint ? <EndpointRow label="图片端点" value={imageEndpoint} /> : null}
+                  </div>
+                  {imageEndpoint ? (
+                    <p className="text-[11px] leading-5 text-stone-500">
+                      图片端点走同一个池、同一张 key。可用的生图模型：
+                      {poolImageModels.join("、")}。图片编辑（/v1/images/edits）目前只支持
+                      interface_format 为 openai 的账号。
+                    </p>
+                  ) : null}
+                  <p className="text-[11px] leading-5 text-stone-500">
+                    {httpsEndpoint
+                      ? "正常情况用上面的 Base URL（HTTP）即可。HTTPS 端点只给确实需要 TLS 的特殊场景，且客户端必须信任本地根证书。"
+                      : routeProxyQuery.data?.https_error
+                        ? "正常情况用上面的 Base URL（HTTP）即可。HTTPS 端点本次未能启动，原因见设置里的 HTTPS 面板。"
+                        : "正常情况用上面的 Base URL（HTTP）即可。需要 TLS 的特殊场景可在设置里开启 HTTPS，它会另占一个端口。"}
+                  </p>
+                  <p className="text-[11px] leading-5 text-amber-800">
+                    这里给出的是主接入 Key（Codex / Chat 协议族）。勾选写入时，网关会按每个客户端的接口格式自动填入对应的
+                    Key；Anthropic Messages 客户端使用另一把 Key，已随配置一并写入，无需手工复制。
+                  </p>
+                </div>
+              </details>
+            </div>
+          </div>
         </div>
+
+        <footer className="shrink-0 border-t border-stone-200 bg-stone-100">
+          <div
+            aria-label="配置写入操作"
+            className="mx-auto flex w-full max-w-4xl shrink-0 items-center justify-end gap-3 px-4 py-3"
+            role="group"
+          >
+            <span className="mr-auto min-w-0 text-[11px] leading-5 text-stone-500">
+              只写入勾选的客户端，其他客户端的配置文件不会被改动。
+            </span>
+            <button
+              className="h-9 shrink-0 rounded-md bg-stone-900 px-4 text-sm font-semibold text-white motion-control hover:bg-stone-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={Boolean(capabilityDisabledReason) || writing || selected.length === 0}
+              type="submit"
+            >
+              {writing ? "写入中..." : "写入"}
+            </button>
+          </div>
+        </footer>
       </form>
 
       {slotDialogOpen ? (
