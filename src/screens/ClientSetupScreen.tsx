@@ -5,6 +5,7 @@ import { EndpointRow } from "../components/accounts/EndpointRow";
 import { ClaudeSlotSettingsDialog } from "../components/accounts/ClaudeSlotSettingsDialog";
 import {
   getClaudeSlotPlan,
+  getCodexLoginState,
   getClientDirectModes,
   getRoutePool,
   getRouteProxyKey,
@@ -344,6 +345,23 @@ export function ClientSetupScreen({
   });
 
   const clients = clientsQuery.data ?? [];
+  // Login diagnostics belong beside the write option. A failed probe must not
+  // block configuration writes; the backend still validates the actual login.
+  const codexLoginQuery = useQuery({
+    queryKey: ["codex-login-state"],
+    queryFn: getCodexLoginState,
+    enabled: desktop && clients.some((client) => client.client_key === "codex"),
+    retry: false,
+  });
+  const loginState = codexLoginQuery.data;
+  const codexLoginWarnings: Record<string, string> = {
+    missing: "未找到 Codex 登录态。请先执行 codex login 登录，否则开启该开关后写入配置会被拒绝。",
+    not_chatgpt: "当前 Codex 只有 API Key 登录，没有可保留的 ChatGPT 登录态。请先执行 codex login，或关闭该开关。",
+    unreadable: "Codex 登录文件无法读取。开启该开关后写入配置会被拒绝，请先检查该文件。",
+  };
+  const codexLoginWarning = loginState && !loginState.usable
+    ? codexLoginWarnings[loginState.state]
+    : null;
   const clientByTargetKey = useMemo(() => {
     const map = new Map<string, ConfigWriteClientStatus>();
     for (const client of clients) map.set(client.target_key, client);
@@ -437,10 +455,8 @@ export function ClientSetupScreen({
     onError: (error) => setSlotSettingsError(formatApiError(error, "保存槽位设置失败。")),
   });
 
-  // "Keep Codex login" lives in the same settings field as the toggle on the
-  // settings screen. Exposing it here, on the Codex card where configs are
-  // actually written, makes the option discoverable; both toggles stay in sync
-  // through the shared ["settings"] query cache. Off by default (backend default).
+  // Keep the existing persisted preference, with a single entry on the Codex
+  // card. Missing settings keep the opt-in off until loading finishes.
   const codexKeepLoginState = settingsQuery.data?.codex_keep_login_state ?? false;
   const saveCodexLoginMutation = useMutation({
     mutationFn: async (enabled: boolean) => {
@@ -564,7 +580,7 @@ export function ClientSetupScreen({
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!configWriteEnabled || writeConfigsMutation.isPending || selected.length === 0) return;
+    if (!configWriteEnabled || writeConfigsMutation.isPending || saveCodexLoginMutation.isPending || selected.length === 0) return;
     const customDeepSeekHarnessPath = deepSeekHarnessPath.trim();
     writeConfigsMutation.mutate({
       clientKeys: clients
@@ -656,25 +672,35 @@ export function ClientSetupScreen({
               {interfaceFormatHints[client.interface_format]}
             </span>
             {client.client_key === "codex" ? (
-              <label
-                className="flex max-w-md cursor-pointer items-start gap-2 rounded-lg border border-stone-200 bg-stone-50/70 px-2.5 py-2 text-[11px] font-semibold text-stone-700"
-                title="写入配置时让 Codex 继续使用自己的 ChatGPT 登录，保留联网搜索等仅登录可用的功能；需要 Codex 已登录。"
-              >
-                <input
-                  aria-label="保持 Codex 登录态"
-                  checked={codexKeepLoginState}
-                  className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-stone-900"
-                  disabled={writing || saveCodexLoginMutation.isPending}
-                  onChange={(event) => saveCodexLoginMutation.mutate(event.target.checked)}
-                  type="checkbox"
-                />
-                <span>
-                  保持 Codex 登录态
-                  <span className="mt-0.5 block font-normal leading-4 text-stone-500">
-                    保留 ChatGPT 登录以使用联网搜索等登录功能，默认关闭
+              <>
+                <label
+                  className="flex max-w-md cursor-pointer items-start gap-2 rounded-lg border border-stone-200 bg-stone-50/70 px-2.5 py-2 text-[11px] font-semibold text-stone-700"
+                  title="写入配置时让 Codex 继续使用自己的 ChatGPT 登录，保留联网搜索等仅登录可用的功能；需要 Codex 已登录。"
+                >
+                  <input
+                    aria-label="保持 Codex 登录态"
+                    checked={codexKeepLoginState}
+                    className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-stone-900"
+                    disabled={!settingsQuery.data || writing || saveCodexLoginMutation.isPending}
+                    onChange={(event) => saveCodexLoginMutation.mutate(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>
+                    保持 Codex 登录态
+                    <span className="mt-0.5 block font-normal leading-4 text-stone-500">
+                      保留 ChatGPT 登录以使用联网搜索等登录功能，默认关闭；下次写入配置时生效
+                    </span>
                   </span>
-                </span>
-              </label>
+                </label>
+                {codexLoginWarning ? (
+                  <p
+                    className="max-w-md rounded-lg border border-amber-200 bg-amber-50/70 px-2.5 py-2 text-[11px] leading-4 text-amber-900"
+                    role="status"
+                  >
+                    {codexLoginWarning}
+                  </p>
+                ) : null}
+              </>
             ) : null}
             {client.error_code ? (
               <span className="font-mono text-[11px] text-red-700">{client.error_code}</span>
@@ -917,7 +943,7 @@ export function ClientSetupScreen({
             </span>
             <button
               className="h-9 shrink-0 rounded-md bg-stone-900 px-4 text-sm font-semibold text-white motion-control hover:bg-stone-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={Boolean(capabilityDisabledReason) || writing || selected.length === 0}
+              disabled={Boolean(capabilityDisabledReason) || writing || saveCodexLoginMutation.isPending || selected.length === 0}
               type="submit"
             >
               {writing ? "写入中..." : "写入"}

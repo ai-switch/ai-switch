@@ -1,10 +1,11 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ClientSetupScreen } from "../src/screens/ClientSetupScreen";
 import { createQueryClient } from "../src/lib/query/queryClient";
 import type {
+  AppSettingsView,
   ClaudeSlotPlan,
   ConfigWriteClientStatus,
   ConfigWriteOutcome,
@@ -15,6 +16,7 @@ import type {
 
 vi.mock("../src/lib/api/client", () => ({
   getClaudeSlotPlan: vi.fn(),
+  getCodexLoginState: vi.fn(),
   getClientDirectModes: vi.fn(),
   getRoutePool: vi.fn(),
   getRouteProxyKey: vi.fn(),
@@ -37,6 +39,7 @@ vi.mock("../src/lib/transport", () => ({
 
 import {
   getClaudeSlotPlan,
+  getCodexLoginState,
   getClientDirectModes,
   getRoutePool,
   getRouteProxyKey,
@@ -189,6 +192,11 @@ describe("ClientSetupScreen", () => {
       platform === "claude" ? claudeClients : codexClients,
     );
     vi.mocked(getSettings).mockResolvedValue(settingsFixture);
+    vi.mocked(getCodexLoginState).mockResolvedValue({
+      usable: true,
+      state: "chatgpt",
+      auth_mode: "chatgpt",
+    });
     vi.mocked(saveSettings).mockImplementation(async (settings) => settings);
     vi.mocked(getRoutePool).mockResolvedValue({ model_mode: "precise" } as RoutePoolState);
     vi.mocked(getClientDirectModes).mockResolvedValue([]);
@@ -235,12 +243,19 @@ describe("ClientSetupScreen", () => {
 
     const toggle = await screen.findByRole("checkbox", { name: "保持 Codex 登录态" });
     expect(toggle).not.toBeChecked();
+    expect(screen.getByTestId("client-card-codex")).toContainElement(toggle);
     await user.click(toggle);
-    await waitFor(() =>
-      expect(saveSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ codex_keep_login_state: true }),
-      ),
-    );
+    await waitFor(() => expect(toggle).toBeChecked());
+    expect(saveSettings).toHaveBeenCalledWith({ ...settingsFixture, codex_keep_login_state: true });
+
+    await user.click(screen.getByRole("button", { name: "写入" }));
+    await waitFor(() => expect(writeRouteProxyConfigs).toHaveBeenCalled());
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(saveSettings).mock.calls[1][0].codex_keep_login_state).toBe(true);
+    await waitFor(() => expect(toggle).toBeEnabled());
+    await user.click(toggle);
+    await waitFor(() => expect(toggle).not.toBeChecked());
+    expect(vi.mocked(saveSettings).mock.calls.at(-1)?.[0].codex_keep_login_state).toBe(false);
   });
 
   it("only shows one keep-login toggle, and reflects a stored setting", async () => {
@@ -253,6 +268,92 @@ describe("ClientSetupScreen", () => {
     const toggles = await screen.findAllByRole("checkbox", { name: "保持 Codex 登录态" });
     expect(toggles).toHaveLength(1);
     expect(toggles[0]).toBeChecked();
+    expect(within(screen.getByTestId("client-card-zcode")).queryByRole("checkbox", {
+      name: "保持 Codex 登录态",
+    })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["missing", "未找到 Codex 登录态"],
+    ["not_chatgpt", "没有可保留的 ChatGPT 登录态"],
+    ["unreadable", "Codex 登录文件无法读取"],
+  ])("warns on the Codex card when the login state is %s", async (state, message) => {
+    vi.mocked(getCodexLoginState).mockResolvedValue({ usable: false, state });
+    setup();
+
+    const card = await screen.findByTestId("client-card-codex");
+    expect(await within(card).findByRole("status")).toHaveTextContent(message);
+    expect(within(card).getByRole("checkbox", { name: "保持 Codex 登录态" })).not.toBeChecked();
+  });
+
+  it.each(["chatgpt", "query-error"])("keeps the Codex card usable without a warning for %s", async (state) => {
+    if (state === "query-error") vi.mocked(getCodexLoginState).mockRejectedValue(new Error("unavailable"));
+    setup();
+
+    const card = await screen.findByTestId("client-card-codex");
+    await waitFor(() => expect(getCodexLoginState).toHaveBeenCalled());
+    expect(within(card).queryByRole("status")).not.toBeInTheDocument();
+    expect(within(card).getByRole("checkbox", { name: "保持 Codex 登录态" })).toBeEnabled();
+  });
+
+  it("waits for settings to load before allowing the keep-login option", async () => {
+    let resolveSettings!: (settings: AppSettingsView) => void;
+    vi.mocked(getSettings).mockReturnValue(new Promise((resolve) => { resolveSettings = resolve; }));
+    setup();
+
+    const toggle = await screen.findByRole("checkbox", { name: "保持 Codex 登录态" });
+    expect(toggle).toBeDisabled();
+    resolveSettings({ ...settingsFixture, codex_keep_login_state: true });
+    await waitFor(() => expect(toggle).toBeEnabled());
+    expect(toggle).toBeChecked();
+  });
+
+  it("blocks writes while saving the keep-login option and refreshes config staleness afterwards", async () => {
+    const user = userEvent.setup();
+    let resolveSave!: (settings: AppSettingsView) => void;
+    vi.mocked(saveSettings).mockImplementationOnce(() => new Promise((resolve) => { resolveSave = resolve; }));
+    setup();
+
+    const toggle = await screen.findByRole("checkbox", { name: "保持 Codex 登录态" });
+    await waitFor(() => expect(routeConfigWriteIsStale).toHaveBeenCalled());
+    const checksBeforeSave = vi.mocked(routeConfigWriteIsStale).mock.calls.length;
+    await user.click(toggle);
+    await waitFor(() => expect(toggle).toBeDisabled());
+    expect(screen.getByRole("button", { name: "写入" })).toBeDisabled();
+    fireEvent.submit(screen.getByRole("button", { name: "写入" }).closest("form")!);
+    expect(writeRouteProxyConfigs).not.toHaveBeenCalled();
+
+    resolveSave({ ...settingsFixture, codex_keep_login_state: true });
+    await waitFor(() => expect(toggle).toBeEnabled());
+    expect(toggle).toBeChecked();
+    await waitFor(() => expect(vi.mocked(routeConfigWriteIsStale).mock.calls.length).toBeGreaterThan(checksBeforeSave));
+    expect(screen.getByRole("button", { name: "写入" })).toBeEnabled();
+  });
+
+  it("keeps the stored login option when saving fails and shows an actionable error", async () => {
+    const user = userEvent.setup();
+    vi.mocked(saveSettings).mockRejectedValueOnce({ code: "settings.write_failed" });
+    setup();
+
+    const toggle = await screen.findByRole("checkbox", { name: "保持 Codex 登录态" });
+    await user.click(toggle);
+    expect(await screen.findByRole("alert")).toHaveTextContent("保存 Codex 登录态设置失败。");
+    await waitFor(() => expect(toggle).toBeEnabled());
+    expect(toggle).not.toBeChecked();
+    expect(writeRouteProxyConfigs).not.toHaveBeenCalled();
+  });
+
+  it("disables the keep-login option during config writes", async () => {
+    const user = userEvent.setup();
+    let resolveWrite!: (outcomes: ConfigWriteOutcome[]) => void;
+    vi.mocked(writeRouteProxyConfigs).mockReturnValueOnce(new Promise((resolve) => { resolveWrite = resolve; }));
+    setup();
+
+    const toggle = await screen.findByRole("checkbox", { name: "保持 Codex 登录态" });
+    await user.click(screen.getByRole("button", { name: "写入" }));
+    await waitFor(() => expect(toggle).toBeDisabled());
+    resolveWrite([]);
+    await waitFor(() => expect(toggle).toBeEnabled());
   });
 
   it("restores a stored selection", async () => {

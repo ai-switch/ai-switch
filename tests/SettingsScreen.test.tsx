@@ -119,8 +119,7 @@ describe("SettingsScreen", () => {
     vi.mocked(createMobilePairing).mockReset();
     vi.mocked(getSettings).mockReset();
     vi.mocked(getCodexLoginState).mockReset();
-    // Most cases never touch the Codex-login card, but the query still fires;
-    // a signed-in default keeps those tests focused on their own subject.
+    // The migrated entry must not probe Codex login from the settings page.
     vi.mocked(getCodexLoginState).mockResolvedValue({
       usable: true,
       state: "chatgpt",
@@ -392,9 +391,10 @@ describe("SettingsScreen", () => {
     expect(await screen.findByText("设置已保存。")).toBeInTheDocument();
   });
 
-  it("leaves the Codex login opt-in and saves it when ticked", async () => {
-    vi.mocked(getSettings).mockResolvedValue(settingsFixture);
-    vi.mocked(saveSettings).mockImplementation(async (settings) => settings);
+  it.each([false, true])("removes the Codex login entry without changing the stored preference %s", async (keepLogin) => {
+    const settings = { ...settingsFixture, codex_keep_login_state: keepLogin };
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(saveSettings).mockImplementation(async (updated) => updated);
 
     render(
       <QueryClientProvider client={createQueryClient()}>
@@ -404,58 +404,16 @@ describe("SettingsScreen", () => {
       </QueryClientProvider>,
     );
 
-    // Off unless the user opts in: enabling it drops the proxy key from the
-    // Codex provider, which only works when a ChatGPT login exists.
-    const toggle = await screen.findByRole("checkbox", { name: "保持 Codex 登录态" });
-    expect(toggle).not.toBeChecked();
+    const themeSelect = await screen.findByRole("combobox", { name: "主题外观" });
+    expect(screen.queryByRole("checkbox", { name: "保持 Codex 登录态" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Codex 登录态" })).not.toBeInTheDocument();
+    expect(getCodexLoginState).not.toHaveBeenCalled();
 
-    await userEvent.click(toggle);
-
-    await waitFor(() => expect(saveSettings).toHaveBeenCalled());
-    expect(vi.mocked(saveSettings).mock.calls.at(-1)![0]).toEqual({
-      ...settingsFixture,
-      codex_keep_login_state: true,
-    });
-  });
-
-  it("warns about a missing ChatGPT login before the switch is used", async () => {
-    // Turning the switch on without a ChatGPT login leaves Codex unable to
-    // authenticate; the write is refused, so say why before the user tries.
-    vi.mocked(getSettings).mockResolvedValue(settingsFixture);
-    vi.mocked(getCodexLoginState).mockResolvedValue({
-      usable: false,
-      state: "not_chatgpt",
-      auth_mode: "apikey",
-    });
-
-    render(
-      <QueryClientProvider client={createQueryClient()}>
-        <I18nProvider initialLanguage="zh-CN">
-          <SettingsScreen />
-        </I18nProvider>
-      </QueryClientProvider>,
-    );
-
-    expect(
-      await screen.findByText(/当前 Codex 只有 API Key 登录，没有可保留的 ChatGPT 登录态/),
-    ).toBeInTheDocument();
-  });
-
-  it("stays quiet when a ChatGPT login is available", async () => {
-    vi.mocked(getSettings).mockResolvedValue(settingsFixture);
-
-    render(
-      <QueryClientProvider client={createQueryClient()}>
-        <I18nProvider initialLanguage="zh-CN">
-          <SettingsScreen />
-        </I18nProvider>
-      </QueryClientProvider>,
-    );
-
-    await screen.findByRole("checkbox", { name: "保持 Codex 登录态" });
-    expect(
-      screen.queryByText(/没有可保留的 ChatGPT 登录态/),
-    ).not.toBeInTheDocument();
+    await userEvent.selectOptions(themeSelect, "dark");
+    await waitFor(() => expect(vi.mocked(saveSettings).mock.calls.at(-1)?.[0]).toEqual({
+      ...settings,
+      theme: "dark",
+    }));
   });
 
   it("saves language changes and updates the selector", async () => {
