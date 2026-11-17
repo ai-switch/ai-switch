@@ -811,7 +811,7 @@ const claudeModelSources = [
   { value: "claude-3-5-haiku-20241022", label: "Claude 3.5 Haiku" },
 ];
 
-function defaultOfficialJson(platform: PlatformKey) {
+function officialJsonPlaceholder(platform: PlatformKey) {
   return `{
   "type": "${platform}",
   "email": "name@example.com",
@@ -3632,7 +3632,7 @@ export function AccountsScreen({
   // several accounts that differ only by key is not: leaving it unchecked keeps
   // Base URL, mappings and the rest in place for the next round.
   const [resetFormAfterCreate, setResetFormAfterCreate] = useState(true);
-  const [officialText, setOfficialText] = useState(() => defaultOfficialJson(activePlatform));
+  const [officialText, setOfficialText] = useState("");
   const [officialProvider, setOfficialProvider] = useState<OfficialAccountProvider>(() =>
     (officialAccountProviders.find((item) => item.platform === activePlatform)?.value ?? "openai"),
   );
@@ -4405,7 +4405,7 @@ export function AccountsScreen({
   // here — a field left out is one that survives into the next account.
   const resetCreateForm = useCallback(() => {
     const nextInterfaceFormat = defaultInterfaceFormat(activePlatform, capabilityFilter);
-    setOfficialText(defaultOfficialJson(activePlatform));
+    setOfficialText("");
     setOfficialProvider(officialAccountProviders.find((item) => item.platform === activePlatform)?.value ?? "openai");
     setApiProvider(null);
     setOfficialBatchName("");
@@ -6966,17 +6966,6 @@ export function AccountsScreen({
               </div>
             </div>
             {!vectorView ? <div aria-label="账号列表操作" role="group" className="flex shrink-0 items-center gap-1.5 justify-self-end border-l border-stone-300/80 pl-2 sm:gap-2 sm:pl-3">
-            {selectedAccountIds.size > 0 && (
-              <button
-                aria-label="导出选中账号"
-                className="grid h-7 w-7 place-items-center border border-stone-300 bg-white text-stone-700 motion-control hover:bg-stone-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-400"
-                onClick={openExport}
-                title="导出选中账号"
-                type="button"
-              >
-                <Download aria-hidden="true" className="h-3.5 w-3.5" />
-              </button>
-            )}
             <button
               aria-label="新增账号"
               className="grid h-7 w-7 place-items-center border border-stone-700 bg-stone-800 text-white motion-control hover:bg-stone-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-400"
@@ -7519,7 +7508,7 @@ export function AccountsScreen({
                   </button>
                 </div>
               </div>
-              {selectedAccountIds.size > 0 && <div className="flex flex-wrap items-center gap-2">
+              {selectedAccountIds.size > 0 && <div aria-label="账号批量操作" className="flex flex-wrap items-center gap-2" role="group">
                   <>
                     <select
                       aria-label="批量设置状态"
@@ -7576,6 +7565,16 @@ export function AccountsScreen({
                     )}
                   </select>
                   </>
+                <button
+                  aria-label="导出选中账号"
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-amber-200 bg-white px-2.5 py-1.5 text-[12px] font-semibold text-stone-700 motion-control hover:bg-stone-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-400"
+                  onClick={openExport}
+                  title="导出选中账号"
+                  type="button"
+                >
+                  <Download aria-hidden="true" className="h-3.5 w-3.5" />
+                  导出
+                </button>
                 <button
                   aria-label="批量删除账号"
                   className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-200 bg-white px-2.5 py-1.5 text-[12px] font-semibold text-red-700 motion-control hover:bg-red-50 disabled:opacity-50"
@@ -9375,8 +9374,8 @@ export function AccountsScreen({
             }
           }}
         >
-          <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-stone-200 bg-white p-4 shadow-2xl">
-            <div className="flex items-center justify-between gap-4">
+          <div aria-label="新增账号" aria-modal="true" role="dialog" className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-stone-200 bg-white p-4 shadow-2xl">
+            <div className="flex shrink-0 items-center justify-between gap-4">
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-stone-400">
                   {platformLabels[activePlatform]}
@@ -9393,7 +9392,8 @@ export function AccountsScreen({
               </button>
             </div>
 
-            <div className="mt-4 grid gap-1 rounded-xl bg-stone-100 p-1 sm:grid-cols-3">
+            <div className="mt-4 min-h-0 flex-1 overflow-y-auto">
+            <div className="grid gap-1 rounded-xl bg-stone-100 p-1 sm:grid-cols-3">
               {[
                 ["api", "API 账号"],
                 ...(!mediaView ? [["official", "批量导入"], ["external", "导入其他客户端"]] : []),
@@ -9757,7 +9757,7 @@ export function AccountsScreen({
                     className={fieldClass}
                     onChange={(event) => {
                       setOfficialProvider(event.target.value as OfficialAccountProvider);
-                      setOfficialText(defaultOfficialJson(officialProviderPlatform(event.target.value as OfficialAccountProvider)));
+                      setOfficialText("");
                       setOfficialFilePaths([]);
                     }}
                     value={officialProvider}
@@ -9847,7 +9847,7 @@ export function AccountsScreen({
                         setOfficialFilePaths([]);
                       }
                     }}
-                    placeholder={'示例：直接粘贴 session JSON、accessToken、Sub2API 导出 JSON，或 {"accessToken":"eyJ..."}'}
+                    placeholder={officialJsonPlaceholder(officialProviderPlatform(officialProvider))}
                     value={officialText}
                   />
                 </label>
@@ -9898,12 +9898,6 @@ export function AccountsScreen({
               </div>
             )}
 
-            {createMutation.error && (
-              <p role="alert" className="mt-4 rounded-xl bg-red-50 p-3 text-[13px] font-semibold text-red-700">
-                {formatApiError(createMutation.error, "新增账号失败。")}
-              </p>
-            )}
-
             <label className="mt-4 flex items-start gap-2 rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-[12px] font-medium text-stone-700">
               <input
                 aria-label="提交完重置表单"
@@ -9921,7 +9915,15 @@ export function AccountsScreen({
               </span>
             </label>
 
-            <div className="mt-4 flex justify-end gap-2 border-t border-stone-100 pt-3">
+            </div>
+
+            {createMutation.error && (
+              <p role="alert" className="mt-4 max-h-24 shrink-0 overflow-y-auto rounded-xl bg-red-50 p-3 text-[13px] font-semibold text-red-700">
+                {formatApiError(createMutation.error, "新增账号失败。")}
+              </p>
+            )}
+
+            <div className="mt-4 flex shrink-0 justify-end gap-2 border-t border-stone-100 bg-white pt-3">
               <button
                 className={secondaryButtonClass}
                 onClick={() => setCreateOpen(false)}

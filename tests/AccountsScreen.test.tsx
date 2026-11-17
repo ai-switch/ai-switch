@@ -1241,7 +1241,8 @@ describe("AccountsScreen", () => {
     expect(screen.queryByLabelText("导出选中账号")).not.toBeInTheDocument();
     await userEvent.click(screen.getByLabelText("选择 Team Account"));
     expect(screen.getByText("已选 1 个账号")).toBeInTheDocument();
-    expect(screen.getByLabelText("导出选中账号")).toBeInTheDocument();
+    expect(within(screen.getByRole("group", { name: "账号批量操作" })).getByLabelText("导出选中账号")).toBeInTheDocument();
+    expect(within(screen.getByRole("group", { name: "账号列表操作" })).queryByLabelText("导出选中账号")).not.toBeInTheDocument();
     await userEvent.selectOptions(screen.getByLabelText("移动到分组"), "codex-default");
 
     await waitFor(() =>
@@ -3747,6 +3748,25 @@ describe("AccountsScreen", () => {
     expect(await screen.findByText("异常")).toBeInTheDocument();
   });
 
+  it("keeps batch import examples as placeholders and rejects an empty submission", async () => {
+    renderScreen();
+
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "批量导入" }));
+    const input = screen.getByLabelText("账号 JSON");
+    expect(input).toHaveValue("");
+    expect(input.getAttribute("placeholder")).toContain('"type": "codex"');
+    fireEvent.change(input, { target: { value: "user-owned-json" } });
+    await userEvent.selectOptions(screen.getByLabelText("官方订阅来源"), "claude");
+    expect(input).toHaveValue("");
+    expect(input.getAttribute("placeholder")).toContain('"type": "claude"');
+    await userEvent.type(screen.getByLabelText("导入批量名称"), "Empty Batch");
+    await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("请粘贴账号 JSON，或选择 JSON 文件导入。");
+    expect(importOfficialRouteCredentialsFromText).not.toHaveBeenCalled();
+    expect(importOfficialRouteCredentialsFromFiles).not.toHaveBeenCalled();
+  });
+
   it("imports a single official CPA credential from the add dialog", async () => {
     renderScreen();
 
@@ -3767,6 +3787,11 @@ describe("AccountsScreen", () => {
         batch_name: "Codex Batch",
       }),
     );
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "新增账号" })).not.toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "批量导入" }));
+    expect(screen.getByLabelText("账号 JSON")).toHaveValue("");
+    expect(screen.getByLabelText("账号 JSON").getAttribute("placeholder")).toContain('"type": "codex"');
   });
 
   it("places Codex OAuth beside JSON import and requires the shared batch name", async () => {
