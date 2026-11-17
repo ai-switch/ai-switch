@@ -4,9 +4,19 @@
 
 AI Switch 是一个用于切换 AI 供应商与官方账号的应用，有桌面端和自托管 Web 服务两种形态。
 
-<img width="2360" height="1520" alt="ai-switch" src="https://github.com/user-attachments/assets/fbd3932e-29a7-4e3f-a980-e93fb093b643" />
+## 界面预览
 
-当前已有的基础能力：
+截图基于当前界面，使用演示账号数据；实时路由图展示应用内置的模拟流量。
+
+### 账号列表
+
+![AI Switch 账号列表：账号分组、额度与路由状态](docs/screenshots/accounts.png)
+
+### 实时路由
+
+![AI Switch 实时路由：客户端、统一网关与算力池连线](docs/screenshots/live-routing.png)
+
+## 基础能力
 
 - Tauri 2 + React + TypeScript 桌面外壳
 - 桌面端与 Web 端共用同一个 Rust 核心，只在传输层不同

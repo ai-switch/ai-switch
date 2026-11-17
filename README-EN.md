@@ -4,9 +4,19 @@ English | [简体中文](README.md)
 
 AI Switch is a desktop and self-hosted Web app for AI provider and official account switching.
 
-<img width="2360" height="1520" alt="ai-switch" src="https://github.com/user-attachments/assets/fbd3932e-29a7-4e3f-a980-e93fb093b643" />
+## Interface Preview
 
-Current foundation includes:
+These screenshots show the current interface with demo account data. The live routing view uses the app's built-in traffic simulation.
+
+### Account List
+
+![AI Switch account list: account groups, quotas, and routing status](docs/screenshots/accounts.png)
+
+### Live Routing
+
+![AI Switch live routing: connections between clients, the unified gateway, and the compute pool](docs/screenshots/live-routing.png)
+
+## Core Features
 
 - Tauri 2 + React + TypeScript desktop shell
 - Shared Rust core with desktop and Web transports
