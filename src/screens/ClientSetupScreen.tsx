@@ -437,6 +437,24 @@ export function ClientSetupScreen({
     onError: (error) => setSlotSettingsError(formatApiError(error, "保存槽位设置失败。")),
   });
 
+  // "Keep Codex login" lives in the same settings field as the toggle on the
+  // settings screen. Exposing it here, on the Codex card where configs are
+  // actually written, makes the option discoverable; both toggles stay in sync
+  // through the shared ["settings"] query cache. Off by default (backend default).
+  const codexKeepLoginState = settingsQuery.data?.codex_keep_login_state ?? false;
+  const saveCodexLoginMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const settings = settingsQuery.data;
+      if (!settings) throw new Error("设置尚未加载完成。");
+      return saveSettings({ ...settings, codex_keep_login_state: enabled });
+    },
+    onSuccess: (settings) => {
+      queryClient.setQueryData(["settings"], settings);
+      void queryClient.invalidateQueries({ queryKey: ["route-config-stale"] });
+    },
+    onError: (error) => setWriteError(formatApiError(error, "保存 Codex 登录态设置失败。")),
+  });
+
   const writeConfigsMutation = useMutation({
     mutationFn: async ({
       clientKeys,
@@ -637,6 +655,27 @@ export function ClientSetupScreen({
             <span className="text-[10px] leading-4 text-stone-400">
               {interfaceFormatHints[client.interface_format]}
             </span>
+            {client.client_key === "codex" ? (
+              <label
+                className="flex max-w-md cursor-pointer items-start gap-2 rounded-lg border border-stone-200 bg-stone-50/70 px-2.5 py-2 text-[11px] font-semibold text-stone-700"
+                title="写入配置时让 Codex 继续使用自己的 ChatGPT 登录，保留联网搜索等仅登录可用的功能；需要 Codex 已登录。"
+              >
+                <input
+                  aria-label="保持 Codex 登录态"
+                  checked={codexKeepLoginState}
+                  className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-stone-900"
+                  disabled={writing || saveCodexLoginMutation.isPending}
+                  onChange={(event) => saveCodexLoginMutation.mutate(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>
+                  保持 Codex 登录态
+                  <span className="mt-0.5 block font-normal leading-4 text-stone-500">
+                    保留 ChatGPT 登录以使用联网搜索等登录功能，默认关闭
+                  </span>
+                </span>
+              </label>
+            ) : null}
             {client.error_code ? (
               <span className="font-mono text-[11px] text-red-700">{client.error_code}</span>
             ) : null}

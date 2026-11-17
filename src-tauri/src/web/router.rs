@@ -17,7 +17,8 @@ use crate::app_state::AppState;
 use crate::error::ApiError;
 use crate::services::mobile_pairing::MobileTokenRegistry;
 use crate::services::route_proxy_service::{
-    build_proxy_state, is_shared_model_api_path, proxy_handler, ProxyAppState,
+    build_proxy_state, is_shared_model_api_path, proxy_handler, split_route_proxy_client_key,
+    ProxyAppState,
 };
 use crate::services::web_service::WebService;
 use crate::web::auth::{authorize_api_request, ApiAuthState, WebAuthLevel};
@@ -152,7 +153,7 @@ async fn shared_fallback(
     body: Body,
 ) -> Response {
     if is_shared_model_api_path(uri.path()) {
-        let key = crate::services::route_proxy_service::extract_inbound_api_key(&headers, None);
+        let key = crate::services::route_proxy_service::extract_inbound_api_key(&headers, uri.query());
         if let Err(error) = context.state.saas.initialize(&context.state.pool).await {
             return crate::saas::transport::error_response(error);
         }
@@ -170,7 +171,10 @@ async fn shared_fallback(
             && !crate::web::auth::is_authorized(&headers, &context.token)
         {
             let valid = match crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository::list_all(&context.state.pool).await {
-                Ok(keys) => key.as_ref().is_some_and(|key| keys.iter().any(|(stored,_)|stored==key)),
+                Ok(keys) => key.as_ref().is_some_and(|key| {
+                    let (base, _) = split_route_proxy_client_key(key);
+                    keys.iter().any(|(stored, _)| stored == base)
+                }),
                 Err(_) => false,
             };
             if !valid {
@@ -677,6 +681,77 @@ mod tests {
             response.json::<Value>().await.unwrap()["code"],
             "saas.invalid_key"
         );
+        server.abort();
+    }
+
+    /// Regression: client-config writers append a `.codex` / `.zcode` / etc.
+    /// suffix to the local key. The shared-listener key gate must strip that
+    /// suffix before comparing against the stored base key, otherwise a freshly
+    /// configured client gets `saas.invalid_key` (401) on every model request.
+    /// Mirrors the plugin's `client_suffixes_authenticate_at_the_production_router...`.
+    #[tokio::test]
+    async fn saas_gateway_accepts_client_suffixed_local_keys() {
+        let (address, server, state, _temp) =
+            spawn_test_router_with_state(Arc::new(AtomicBool::new(true)), "primary-secret").await;
+        state.saas.initialize(&state.pool).await.unwrap();
+        crate::saas::repository::test_enable(&state.pool).await;
+        crate::database::repositories::route_proxy_key_repository::RouteProxyKeyRepository::ensure_platform_key(
+            &state.pool,
+            "codex",
+            "sk-suffixed-gate",
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+
+        // A bare key must keep working: it is what older configs (written before
+        // client suffixes existed) and manually copied endpoint keys carry.
+        // Legitimate client suffixes must clear the gate too.
+        for key in ["sk-suffixed-gate", "sk-suffixed-gate.codex", "sk-suffixed-gate.zcode"] {
+            let response = client
+                .get(format!("http://{address}/v1/models"))
+                .bearer_auth(key)
+                .send()
+                .await
+                .unwrap();
+            assert_ne!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{key} must pass the key gate, not return saas.invalid_key"
+            );
+        }
+
+        // keep-login shape: the ChatGPT bearer token stays in Authorization
+        // while the local listener is authenticated by a suffixed x-api-key.
+        // x-api-key is decisive, and its suffix must be stripped at the gate.
+        let response = client
+            .get(format!("http://{address}/v1/models"))
+            .bearer_auth("chatgpt-login-token-must-not-be-used-as-proxy-key")
+            .header("x-api-key", "sk-suffixed-gate.codex")
+            .header("x-ai-switch-platform", "codex")
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "keep-login request with suffixed x-api-key must pass the key gate"
+        );
+
+        // Unknown suffix or wrong base key must still be rejected.
+        for key in ["sk-suffixed-gate.not_a_client", "wrong-key.codex"] {
+            let response = client
+                .get(format!("http://{address}/v1/models"))
+                .bearer_auth(key)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{key} must be rejected"
+            );
+        }
         server.abort();
     }
 

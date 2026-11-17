@@ -229,6 +229,32 @@ describe("ClientSetupScreen", () => {
     expect(screen.getByRole("checkbox", { name: "写入 Claude Code" })).not.toBeChecked();
   });
 
+  it("shows the Codex keep-login toggle off by default and persists it on the shared settings field", async () => {
+    const user = userEvent.setup();
+    setup();
+
+    const toggle = await screen.findByRole("checkbox", { name: "保持 Codex 登录态" });
+    expect(toggle).not.toBeChecked();
+    await user.click(toggle);
+    await waitFor(() =>
+      expect(saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ codex_keep_login_state: true }),
+      ),
+    );
+  });
+
+  it("only shows one keep-login toggle, and reflects a stored setting", async () => {
+    vi.mocked(getSettings).mockResolvedValue({
+      ...settingsFixture,
+      codex_keep_login_state: true,
+    });
+    setup();
+
+    const toggles = await screen.findAllByRole("checkbox", { name: "保持 Codex 登录态" });
+    expect(toggles).toHaveLength(1);
+    expect(toggles[0]).toBeChecked();
+  });
+
   it("restores a stored selection", async () => {
     vi.mocked(getSettings).mockResolvedValue({
       ...settingsFixture,

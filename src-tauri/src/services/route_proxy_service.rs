@@ -18513,6 +18513,29 @@ data: [DONE]\n\n";
     }
 
     #[tokio::test]
+    async fn keep_login_request_still_yields_the_codex_client_identity() {
+        // With "keep Codex login" on, the request carries the ChatGPT token in
+        // Authorization and the local suffixed key in x-api-key. The shared
+        // listener strips the spoofable platform header, so the live-route /
+        // usage panels must derive the client identity from the key suffix.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer chatgpt-login-token"),
+        );
+        headers.insert("x-api-key", HeaderValue::from_static("sk-local.codex"));
+        headers.insert(ROUTE_PROXY_PLATFORM_HEADER, HeaderValue::from_static("codex"));
+        headers.remove(ROUTE_PROXY_PLATFORM_HEADER); // shared_fallback does this for non-admin callers
+
+        let inbound = extract_inbound_api_key(&headers, None);
+        // x-api-key wins over the ChatGPT bearer token even with both present.
+        assert_eq!(inbound.as_deref(), Some("sk-local.codex"));
+        let (base, client) = split_route_proxy_client_key(inbound.as_deref().unwrap());
+        assert_eq!(base, "sk-local");
+        assert_eq!(client, Some("codex"), "live route must still attribute this to Codex");
+    }
+
+    #[tokio::test]
     async fn resolve_platform_without_key_or_header_fails_closed() {
         use crate::database::{create_memory_pool, run_migrations};
 
