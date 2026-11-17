@@ -236,6 +236,13 @@ pub fn sanitize_source_url(url_str: &str) -> String {
 }
 
 fn map_app(app: &str) -> Result<(String, String), AppError> {
+    // 统一账号池之后，`app` 参数不再决定账号进哪个池 —— `route_pool_repository`
+    // 里的 `UNIFIED_POOL_PLATFORM` 恒为 `codex`，服务层会忽略一切传入的平台参数，
+    // 无论 `app` 是什么都汇入同一个统一池。它剩下的唯一职责是声明账号的上游线
+    // 协议方言（见 `default_deeplink_dialect`）：同一把中转站 key 按 `app` 不同
+    // 会以 anthropic / openai-responses / gemini / openai(chat) 四种方言发请求。
+    // 对上游（new-api、sub2api、one-api 等）的一键导入链接而言，`app` 仍然是
+    // 必填且不可省略的字段。
     let platform = PlatformId::parse(app)?;
     PlatformCapabilityService::require(platform, PlatformOperation::DeeplinkImport)?;
     let dialect = default_deeplink_dialect(platform);
@@ -288,9 +295,7 @@ fn build_model_query_pairs<'a>(
         return Ok(Vec::new());
     };
     let expected_from = match platform {
-        PlatformId::Codex => "gpt-5",
-        PlatformId::Gemini => "gemini-2.5-flash",
-        PlatformId::Grok => "grok-3",
+        PlatformId::Codex | PlatformId::Gemini | PlatformId::Grok => mapping.to.as_str(),
         PlatformId::Claude | PlatformId::OpenCode | PlatformId::OpenClaw | PlatformId::Hermes => {
             unreachable!("handled or rejected before model serialization")
         }
@@ -395,14 +400,17 @@ fn build_model_mappings_json(
             "Opus",
         );
     } else if let Some(model) = optional_nonempty(params, "model") {
-        let from = match platform {
-            "codex" => "gpt-5",
-            "gemini" => "gemini-2.5-flash",
-            "grok" => "grok-3",
+        // 统一账号池后不存在「某平台默认请求某个固定模型」这回事：客户端请求的
+        // 模型名由可配置的基线模型 / 客户端自己决定。一键链接的 `model` 参数写的
+        // 是中转站真实服务的模型 ID，所以直通 model -> model —— 与本地 cc-switch
+        // 导入（extract_codex_model_mappings）一致，也避免再写死 gpt-5 这类过期别名。
+        // 这里仍校验 app 是认识的单模型方言，而不是无条件接受未知 app。
+        match platform {
+            "codex" | "gemini" | "grok" => {}
             _ => return Err(format!("无法为应用 {app} 生成模型映射")),
-        };
+        }
         mappings.push(ModelMapping {
-            from: from.into(),
+            from: model.clone(),
             to: model,
             label: None,
             supports_1m: None,
@@ -521,7 +529,7 @@ mod tests {
     #[test]
     fn builds_supported_aiswitch_links_losslessly() {
         let codex_mappings = vec![ModelMapping {
-            from: "gpt-5".into(),
+            from: "gpt-5.2-codex".into(),
             to: "gpt-5.2-codex".into(),
             label: None,
             supports_1m: None,
@@ -560,7 +568,7 @@ mod tests {
         assert_round_trip("claude", "anthropic", &claude_mappings, &claude_mappings);
 
         let gemini_mappings = vec![ModelMapping {
-            from: "gemini-2.5-flash".into(),
+            from: "gemini-3-pro".into(),
             to: "gemini-3-pro".into(),
             label: None,
             supports_1m: None,
@@ -569,7 +577,7 @@ mod tests {
         assert_round_trip("gemini", "gemini", &gemini_mappings, &gemini_mappings);
 
         let grok_mappings = vec![ModelMapping {
-            from: "grok-3".into(),
+            from: "grok-4.5".into(),
             to: "grok-4.5".into(),
             label: None,
             supports_1m: None,
@@ -630,6 +638,24 @@ mod tests {
             &empty_headers,
         );
         assert_safe_build_error(&input, "deeplink_export.multiple_models_unsupported");
+
+        // A single row whose `from` differs from `to` can no longer round-trip:
+        // the link carries only `model=<to>` and import rebuilds `from == to`.
+        // Refuse it rather than hand over a link whose alias silently changes.
+        let renamed_mapping = vec![ModelMapping {
+            from: "gpt-5".into(),
+            to: "gpt-5.2-codex".into(),
+            label: None,
+            supports_1m: None,
+            ..Default::default()
+        }];
+        let input = build_input(
+            "codex",
+            "openai-responses",
+            &renamed_mapping,
+            &empty_headers,
+        );
+        assert_safe_build_error(&input, "deeplink_export.models_unsupported");
 
         let supports_1m = vec![ModelMapping {
             from: "claude-sonnet-alias".into(),
@@ -738,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_aiswitch_codex_and_maps_model() {
+    fn parses_aiswitch_codex_and_passes_model_through() {
         let url = "aiswitch://v1/import?resource=provider&app=codex&name=DeepLink%20Codex&endpoint=https%3A%2F%2Fapi.openai.example%2Fv1&apiKey=sk-test-codex&model=gpt-4.1";
         let parsed = parse_deeplink_url(url).expect("parse");
         assert_eq!(parsed.scheme, "aiswitch");
@@ -747,7 +773,7 @@ mod tests {
         let mappings: Vec<ModelMapping> =
             serde_json::from_str(&parsed.model_mappings_json).unwrap();
         assert_eq!(mappings.len(), 1);
-        assert_eq!(mappings[0].from, "gpt-5");
+        assert_eq!(mappings[0].from, "gpt-4.1");
         assert_eq!(mappings[0].to, "gpt-4.1");
     }
 
@@ -762,7 +788,7 @@ mod tests {
             assert_eq!(parsed.interface_format, "openai");
             let mappings: Vec<ModelMapping> =
                 serde_json::from_str(&parsed.model_mappings_json).unwrap();
-            assert_eq!(mappings[0].from, "grok-3");
+            assert_eq!(mappings[0].from, "grok-4.5");
             assert_eq!(mappings[0].to, "grok-4.5");
         }
     }

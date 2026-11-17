@@ -111,12 +111,12 @@ Rules:
 
 Other platforms:
 
-- If `model` is present, create one mapping:
-  - `from`:
-    - `codex` -> `gpt-5`
-    - `gemini` -> `gemini-2.5-flash`
-    - `grok` -> `grok-3`
-  - `to`: deep-link `model`
+- ~~If `model` is present, create one mapping with a hardcoded `from` per platform
+  (`codex` -> `gpt-5`, `gemini` -> `gemini-2.5-flash`, `grok` -> `grok-3`).~~
+  **已于 2026-11-17 废弃**：统一账号池后不再有「某平台默认请求某个固定模型」这回事，
+  客户端请求的模型名由可配置基线模型 / 客户端决定。现行为是 `model` 存在时建一条
+  同名直通映射 `model -> model`，与本地 cc-switch 导入（`extract_codex_model_mappings`）
+  一致；导出侧只接受 `from == to` 的单条映射，保证 scheme 链接无损往返。
 - If absent, use `[]`.
 
 This matches the product rule that default model mappings stay empty unless explicitly provided.

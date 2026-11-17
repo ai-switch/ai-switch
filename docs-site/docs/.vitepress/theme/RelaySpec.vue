@@ -110,7 +110,7 @@ const COPY = {
 
     modelTitle: "模型映射怎么填",
     modelLead:
-      "模型参数写的是「上游真实模型 ID」，AI Switch 会把客户端固定请求的那个模型名映射到它。左边是客户端请求名，右边是你填进去的值。",
+      "模型参数写的是中转站真实服务的模型 ID，AI Switch 按同名直通建映射（模型名 → 它自己），不会再把它映射到某个写死的客户端默认模型。左边是客户端请求名，右边是上游模型名。",
     modelClaudeHead: "app=claude",
     modelOtherHead: "app=codex / gemini / grok",
     modelClaude: [
@@ -119,9 +119,7 @@ const COPY = {
       { param: "opusModel", from: "claude-opus-alias" },
     ],
     modelOther: [
-      { param: "model", from: "gpt-5", note: "app=codex" },
-      { param: "model", from: "gemini-2.5-flash", note: "app=gemini" },
-      { param: "model", from: "grok-3", note: "app=grok" },
+      { param: "model", from: "填写的模型 ID", note: "app=codex / gemini / grok" },
     ],
     modelNote:
       "模型参数可以完全不填，导入后由用户自己在账号里加映射。留空不影响导入成功。",
@@ -239,7 +237,7 @@ const COPY = {
 
     modelTitle: "Filling in model mappings",
     modelLead:
-      "A model parameter carries the real upstream model ID. AI Switch maps the fixed model name the client asks for onto it. Left is the client-side name, right is the value you supply.",
+      "A model parameter carries the model ID the relay actually serves. AI Switch creates a same-name pass-through mapping (model → itself) instead of mapping it onto a hardcoded client default. Left is the client-side name, right is the upstream model name.",
     modelClaudeHead: "app=claude",
     modelOtherHead: "app=codex / gemini / grok",
     modelClaude: [
@@ -248,9 +246,7 @@ const COPY = {
       { param: "opusModel", from: "claude-opus-alias" },
     ],
     modelOther: [
-      { param: "model", from: "gpt-5", note: "app=codex" },
-      { param: "model", from: "gemini-2.5-flash", note: "app=gemini" },
-      { param: "model", from: "grok-3", note: "app=grok" },
+      { param: "model", from: "the model ID you supply", note: "app=codex / gemini / grok" },
     ],
     modelNote:
       "Model parameters are entirely optional — leave them out and the user adds mappings themselves after import. An empty mapping does not affect import.",
