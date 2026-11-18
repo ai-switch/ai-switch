@@ -5,9 +5,10 @@
 
 ## 构建目录约束
 
-- 仓库内只允许使用两个 Rust/Cargo 构建目录：`src-tauri/target/` 仅用于本地 dev 运行（包括 `pnpm tauri:dev`），`src-tauri/target-codex/` 仅用于 AI 调试、测试和验证。
-- AI 调试或验证命令必须复用 `src-tauri/target-codex/`；在 `src-tauri` 工作目录执行时使用 `CARGO_TARGET_DIR=target-codex`。禁止创建根目录 `target/`、`target-*`、`src-tauri/target-codex-test/`、`src-tauri/target-codex-pairing/` 或 `.codex-run/**/target` 等其他 target 目录。
-- 不得为并行任务或临时检查新建第三个 target。任务结束后清理临时构建产物；若既有 target 被进程占用，先停止对应的 dev/调试进程，再复用或清理该目录。
+- 只允许两个逻辑构建通道：dev 通道用于本地运行（包括 `pnpm tauri:dev`），AI 通道用于 AI 调试、测试和验证。两者的物理位置由本机 Cargo 分流器决定，不再固定为仓库内目录。
+- 在装有本机分流器（`%USERPROFILE%\.cargo\target-router`）的 Windows 机器上，先运行 `cargo --target-router-info build --manifest-path src-tauri/Cargo.toml` 取得实际目录：默认输出为 `E:\Temp\Rust\<包名>\<工作区哈希>`，`target-codex` 为同级 `<工作区哈希>-codex`。未装分流器的环境回退到仓库内 `src-tauri/target/` 与 `src-tauri/target-codex/`。
+- AI 调试或验证命令用 `CARGO_TARGET_DIR=target-codex` 选择 AI 通道即可，分流器会把它落到 E 盘同名后缀目录；**不要在脚本或文档里写死 `E:\Temp\Rust` 绝对路径**，那会绑死单机。`otools` 目录及其子项目不参与分流，保持原有目录。
+- 禁止创建根目录 `target/`、其他 `target-*`、`src-tauri/target-codex-test/`、`src-tauri/target-codex-pairing/` 或 `.codex-run/**/target` 等额外通道。不得为并行任务或临时检查新建第三套目录；任务结束后清理临时产物，若目录被进程占用先停止对应 dev/调试进程。
 
 ## 发布新版规则
 

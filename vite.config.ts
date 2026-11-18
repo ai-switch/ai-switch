@@ -6,7 +6,32 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 
-const DEV_API_TARGET = process.env.AI_SWITCH_DEV_API_TARGET ?? "http://127.0.0.1:10086";
+const DEV_WEBSERVICE_CONFIG_PATH = join(homedir(), ".ai-switch", "web-service-dev.json");
+
+/**
+ * dev 实例的 Web 服务端口住在 `~/.ai-switch/web-service-dev.json`（默认 10086，
+ * 被本机其他服务占用时可在该文件里改掉，例如换成 18086）。代理目标跟着这个文件
+ * 走，与桌面端 dev 实例永远一致；`AI_SWITCH_DEV_API_TARGET` 仍可显式覆盖。
+ * token 的读取保持惰性（只在 dev server 的 proxy configure 里发生）。
+ */
+function resolveDevApiTarget(): string {
+  const fromEnv = process.env.AI_SWITCH_DEV_API_TARGET?.trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+  try {
+    const port = (JSON.parse(readFileSync(DEV_WEBSERVICE_CONFIG_PATH, "utf8")) as { port?: number })
+      .port;
+    if (port && Number.isFinite(port)) {
+      return `http://127.0.0.1:${port}`;
+    }
+  } catch {
+    // 从没跑过桌面端（文件不存在）或读不出端口：退回历史默认 10086。
+  }
+  return "http://127.0.0.1:10086";
+}
+
+const DEV_API_TARGET = resolveDevApiTarget();
 
 /// The dev page can never authenticate itself: the local dev runtime skips the web
 /// auth gate (`canSkipWebAuthGate` in App.tsx), so nothing ever writes a token to
@@ -24,18 +49,18 @@ function resolveDevApiAuthHeaders(): Record<string, string> {
     return { Authorization: `Bearer ${fromEnv}` };
   }
 
-  const configPath = join(homedir(), ".ai-switch", "web-service-dev.json");
   try {
-    const token = (JSON.parse(readFileSync(configPath, "utf8")) as { token?: string }).token?.trim();
+    const token = (JSON.parse(readFileSync(DEV_WEBSERVICE_CONFIG_PATH, "utf8")) as { token?: string })
+      .token?.trim();
     if (token) {
-      console.log(`[dev] /api -> ${DEV_API_TARGET} (token from ${configPath})`);
+      console.log(`[dev] /api -> ${DEV_API_TARGET} (token from ${DEV_WEBSERVICE_CONFIG_PATH})`);
       return { Authorization: `Bearer ${token}` };
     }
     console.log(`[dev] /api -> ${DEV_API_TARGET} (no token configured; expect 401)`);
   } catch {
     // No local install yet: leave the requests unauthenticated rather than failing
     // the dev server, and say so, because every /api call will come back 401.
-    console.log(`[dev] /api -> ${DEV_API_TARGET} (no ${configPath}; expect 401)`);
+    console.log(`[dev] /api -> ${DEV_API_TARGET} (no ${DEV_WEBSERVICE_CONFIG_PATH}; expect 401)`);
   }
   return {};
 }

@@ -56,6 +56,8 @@ $env:CARGO_TARGET_DIR = 'target-codex'
 cargo test --locked --lib --no-default-features --features sqlx/postgres saas::logs
 ```
 
+`target-codex` 只表示走 AI 验证通道，物理位置由本机设置决定：装有 Cargo 分流器时落在 `E:\Temp\Rust\<包名>\<工作区哈希>-codex`，其他环境为 `src-tauri/target-codex`。用 `cargo --target-router-info build` 可查实际目录；关键是不要与 dev 通道共用同一目录。
+
 Pure unit/filesystem/lifecycle tests require no services. Ignored tests **must be run against real, disposable services**; they are not mock-driver verification. Set `SAAS_LOG_REDIS_URL` and/or `SAAS_LOG_POSTGRES_URL` in the environment, then run the applicable test:
 
 ```powershell

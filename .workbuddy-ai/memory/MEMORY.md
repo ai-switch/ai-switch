@@ -69,6 +69,9 @@
 ## 文档站 docs-site
 - 自己的 workspace 根（`docs-site/pnpm-workspace.yaml` `packages: ['.']`）。**别删**。构建 `pnpm --dir docs-site docs:build`。
 - **新增页面必跑 `docs:build`**：frontmatter `description` 里裸冒号会构建失败（改用 `；`/`—`）。新增页面改 4 处：`docs/` 与 `docs/en/` 两个 md + `config.mts` 的 `zhSidebar`/`enSidebar`（键必须带 `/en/` 前缀）。
+- 构建绕过本机删除垫片：`CODEBUDDY_SAFE_DELETE_ENABLED=0 pnpm docs:build`（或 `NODE_OPTIONS=""`），否则清 dist/.temp 时 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`。
+- ⚠️ **重建 dist 后必须重启 `docs:preview`**：它缓存静态资源索引，不重启则新 chunk 全 404 → Vue 不挂载 → `onMounted` 的 IntersectionObserver 不跑 → 首页 10 个 `.hp-reveal` 保持 `opacity:0` 像白屏。先抓浏览器 404，别当成 reveal 代码回归。
+- 本机视觉校验：`playwright-core@1.63.0` 已在 managed workspace，Chromium 在 `%LOCALAPPDATA%/ms-playwright/chromium-1243/chrome-win64/chrome.exe`，启动加 `--no-proxy-server`；脚本放 `.workbuddy-ai/tmp/`。整页截图前要先滚动一遍，否则 reveal 区块还是隐藏的。
 
 ## 测试
 - 打真实表的手写 SQL 要配跑真实迁移的测试，手搓 schema 会掩盖 DDL 漂移。

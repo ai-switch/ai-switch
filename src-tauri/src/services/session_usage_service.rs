@@ -651,7 +651,8 @@ fn parse_codex_file(path: &Path) -> ParsedFile {
             // Some writers flush the aggregate heartbeat before its individual
             // records. Do not rewind a checkpoint already seen in this turn;
             // otherwise the next legacy delta charges these records again.
-            let older_checkpoint = previous.is_some_and(|previous| {
+            let baseline = previous;
+            let older_checkpoint = baseline.is_some_and(|previous| {
                 record.total.delta_from(previous).is_none()
                     && (legacy_checkpoints.contains_key(&previous)
                         || record_checkpoints.contains(&previous))
@@ -666,6 +667,32 @@ fn parse_codex_file(path: &Path) -> ParsedFile {
                 // request must not include this record's usage again.
                 previous = Some(record.total);
             }
+            // When `usage` equals `thread_token_usage`, this writer copied the
+            // cumulative checkpoint into the per-response field. Charging that
+            // number here would add the whole thread once per response (one
+            // gateway rollout produced 746M cached reads over 175 requests).
+            // Recover this response's own usage by differencing checkpoints.
+            // Native Codex only has usage == total on a thread's first response,
+            // where baseline is None and the fallback is identical to the
+            // recorded usage — so this changes nothing for those writers.
+            let usage = if record.cumulative_as_usage && !older_checkpoint {
+                match baseline.and_then(|prev| record.total.delta_from(prev)) {
+                    Some(delta)
+                        if delta.input_tokens > 0
+                            || delta.output_tokens > 0
+                            || delta.cache_read_tokens > 0
+                            || delta.cache_write_tokens > 0 =>
+                    {
+                        delta
+                    }
+                    // No earlier checkpoint to difference against, or this is a
+                    // late duplicate of the same checkpoint. Keep the recorded
+                    // usage — for native writers that is the real per-turn value.
+                    _ => record.usage,
+                }
+            } else {
+                record.usage
+            };
             record_checkpoints.insert(record.total);
             pending_response_id = None;
             let entry_model = model.clone().unwrap_or_else(|| "unknown".to_string());
@@ -675,13 +702,13 @@ fn parse_codex_file(path: &Path) -> ParsedFile {
                 dedup_key: codex_dedup_key(
                     Some(&record.id),
                     &entry_model,
-                    &record.usage,
+                    &usage,
                     timestamp_ms,
                 ),
                 response_id: Some(record.id),
                 model: entry_model,
                 timestamp_ms,
-                usage: record.usage,
+                usage,
             }));
             continue;
         }
@@ -742,8 +769,14 @@ fn parse_codex_file(path: &Path) -> ParsedFile {
 /// record into a zero-cost success that suppresses the valid legacy fallback.
 struct CodexUsageRecord {
     id: String,
+    /// Usage already reduced to one request, when the writer is trustworthy.
     usage: TokenUsage,
+    /// Cumulative checkpoint after this response.
     total: CodexCumulative,
+    /// `usage` and `thread_token_usage` were byte-for-byte identical. Some
+    /// gateways copy the cumulative checkpoint into `usage` too; taking that
+    /// at face value would charge the whole thread once per response.
+    cumulative_as_usage: bool,
 }
 
 impl CodexUsageRecord {
@@ -758,6 +791,7 @@ impl CodexUsageRecord {
         Some(Self {
             id: id.to_string(),
             usage: usage.usage(),
+            cumulative_as_usage: usage == total,
             total,
         })
     }
