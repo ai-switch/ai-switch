@@ -331,6 +331,29 @@ mod tests {
         assert_eq!(app_error_code(&unused), "validation.transfer_choice_unused");
     }
 
+    /// 统一池下 platform 恒为 codex，官方账号的真实来源只能靠 metadata.provider
+    /// 保留。Claude 订阅账号若丢失这个字段，会被默认推导成 openai。
+    #[test]
+    fn official_provider_survives_unified_pool_round_trip() {
+        let mut claude = official_item();
+        metadata_mut(&mut claude).insert("provider".to_string(), json!("claude"));
+        let text = Value::Array(vec![Value::Object(claude)]).to_string();
+        let normalized = normalize_transfer_items(&text, &[]).expect("normalize claude official");
+        let item = normalized[0].as_ref().expect("clean item");
+        assert_eq!(item.kind, "official");
+        assert_eq!(item.platform, "codex");
+        assert_eq!(item.provider.as_deref(), Some("claude"));
+
+        // An API-only provider is not a valid official source and is ignored.
+        let mut invalid = official_item();
+        metadata_mut(&mut invalid).insert("provider".to_string(), json!("openrouter"));
+        let text = Value::Array(vec![Value::Object(invalid)]).to_string();
+        let normalized = normalize_transfer_items(&text, &[]).expect("normalize invalid provider");
+        let item = normalized[0].as_ref().expect("clean item");
+        assert_eq!(item.provider, None);
+        assert!(item.issue_codes.contains(&"transfer.metadata_field_ignored".to_string()));
+    }
+
     #[test]
     fn mixed_official_and_api_arrays_normalize_independently() {
         let text = Value::Array(vec![
@@ -2791,7 +2814,10 @@ fn parse_transfer_metadata(
         &mut issue_codes,
     )?;
 
-    // `provider` 只对 API 账号透传；官方账号的来源由 platform 推导且不可改。
+    // 统一池下所有账号的 platform 都是 codex，不能再从 platform 反推官方账号的
+    // 来源厂商（codex→openai 会把 Claude 订阅账号错标成 openai）。导出侧已把真实
+    // provider 写进 metadata，这里对官方账号按厂商白名单透传；API 账号仍只允许
+    // parse_api 的预设值。
     let provider = optional_string(object, "provider")
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty());
@@ -2799,6 +2825,14 @@ fn parse_transfer_metadata(
         (_, None) => None,
         ("api", Some(value)) => {
             if AccountProvider::parse_api(&value).is_some() {
+                Some(value)
+            } else {
+                push_issue_code(&mut issue_codes, "transfer.metadata_field_ignored");
+                None
+            }
+        }
+        ("official", Some(value)) => {
+            if AccountProvider::parse_official(&value).is_some() {
                 Some(value)
             } else {
                 push_issue_code(&mut issue_codes, "transfer.metadata_field_ignored");
@@ -3195,7 +3229,7 @@ fn normalize_official_item(
         source_identity,
         batch_key,
         in_pool: metadata.in_pool,
-        provider: None,
+        provider: metadata.provider.clone(),
         fingerprint,
         issue_codes,
     })

@@ -337,6 +337,20 @@ impl AccountProvider {
             _ => None,
         }
     }
+
+    /// Official accounts are already pinned to a vendor; unlike API accounts
+    /// their provider cannot be inferred from a base URL. The unified pool
+    /// stores every credential with `platform="codex"`, so the transfer format
+    /// must carry the real source in `provider` and we must accept it here.
+    pub fn parse_official(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "openai" => Some(Self::OpenAi),
+            "claude" => Some(Self::Claude),
+            "gemini" => Some(Self::Gemini),
+            "grok" => Some(Self::Grok),
+            _ => None,
+        }
+    }
 }
 
 /// Display-only account data; never includes credential payloads or settings.
