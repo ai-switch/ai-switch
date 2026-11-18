@@ -1,17 +1,12 @@
 use crate::error::AppError;
 use crate::models::platform::PlatformId;
-use crate::services::cpa_import_service::ParsedOfficialCredential;
+use crate::services::cpa_import_service::{infer_vendor_platform, ParsedOfficialCredential};
 use serde_json::{json, Map, Value};
 use std::path::Path;
 
 const SHAPE_ERROR_CODE: &str = "validation.sub2api_shape";
 
-pub fn parse_sub2api_text(
-    platform: &str,
-    text: &str,
-) -> Result<Vec<ParsedOfficialCredential>, AppError> {
-    let platform = PlatformId::parse(platform)?;
-    let platform = platform.as_str();
+pub fn parse_sub2api_text(text: &str) -> Result<Vec<ParsedOfficialCredential>, AppError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err(shape_error("Sub2API import text is empty", None));
@@ -22,9 +17,9 @@ pub fn parse_sub2api_text(
     match value {
         Value::Object(object) => {
             if let Some(accounts) = object.get("accounts") {
-                parse_sub2api_accounts_wrapper(&platform, accounts)
+                parse_sub2api_accounts_wrapper(accounts)
             } else if is_sub2api_object(&object) {
-                parse_sub2api_object(&platform, &object).map(|credential| vec![credential])
+                parse_sub2api_object(&object).map(|credential| vec![credential])
             } else {
                 Err(shape_error(
                     "Sub2API import JSON does not look like a sub2api credential",
@@ -51,7 +46,7 @@ pub fn parse_sub2api_text(
                             Some(format!("Entry {index} is not an object")),
                         )
                     })?;
-                    parse_sub2api_object(&platform, object)
+                    parse_sub2api_object(object)
                 })
                 .collect()
         }
@@ -63,11 +58,10 @@ pub fn parse_sub2api_text(
 }
 
 pub fn parse_sub2api_file<P: AsRef<Path>>(
-    platform: &str,
     path: P,
     content: &str,
 ) -> Result<Vec<ParsedOfficialCredential>, AppError> {
-    parse_sub2api_text(platform, content).map_err(|err| with_file_context(err, path.as_ref()))
+    parse_sub2api_text(content).map_err(|err| with_file_context(err, path.as_ref()))
 }
 
 pub fn is_sub2api_shape_error(err: &AppError) -> bool {
@@ -75,7 +69,6 @@ pub fn is_sub2api_shape_error(err: &AppError) -> bool {
 }
 
 fn parse_sub2api_accounts_wrapper(
-    platform: &str,
     accounts: &Value,
 ) -> Result<Vec<ParsedOfficialCredential>, AppError> {
     let accounts = accounts.as_array().ok_or_else(|| {
@@ -104,29 +97,26 @@ fn parse_sub2api_accounts_wrapper(
                     Some(format!("Entry {index} is not an object")),
                 )
             })?;
-            parse_sub2api_object(platform, object)
+            parse_sub2api_object(object)
         })
         .collect()
 }
 
 fn parse_sub2api_object(
-    platform: &str,
     object: &Map<String, Value>,
 ) -> Result<ParsedOfficialCredential, AppError> {
-    let selected_platform = PlatformId::parse(platform)?;
-    let selected_platform = selected_platform.as_str();
-    let declared_platform = declared_platform(object);
-    let inferred_platform = declared_platform.clone().or_else(|| infer_platform(object));
-
-    if let Some(raw_platform) = inferred_platform.as_deref() {
-        if !platforms_match(&selected_platform, raw_platform) {
-            return Err(validation_error(
-                "validation.sub2api_platform_mismatch",
-                "Sub2API credential platform does not match the selected platform",
-                Some(format!("expected {selected_platform}, got {raw_platform}")),
-            ));
-        }
-    }
+    let vendor = declared_platform(object)
+        .as_deref()
+        .and_then(infer_vendor_platform)
+        .or_else(|| infer_platform(object).and_then(|value| infer_vendor_platform(&value)))
+        .ok_or_else(|| {
+            validation_error(
+                "validation.sub2api_platform_undetermined",
+                "Cannot determine account vendor from Sub2API entry; add a platform/provider field",
+                None,
+            )
+        })?;
+    let selected_platform = vendor.as_str();
 
     let email = first_string_path(
         object,
@@ -383,6 +373,7 @@ fn parse_sub2api_object(
     Ok(ParsedOfficialCredential {
         display_name,
         email,
+        platform: selected_platform.to_string(),
         secret_payload_json,
         config_json: Value::Object(config).to_string(),
     })
@@ -507,16 +498,6 @@ fn normalize_imported_headers(platform: &str, headers: &Value) -> Value {
     Value::Object(map)
 }
 
-fn platforms_match(expected_platform: &str, raw_platform: &str) -> bool {
-    matches!(
-        (
-            PlatformId::parse(expected_platform),
-            PlatformId::parse(raw_platform)
-        ),
-        (Ok(expected), Ok(actual)) if expected == actual
-    )
-}
-
 fn shape_error(message: &str, details: Option<String>) -> AppError {
     validation_error(SHAPE_ERROR_CODE, message, details)
 }
@@ -562,10 +543,11 @@ mod tests {
           }
         }]"#;
 
-        let parsed = parse_sub2api_text("claude", text).unwrap();
+        let parsed = parse_sub2api_text(text).unwrap();
 
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].email.as_deref(), Some("a@example.com"));
+        assert_eq!(parsed[0].platform, "claude");
         assert!(parsed[0].secret_payload_json.contains("sk-ant-oat01-aaaa"));
         assert!(parsed[0].config_json.contains("\"type\":\"claude\""));
     }
@@ -600,13 +582,14 @@ mod tests {
           "auto_pause_on_expired": true
         }"#;
 
-        let parsed = parse_sub2api_text("codex", text).unwrap();
+        let parsed = parse_sub2api_text(text).unwrap();
 
         assert_eq!(parsed.len(), 1);
         assert_eq!(
             parsed[0].email.as_deref(),
             Some("tallisbisaccia737@hotmail.com")
         );
+        assert_eq!(parsed[0].platform, "codex");
         assert!(parsed[0].secret_payload_json.contains("id-token"));
         assert!(parsed[0].secret_payload_json.contains("private-key"));
         assert!(parsed[0]
@@ -642,39 +625,35 @@ mod tests {
           }]
         }"#;
 
-        let parsed = parse_sub2api_text("codex", text).unwrap();
+        let parsed = parse_sub2api_text(text).unwrap();
 
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].display_name, "codex-user");
         assert_eq!(parsed[0].email.as_deref(), Some("codex@example.com"));
+        assert_eq!(parsed[0].platform, "codex");
         assert!(parsed[0]
             .secret_payload_json
             .contains("\"access_token\":\"at\""));
     }
 
     #[test]
-    fn rejects_sub2api_platform_mismatch() {
-        let text = r#"{
-          "platform": "openai",
-          "credentials": {
-            "access_token": "at",
-            "refresh_token": "rt"
-          }
-        }"#;
+    fn infers_each_vendor_independently_in_mixed_wrapper() {
+        let text = r#"{"accounts":[
+          {"platform":"openai","name":"codex-user","credentials":{"email":"o@example.com","access_token":"at","refresh_token":"rt"}},
+          {"platform":"anthropic","name":"claude-user","credentials":{"email":"c@example.com","access_token":"sk-ant-oat01-a","refresh_token":"sk-ant-ort01-b"}}
+        ]}"#;
 
-        let error = parse_sub2api_text("claude", text).unwrap_err();
+        let parsed = parse_sub2api_text(text).unwrap();
 
-        match error {
-            AppError::Validation { code, message, .. } => {
-                assert_eq!(code, "validation.sub2api_platform_mismatch");
-                assert!(message.contains("platform"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(
+            parsed.iter().map(|item| item.platform.as_str()).collect::<Vec<_>>(),
+            vec!["codex", "claude"]
+        );
     }
 
     #[test]
-    fn rejects_sub2api_substring_platform_aliases() {
+    fn rejects_unknown_vendor_without_a_selected_platform() {
         let text = r#"{
           "platform": "my-grok-wrapper",
           "credentials": {
@@ -683,12 +662,12 @@ mod tests {
           }
         }"#;
 
-        let error = parse_sub2api_text("grok", text).expect_err("substring aliases are unsafe");
+        let error = parse_sub2api_text(text).unwrap_err();
 
         assert!(matches!(
             error,
             AppError::Validation {
-                code: "validation.sub2api_platform_mismatch",
+                code: "validation.sub2api_platform_undetermined",
                 ..
             }
         ));
@@ -697,7 +676,7 @@ mod tests {
     #[test]
     fn reports_shape_error_for_plain_cpa_object() {
         let text = r#"{"type":"codex","access_token":"at","refresh_token":"rt"}"#;
-        let error = parse_sub2api_text("codex", text).unwrap_err();
+        let error = parse_sub2api_text(text).unwrap_err();
         assert!(is_sub2api_shape_error(&error));
     }
 }

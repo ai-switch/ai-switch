@@ -119,6 +119,7 @@ pub(super) fn parse_auth_json(
     Ok(ParsedOfficialCredential {
         display_name: email.clone().unwrap_or_else(|| "Codex account".to_string()),
         email,
+        platform: "codex".to_string(),
         secret_payload_json,
         config_json,
     })

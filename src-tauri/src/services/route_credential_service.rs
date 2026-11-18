@@ -304,19 +304,20 @@ impl RouteCredentialService {
         pool: &SqlitePool,
         input: ImportOfficialTextInput,
     ) -> Result<RouteCredentialImportResult, AppError> {
-        let platform = PlatformId::parse(&input.platform)?;
-        PlatformCapabilityService::require(platform, PlatformOperation::OfficialImport)?;
-        let platform = platform.as_str();
+        // 统一账号池：没有「选中平台」这回事，厂商逐条从凭据自身推断。
+        // 官方导入是池级能力，用池身份做一次能力检查即可。
+        let pool_platform = PlatformId::Codex.as_str();
+        PlatformCapabilityService::require(PlatformId::Codex, PlatformOperation::OfficialImport)?;
         let batch_id = ensure_required_batch(pool, input.batch_name).await?;
-        let parsed = parse_batch_credentials_text(platform, &input.text)?;
+        let parsed = parse_batch_credentials_text(&input.text)?;
         let mut imported = Vec::with_capacity(parsed.len());
 
         for credential in parsed {
             imported
-                .push(create_batch_credential(pool, platform, batch_id.clone(), credential).await?);
+                .push(create_batch_credential(pool, batch_id.clone(), credential).await?);
         }
 
-        best_effort_sync(pool, platform).await;
+        best_effort_sync(pool, pool_platform).await;
         Ok(RouteCredentialImportResult {
             imported,
             failed: Vec::new(),
@@ -327,26 +328,19 @@ impl RouteCredentialService {
         pool: &SqlitePool,
         input: ImportOfficialFilesInput,
     ) -> Result<RouteCredentialImportResult, AppError> {
-        let platform = PlatformId::parse(&input.platform)?;
-        PlatformCapabilityService::require(platform, PlatformOperation::OfficialImport)?;
-        let platform = platform.as_str();
+        let pool_platform = PlatformId::Codex.as_str();
+        PlatformCapabilityService::require(PlatformId::Codex, PlatformOperation::OfficialImport)?;
         let batch_id = ensure_required_batch(pool, input.batch_name).await?;
         let mut imported = Vec::new();
         let mut failed = Vec::new();
 
         for path in input.file_paths {
             match tokio::fs::read_to_string(&path).await {
-                Ok(content) => match parse_batch_credentials_file(platform, &path, &content) {
+                Ok(content) => match parse_batch_credentials_file(&path, &content) {
                     Ok(credentials) => {
                         for credential in credentials {
                             imported.push(
-                                create_batch_credential(
-                                    pool,
-                                    platform,
-                                    batch_id.clone(),
-                                    credential,
-                                )
-                                .await?,
+                                create_batch_credential(pool, batch_id.clone(), credential).await?,
                             );
                         }
                     }
@@ -362,7 +356,7 @@ impl RouteCredentialService {
             }
         }
 
-        best_effort_sync(pool, platform).await;
+        best_effort_sync(pool, pool_platform).await;
         Ok(RouteCredentialImportResult { imported, failed })
     }
 
@@ -1263,25 +1257,19 @@ fn parse_relay_balance_provider(
     Ok(Some(RelayBalanceConfig::new(provider)))
 }
 
-fn parse_official_credentials_text(
-    platform: &str,
-    text: &str,
-) -> Result<Vec<ParsedOfficialCredential>, AppError> {
-    match parse_sub2api_text(platform, text) {
+fn parse_official_credentials_text(text: &str) -> Result<Vec<ParsedOfficialCredential>, AppError> {
+    match parse_sub2api_text(text) {
         Ok(credentials) => Ok(credentials),
-        Err(err) if is_sub2api_shape_error(&err) => parse_cpa_text(platform, text),
+        Err(err) if is_sub2api_shape_error(&err) => parse_cpa_text(text),
         Err(err) => Err(err),
     }
 }
 
-fn parse_batch_credentials_text(
-    platform: &str,
-    text: &str,
-) -> Result<Vec<ParsedBatchCredential>, AppError> {
+fn parse_batch_credentials_text(text: &str) -> Result<Vec<ParsedBatchCredential>, AppError> {
     let value: Value = serde_json::from_str(text)?;
     let items = match value {
         Value::Object(object) if object.contains_key("accounts") => {
-            return parse_official_credentials_text(platform, text).map(|credentials| {
+            return parse_official_credentials_text(text).map(|credentials| {
                 credentials
                     .into_iter()
                     .map(ParsedBatchCredential::Official)
@@ -1303,7 +1291,7 @@ fn parse_batch_credentials_text(
             })
             .collect::<Result<Vec<_>, _>>()?,
         _ => {
-            return parse_official_credentials_text(platform, text).map(|credentials| {
+            return parse_official_credentials_text(text).map(|credentials| {
                 credentials
                     .into_iter()
                     .map(ParsedBatchCredential::Official)
@@ -1315,25 +1303,22 @@ fn parse_batch_credentials_text(
     let mut parsed = Vec::with_capacity(items.len());
     for item in items {
         if is_api_batch_item(&item) {
-            parsed.push(ParsedBatchCredential::Api(normalize_api_batch_item(
-                platform, &item,
-            )?));
+            parsed.push(ParsedBatchCredential::Api(normalize_api_batch_item(&item)?));
             continue;
         }
 
         let item_text = Value::Object(item).to_string();
-        let credentials = parse_official_credentials_text(platform, &item_text)?;
+        let credentials = parse_official_credentials_text(&item_text)?;
         parsed.extend(credentials.into_iter().map(ParsedBatchCredential::Official));
     }
     Ok(parsed)
 }
 
 fn parse_batch_credentials_file(
-    platform: &str,
     path: &str,
     content: &str,
 ) -> Result<Vec<ParsedBatchCredential>, AppError> {
-    parse_batch_credentials_text(platform, content).map_err(|error| match error {
+    parse_batch_credentials_text(content).map_err(|error| match error {
         AppError::Validation {
             code,
             message,
@@ -1351,20 +1336,23 @@ fn parse_batch_credentials_file(
 
 async fn create_batch_credential(
     pool: &SqlitePool,
-    platform: &str,
     batch_id: Option<String>,
     credential: ParsedBatchCredential,
 ) -> Result<RouteCredential, AppError> {
-    let (kind, display_name, email, secret_payload_json, config_json, preview_json) =
+    // 每条凭据带着自己推断出的厂商 platform：official 由解析层从 type/provider 推断，
+    // API 由 transfer 归一化从 cpa_section/endpoint 推断。统一池下 repository 会把
+    // 存储平台强制为 codex，但用这个 platform 推导出正确的 provider。
+    let (platform, kind, display_name, email, secret_payload_json, config_json, preview_json) =
         match credential {
             ParsedBatchCredential::Official(credential) => {
                 let preview_json = RoutePreviewService::generate(
-                    platform,
+                    &credential.platform,
                     "official",
                     &credential.secret_payload_json,
                     &credential.config_json,
                 );
                 (
+                    credential.platform,
                     "official",
                     credential.display_name,
                     credential.email,
@@ -1374,6 +1362,7 @@ async fn create_batch_credential(
                 )
             }
             ParsedBatchCredential::Api(credential) => (
+                credential.platform,
                 "api",
                 credential.display_name,
                 credential.email,
@@ -1385,7 +1374,7 @@ async fn create_batch_credential(
 
     RouteCredentialRepository::create(
         pool,
-        platform,
+        &platform,
         kind,
         &display_name,
         email,
@@ -1433,7 +1422,6 @@ fn is_api_batch_item(item: &Map<String, Value>) -> bool {
 }
 
 fn normalize_api_batch_item(
-    platform: &str,
     item: &Map<String, Value>,
 ) -> Result<NormalizedImportItem, AppError> {
     let text = Value::Array(vec![Value::Object(item.clone())]).to_string();
@@ -1442,18 +1430,20 @@ fn normalize_api_batch_item(
     let result = match result {
         Ok(item) => Ok(item),
         Err(issue) if issue.code == "transfer.choice_required" => {
-            let platform_id = PlatformId::parse(platform)?;
-            let interface_format =
-                default_api_interface_format(platform_id).ok_or_else(|| AppError::Validation {
-                    code: "validation.cpa_api_platform_required",
-                    message: "API Key CPA requires an explicit platform and interface format"
-                        .to_string(),
+            // A bare `api-key` + `base-url` with no cpa_section/type carries no dialect.
+            // Unified pool default is codex (openai-responses); entries that do declare a
+            // section are resolved by the transfer engine from that section instead.
+            let interface_format = default_api_interface_format(PlatformId::Codex).ok_or_else(
+                || AppError::Validation {
+                    code: "validation.cpa_api_interface_format",
+                    message: "API Key CPA requires an explicit interface format".to_string(),
                     details: None,
                     recoverable: true,
-                })?;
+                },
+            )?;
             let choice = TransferPlatformChoice {
                 item_index: 0,
-                platform: platform.to_string(),
+                platform: PlatformId::Codex.as_str().to_string(),
                 interface_format: Some(interface_format.to_string()),
             };
             normalize_transfer_items(&text, &[choice])?
@@ -1469,14 +1459,6 @@ fn normalize_api_batch_item(
         details: Some(issue.code),
         recoverable: true,
     })?;
-    if item.platform != platform {
-        return Err(AppError::Validation {
-            code: "validation.cpa_platform_mismatch",
-            message: "CPA credential type does not match the selected platform".to_string(),
-            details: Some(format!("expected {platform}, got {}", item.platform)),
-            recoverable: true,
-        });
-    }
     Ok(item)
 }
 
@@ -2014,7 +1996,7 @@ mod tests {
           }
         }"#;
 
-        let parsed = parse_official_credentials_text("codex", text).unwrap();
+        let parsed = parse_official_credentials_text(text).unwrap();
 
         assert_eq!(parsed.len(), 1);
         assert_eq!(
@@ -2031,13 +2013,57 @@ mod tests {
     fn official_import_parser_falls_back_to_cpa() {
         let text = r#"{"type":"codex","access_token":"at","refresh_token":"rt"}"#;
 
-        let parsed = parse_official_credentials_text("codex", text).unwrap();
+        let parsed = parse_official_credentials_text(text).unwrap();
 
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0]
             .secret_payload_json
             .contains("\"access_token\":\"at\""));
         assert!(parsed[0].config_json.contains("\"raw_type\":\"codex\""));
+    }
+
+    #[tokio::test]
+    async fn cpa_claude_subscription_import_keeps_claude_provider() {
+        let pool = crate::database::create_memory_pool().await.expect("pool");
+        crate::database::run_migrations(&pool)
+            .await
+            .expect("migrations");
+        // CPA wrapper 用 provider:"anthropic" 标记 Claude 订阅。厂商逐条从数据推断，
+        // 落库必须标记 provider=claude，不能退回 openai。
+        let text = r#"{
+          "accounts": [
+            {
+              "provider": "anthropic",
+              "email": "claude-sub@example.com",
+              "credentials": {
+                "access_token": "sk-ant-oat01-xxx",
+                "refresh_token": "sk-ant-ort01-yyy"
+              }
+            }
+          ]
+        }"#;
+
+        let result = RouteCredentialService::import_official_text(
+            &pool,
+            ImportOfficialTextInput {
+                text: text.to_string(),
+                batch_name: Some("CPA Claude".to_string()),
+            },
+        )
+        .await
+        .expect("import");
+
+        assert!(result.failed.is_empty());
+        assert_eq!(result.imported.len(), 1);
+        let imported = &result.imported[0];
+        assert_eq!(imported.kind, "official");
+        assert_eq!(imported.platform, "codex", "统一池落库平台恒为 codex");
+        assert_eq!(
+            imported.provider, "claude",
+            "CPA 导入的 Claude 订阅必须保留 claude 厂商，不能被当成 openai"
+        );
+        assert_eq!(imported.email.as_deref(), Some("claude-sub@example.com"));
+        assert!(imported.secret_payload_json.contains("sk-ant-oat01-xxx"));
     }
 
     #[tokio::test]
@@ -2065,7 +2091,6 @@ mod tests {
         let result = RouteCredentialService::import_official_text(
             &pool,
             ImportOfficialTextInput {
-                platform: "codex".to_string(),
                 text: text.to_string(),
                 batch_name: Some("Sub2API K12".to_string()),
             },
@@ -2125,7 +2150,6 @@ mod tests {
         let result = RouteCredentialService::import_official_text(
             &pool,
             ImportOfficialTextInput {
-                platform: "codex".to_string(),
                 text: text.to_string(),
                 batch_name: Some("Mixed CPA".to_string()),
             },
@@ -2156,35 +2180,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hermes_official_import_is_rejected_before_creating_a_batch() {
+    async fn mixed_vendor_cpa_list_imports_each_with_its_own_provider() {
         let pool = crate::database::create_memory_pool().await.expect("pool");
         crate::database::run_migrations(&pool)
             .await
             .expect("migrations");
+        // 用户场景：一个 CPA 列表同时含 Claude / OpenAI / Grok 订阅，无需选平台。
+        let text = r#"{"accounts":[
+          {"provider":"anthropic","email":"c@example.com","credentials":{"access_token":"sk-ant-oat01-c","refresh_token":"sk-ant-ort01-c"}},
+          {"provider":"openai","email":"o@example.com","credentials":{"access_token":"at","refresh_token":"rt"}},
+          {"provider":"xai","email":"g@example.com","credentials":{"access_token":"at","refresh_token":"rt"}}
+        ]}"#;
 
-        let error = RouteCredentialService::import_official_text(
+        let result = RouteCredentialService::import_official_text(
             &pool,
             ImportOfficialTextInput {
-                platform: "hermes".to_string(),
-                text: "{}".to_string(),
-                batch_name: Some("Hermes import".to_string()),
+                text: text.to_string(),
+                batch_name: Some("Mixed vendors".to_string()),
             },
         )
         .await
-        .expect_err("Hermes official import is unavailable");
+        .expect("import");
 
-        assert!(matches!(
-            error,
-            AppError::Validation {
-                code: "capability.unavailable",
-                ..
-            }
-        ));
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM batches")
-            .fetch_one(&pool)
-            .await
-            .expect("batch count");
-        assert_eq!(count, 0);
+        assert!(result.failed.is_empty());
+        assert_eq!(result.imported.len(), 3);
+        assert!(result
+            .imported
+            .iter()
+            .all(|credential| credential.platform == "codex"));
+        assert_eq!(
+            result
+                .imported
+                .iter()
+                .map(|credential| credential.provider.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude", "openai", "grok"],
+            "each account keeps its own vendor provider"
+        );
     }
 
     pub async fn page(

@@ -568,14 +568,12 @@ pub struct UpdateRouteCredentialInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportOfficialTextInput {
-    pub platform: String,
     pub text: String,
     pub batch_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportOfficialFilesInput {
-    pub platform: String,
     pub file_paths: Vec<String>,
     pub batch_name: Option<String>,
 }

@@ -243,8 +243,8 @@ import { AUDIO_CAPABILITY, AUDIO_DIALECTS } from "../lib/audioPlatforms";
 import { IMAGE_ACCOUNT_PRESETS, IMAGE_CAPABILITY, IMAGE_DIALECTS, imageDialectLabel, imageUpstreamEndpoint } from "../lib/imagePlatforms";
 import { EndpointRow } from "../components/accounts/EndpointRow";
 import {
-  accountProvider, accountProviderLabel, accountSourceFilters, apiAccountProviders, officialAccountProviders,
-  officialProviderPlatform, type ApiAccountProvider, type OfficialAccountProvider,
+  accountProvider, accountProviderLabel, accountSourceFilters, apiAccountProviders,
+  type ApiAccountProvider,
 } from "../lib/accountProviders";
 import { VIDEO_CAPABILITY, VIDEO_DIALECTS } from "../lib/videoPlatforms";
 import { openExternal } from "../lib/openExternal";
@@ -811,12 +811,16 @@ const claudeModelSources = [
   { value: "claude-3-5-haiku-20241022", label: "Claude 3.5 Haiku" },
 ];
 
-function officialJsonPlaceholder(platform: PlatformKey) {
+function officialJsonPlaceholder() {
   return `{
-  "type": "${platform}",
-  "email": "name@example.com",
-  "access_token": "access-token",
-  "refresh_token": "refresh-token"
+  "accounts": [
+    {
+      "provider": "claude",
+      "email": "name@example.com",
+      "access_token": "access-token",
+      "refresh_token": "refresh-token"
+    }
+  ]
 }`;
 }
 
@@ -3688,9 +3692,6 @@ export function AccountsScreen({
   // Base URL, mappings and the rest in place for the next round.
   const [resetFormAfterCreate, setResetFormAfterCreate] = useState(true);
   const [officialText, setOfficialText] = useState("");
-  const [officialProvider, setOfficialProvider] = useState<OfficialAccountProvider>(() =>
-    (officialAccountProviders.find((item) => item.platform === activePlatform)?.value ?? "openai"),
-  );
   const [apiProvider, setApiProvider] = useState<ApiAccountProvider | null>(null);
   const [editApiProvider, setEditApiProvider] = useState("custom");
   const [officialBatchName, setOfficialBatchName] = useState("");
@@ -4461,7 +4462,6 @@ export function AccountsScreen({
   const resetCreateForm = useCallback(() => {
     const nextInterfaceFormat = defaultInterfaceFormat(activePlatform, capabilityFilter);
     setOfficialText("");
-    setOfficialProvider(officialAccountProviders.find((item) => item.platform === activePlatform)?.value ?? "openai");
     setApiProvider(null);
     setOfficialBatchName("");
     setCodexOAuthOpen(false);
@@ -5005,7 +5005,6 @@ export function AccountsScreen({
         }
         if (officialFilePaths.length > 0) {
           return importOfficialRouteCredentialsFromFiles({
-            platform: officialProviderPlatform(officialProvider),
             file_paths: officialFilePaths,
             batch_name: batchName,
           });
@@ -5014,7 +5013,6 @@ export function AccountsScreen({
           throw new Error("请粘贴账号 JSON，或选择 JSON 文件导入。");
         }
         return importOfficialRouteCredentialsFromText({
-          platform: officialProviderPlatform(officialProvider),
           text: officialText,
           batch_name: batchName,
         });
@@ -9805,27 +9803,8 @@ export function AccountsScreen({
 
             {createMode === "official" && (
               <div className="mt-4 grid gap-3">
-                <label className={labelClass}>
-                  官方订阅来源
-                  <select
-                    aria-label="官方订阅来源"
-                    className={fieldClass}
-                    onChange={(event) => {
-                      setOfficialProvider(event.target.value as OfficialAccountProvider);
-                      setOfficialText("");
-                      setOfficialFilePaths([]);
-                    }}
-                    value={officialProvider}
-                  >
-                    {officialAccountProviders.map((item) => (
-                      <option key={item.value} value={item.value}>
-                        {item.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
                 <p className="text-[13px] leading-5 text-stone-600">
-                  粘贴 OAuth CPA、API Key CPA、session JSON、auth.json、Sub2API JSON、accessToken 或 refresh_token。
+                  厂商来源从每条凭据自动识别，一个列表可混合 OpenAI / Claude / Gemini / Grok 订阅与 API。粘贴 CPA、Sub2API、session JSON 或 auth.json。
                 </p>
                 <details className="overflow-hidden rounded-xl border border-stone-200 bg-white">
                   <summary className="flex cursor-pointer list-none items-center gap-2 border-b border-stone-100 px-3 py-2 text-[12px] font-semibold text-stone-700">
@@ -9902,7 +9881,7 @@ export function AccountsScreen({
                         setOfficialFilePaths([]);
                       }
                     }}
-                    placeholder={officialJsonPlaceholder(officialProviderPlatform(officialProvider))}
+                    placeholder={officialJsonPlaceholder()}
                     value={officialText}
                   />
                 </label>

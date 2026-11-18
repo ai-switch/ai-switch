@@ -3748,18 +3748,16 @@ describe("AccountsScreen", () => {
     expect(await screen.findByText("异常")).toBeInTheDocument();
   });
 
-  it("keeps batch import examples as placeholders and rejects an empty submission", async () => {
+  it("keeps a vendor-neutral batch import example as placeholder and rejects an empty submission", async () => {
     renderScreen();
 
     await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
     await userEvent.click(screen.getByRole("button", { name: "批量导入" }));
     const input = screen.getByLabelText("账号 JSON");
     expect(input).toHaveValue("");
-    expect(input.getAttribute("placeholder")).toContain('"type": "codex"');
-    fireEvent.change(input, { target: { value: "user-owned-json" } });
-    await userEvent.selectOptions(screen.getByLabelText("官方订阅来源"), "claude");
-    expect(input).toHaveValue("");
-    expect(input.getAttribute("placeholder")).toContain('"type": "claude"');
+    // 厂商来源逐条从数据识别，占位符不再随任何来源下拉切换。
+    expect(input.getAttribute("placeholder")).toContain('"provider": "claude"');
+    expect(screen.queryByLabelText("官方订阅来源")).not.toBeInTheDocument();
     await userEvent.type(screen.getByLabelText("导入批量名称"), "Empty Batch");
     await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("请粘贴账号 JSON，或选择 JSON 文件导入。");
@@ -3782,7 +3780,6 @@ describe("AccountsScreen", () => {
 
     await waitFor(() =>
       expect(importOfficialRouteCredentialsFromText).toHaveBeenCalledWith({
-        platform: "codex",
         text: "{\"type\":\"codex\",\"email\":\"new@example.com\",\"access_token\":\"at\"}",
         batch_name: "Codex Batch",
       }),
@@ -3791,7 +3788,7 @@ describe("AccountsScreen", () => {
     await userEvent.click(screen.getByRole("button", { name: "新增账号" }));
     await userEvent.click(screen.getByRole("button", { name: "批量导入" }));
     expect(screen.getByLabelText("账号 JSON")).toHaveValue("");
-    expect(screen.getByLabelText("账号 JSON").getAttribute("placeholder")).toContain('"type": "codex"');
+    expect(screen.getByLabelText("账号 JSON").getAttribute("placeholder")).toContain('"provider": "claude"');
   });
 
   it("places Codex OAuth beside JSON import and requires the shared batch name", async () => {
@@ -3865,7 +3862,6 @@ describe("AccountsScreen", () => {
 
     await waitFor(() =>
       expect(importOfficialRouteCredentialsFromFiles).toHaveBeenCalledWith({
-        platform: "codex",
         file_paths: ["C:\\one.json", "C:\\two.json"],
         batch_name: "File Batch",
       }),
@@ -4294,16 +4290,19 @@ describe("AccountsScreen", () => {
     expect(screen.getByRole("button", { name: "API 账号" })).toBeInTheDocument();
   });
 
-  it("uses the selected official provider when importing subscriptions in the general pool", async () => {
+  it("imports subscriptions without asking for a platform — vendor comes from each entry", async () => {
     renderScreen();
     await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
     await userEvent.click(screen.getByRole("button", { name: "批量导入" }));
-    await userEvent.selectOptions(screen.getByLabelText("官方订阅来源"), "claude");
+    expect(screen.queryByLabelText("官方订阅来源")).not.toBeInTheDocument();
     await userEvent.type(screen.getByLabelText("导入批量名称"), "Claude subscriptions");
     await userEvent.clear(screen.getByLabelText("账号 JSON"));
     fireEvent.change(screen.getByLabelText("账号 JSON"), { target: { value: '{"type":"claude","access_token":"at-test"}' } });
     await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
-    await waitFor(() => expect(importOfficialRouteCredentialsFromText).toHaveBeenCalledWith(expect.objectContaining({ platform: "claude", batch_name: "Claude subscriptions" })));
+    await waitFor(() => expect(importOfficialRouteCredentialsFromText).toHaveBeenCalledWith({
+      text: '{"type":"claude","access_token":"at-test"}',
+      batch_name: "Claude subscriptions",
+    }));
   });
 
   it("shows readable interface format labels for OpenAI and Claude options", async () => {

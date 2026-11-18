@@ -8,16 +8,29 @@ use std::path::Path;
 pub struct ParsedOfficialCredential {
     pub display_name: String,
     pub email: Option<String>,
+    /// 逐条从凭据自身字段推断出的厂商 platform（codex/claude/gemini/grok）。
+    /// 统一池下存储平台恒为 codex，这个字段只用来推导 `provider`。
+    pub platform: String,
     pub secret_payload_json: String,
     pub config_json: String,
 }
 
-pub fn parse_cpa_text(
-    platform: &str,
-    text: &str,
-) -> Result<Vec<ParsedOfficialCredential>, AppError> {
-    let platform = PlatformId::parse(platform)?;
-    let platform = platform.as_str();
+/// 从外部凭据自身的厂商标记推断 platform。
+///
+/// 统一账号池下没有「选中平台」这回事：一条 CPA/Sub2API 列表可以同时含 OpenAI、
+/// Claude、Gemini 订阅和 API 账号，厂商来源只能逐条从数据里读。这里集中所有别名
+/// （type/provider/platform/app 的值都可能是 `anthropic` / `xai` / `openai` …），
+/// 解析不出就返回错误，让该条目进失败列表而不是被错误地挂到别的厂商下。
+pub fn infer_vendor_platform(value: &str) -> Option<PlatformId> {
+    let platform = PlatformId::parse(value).ok()?;
+    matches!(
+        platform,
+        PlatformId::Codex | PlatformId::Claude | PlatformId::Gemini | PlatformId::Grok
+    )
+    .then_some(platform)
+}
+
+pub fn parse_cpa_text(text: &str) -> Result<Vec<ParsedOfficialCredential>, AppError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err(validation_error(
@@ -30,7 +43,10 @@ pub fn parse_cpa_text(
     let value: Value = serde_json::from_str(trimmed)?;
 
     match value {
-        Value::Object(object) if platform == "claude" && object.contains_key("claudeAiOauth") => {
+        // Native Claude CLI export: `claudeAiOauth` has no type/vendor field, so it is
+        // unambiguously Claude. Keep the special handling but infer the vendor from the
+        // shape itself instead of a caller-supplied platform.
+        Value::Object(object) if object.contains_key("claudeAiOauth") => {
             let mut native = object
                 .get("claudeAiOauth")
                 .and_then(Value::as_object)
@@ -45,11 +61,15 @@ pub fn parse_cpa_text(
             if let Some(expiry) = native.get("expiresAt").cloned() {
                 native.insert("expired".to_string(), expiry);
             }
-            parse_cpa_object(platform, &native).map(|credential| vec![credential])
+            // The `claudeAiOauth` shape itself is an unambiguous Claude export.
+            native
+                .entry("type".to_string())
+                .or_insert_with(|| json!("claude"));
+            parse_cpa_object(&native).map(|credential| vec![credential])
         }
         Value::Object(object) => match object.get("accounts") {
-            Some(accounts) => parse_cpa_accounts_wrapper(&platform, accounts),
-            None => parse_cpa_object(&platform, &object).map(|credential| vec![credential]),
+            Some(accounts) => parse_cpa_accounts_wrapper(accounts),
+            None => parse_cpa_object(&object).map(|credential| vec![credential]),
         },
         Value::Array(items) => items
             .iter()
@@ -62,7 +82,7 @@ pub fn parse_cpa_text(
                         Some(format!("Entry {index} is not an object")),
                     )
                 })?;
-                parse_cpa_object(&platform, object)
+                parse_cpa_object(object)
             })
             .collect(),
         _ => Err(validation_error(
@@ -74,27 +94,26 @@ pub fn parse_cpa_text(
 }
 
 pub fn parse_cpa_file<P: AsRef<Path>>(
-    platform: &str,
     path: P,
     content: &str,
 ) -> Result<Vec<ParsedOfficialCredential>, AppError> {
-    parse_cpa_text(platform, content).map_err(|err| with_file_context(err, path.as_ref()))
+    parse_cpa_text(content).map_err(|err| with_file_context(err, path.as_ref()))
 }
 
-fn parse_cpa_object(
-    platform: &str,
-    object: &Map<String, Value>,
-) -> Result<ParsedOfficialCredential, AppError> {
-    let raw_type = string_field(object, &["type"]);
-    if let Some(raw_type) = raw_type.as_deref() {
-        if !cpa_types_match(platform, raw_type) {
-            return Err(validation_error(
-                "validation.cpa_platform_mismatch",
-                "CPA credential type does not match the selected platform",
-                Some(format!("expected {platform}, got {raw_type}")),
-            ));
-        }
-    }
+fn parse_cpa_object(object: &Map<String, Value>) -> Result<ParsedOfficialCredential, AppError> {
+    // Vendor is inferred from each entry itself. `normalize_cpa_wrapper_account` has
+    // already promoted wrapper `provider`/`platform`/`app` into `type`.
+    let raw_type = string_field(object, &["type", "provider", "platform", "app"]);
+    let platform = infer_vendor_platform(raw_type.as_deref().unwrap_or(""))
+        .or_else(|| infer_platform_from_token(object))
+        .ok_or_else(|| {
+            validation_error(
+                "validation.cpa_platform_undetermined",
+                "Cannot determine account vendor from CPA entry; add a type/provider field",
+                None,
+            )
+        })?;
+    let platform = platform.as_str();
 
     let email = string_field(object, &["email"]);
     let display_name = string_field(object, &["display_name", "displayName", "name", "label"])
@@ -179,13 +198,13 @@ fn parse_cpa_object(
     Ok(ParsedOfficialCredential {
         display_name,
         email,
+        platform: platform.to_string(),
         secret_payload_json,
         config_json,
     })
 }
 
 fn parse_cpa_accounts_wrapper(
-    platform: &str,
     accounts: &Value,
 ) -> Result<Vec<ParsedOfficialCredential>, AppError> {
     let accounts = accounts.as_array().ok_or_else(|| {
@@ -208,7 +227,7 @@ fn parse_cpa_accounts_wrapper(
                 )
             })?;
             let normalized = normalize_cpa_wrapper_account(object);
-            parse_cpa_object(platform, &normalized)
+            parse_cpa_object(&normalized)
         })
         .collect()
 }
@@ -281,14 +300,17 @@ fn value_field_option(object: &Map<String, Value>, keys: &[&str]) -> Option<Valu
     keys.iter().find_map(|key| object.get(*key).cloned())
 }
 
-fn cpa_types_match(expected_platform: &str, raw_type: &str) -> bool {
-    matches!(
-        (
-            PlatformId::parse(expected_platform),
-            PlatformId::parse(raw_type)
-        ),
-        (Ok(expected), Ok(actual)) if expected == actual
-    )
+/// Last-resort vendor inference from OAuth token shape, for exports that omit any
+/// type/vendor field (e.g. the native `claudeAiOauth` object). Only Claude has a
+/// recognizable token prefix; everything else must declare its vendor explicitly.
+fn infer_platform_from_token(object: &Map<String, Value>) -> Option<PlatformId> {
+    let token = token_field(object, "access_token", "accessToken")
+        .or_else(|| token_field(object, "refresh_token", "refreshToken"))?;
+    if token.starts_with("sk-ant-") {
+        Some(PlatformId::Claude)
+    } else {
+        None
+    }
 }
 
 fn validation_error(code: &'static str, message: &str, details: Option<String>) -> AppError {
@@ -332,9 +354,10 @@ mod tests {
           "refresh_token":"rt_1",
           "account_id":"ac_1"
         }"#;
-        let parsed = parse_cpa_text("codex", text).unwrap();
+        let parsed = parse_cpa_text(text).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].email.as_deref(), Some("a@example.com"));
+        assert_eq!(parsed[0].platform, "codex");
         assert!(parsed[0].secret_payload_json.contains("rt_1"));
     }
 
@@ -345,16 +368,18 @@ mod tests {
           "email":"b@example.com",
           "tokens":{"accessToken":"sk-ant-oat01-x","refreshToken":"sk-ant-ort01-y"}
         }]"#;
-        let parsed = parse_cpa_text("claude", text).unwrap();
+        let parsed = parse_cpa_text(text).unwrap();
         assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].platform, "claude");
     }
 
     #[test]
     fn parses_accounts_wrapper_export() {
         let text = r#"{"accounts":[{"provider":"anthropic","email":"x@example.com","credentials":{"access_token":"a","refresh_token":"b"}}]}"#;
-        let parsed = parse_cpa_text("claude", text).unwrap();
+        let parsed = parse_cpa_text(text).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].email.as_deref(), Some("x@example.com"));
+        assert_eq!(parsed[0].platform, "claude");
         assert!(parsed[0]
             .secret_payload_json
             .contains("\"access_token\":\"a\""));
@@ -365,28 +390,38 @@ mod tests {
     }
 
     #[test]
-    fn rejects_platform_mismatch() {
-        let text = r#"{"type":"claude","access_token":"a","refresh_token":"b"}"#;
-        assert!(parse_cpa_text("codex", text).is_err());
+    fn infers_each_vendor_independently_in_mixed_wrapper() {
+        // 一个列表里同时含 Claude 订阅与 OpenAI 订阅：逐条推断，互不干扰。
+        let text = r#"{"accounts":[
+          {"provider":"anthropic","email":"c@example.com","credentials":{"access_token":"sk-ant-oat01-a","refresh_token":"sk-ant-ort01-b"}},
+          {"provider":"openai","email":"o@example.com","credentials":{"access_token":"at","refresh_token":"rt"}},
+          {"platform":"xai","email":"g@example.com","credentials":{"access_token":"at","refresh_token":"rt"}}
+        ]}"#;
+        let parsed = parse_cpa_text(text).unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(
+            parsed.iter().map(|item| item.platform.as_str()).collect::<Vec<_>>(),
+            vec!["claude", "codex", "grok"]
+        );
     }
 
     #[test]
-    fn rejects_substring_platform_aliases() {
+    fn rejects_unknown_vendor_without_a_selected_platform() {
         let text = r#"{"type":"my-grok-wrapper","access_token":"at","refresh_token":"rt"}"#;
 
-        let error = parse_cpa_text("grok", text).expect_err("substring aliases are unsafe");
+        let error = parse_cpa_text(text).expect_err("substring aliases are unsafe");
 
         assert!(matches!(
             error,
             AppError::Validation {
-                code: "validation.cpa_platform_mismatch",
+                code: "validation.cpa_platform_undetermined",
                 ..
             }
         ));
     }
 
     #[test]
-    fn accepts_xai_type_alias_for_grok_platform() {
+    fn accepts_xai_type_alias_for_grok_vendor() {
         let text = r#"{
           "type":"xai",
           "email":"g@example.com",
@@ -408,9 +443,10 @@ mod tests {
             "X-Client-Name":"grok-cli"
           }
         }"#;
-        let parsed = parse_cpa_text("grok", text).unwrap();
+        let parsed = parse_cpa_text(text).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].email.as_deref(), Some("g@example.com"));
+        assert_eq!(parsed[0].platform, "grok");
         assert!(parsed[0].secret_payload_json.contains("at-xai"));
         assert!(parsed[0].secret_payload_json.contains("rt-xai"));
         assert!(parsed[0].secret_payload_json.contains("id-xai"));
@@ -439,17 +475,20 @@ mod tests {
     }
 
     #[test]
-    fn accepts_grok_platform_when_import_target_is_xai_alias() {
-        let text = r#"{"type":"grok","access_token":"at","refresh_token":"rt"}"#;
-        let parsed = parse_cpa_text("xai", text).unwrap();
-        assert_eq!(parsed.len(), 1);
-        assert!(parsed[0].config_json.contains("\"type\":\"grok\""));
+    fn xai_and_grok_aliases_both_resolve_to_grok() {
+        for alias in ["grok", "xai"] {
+            let text = format!(r#"{{"type":"{alias}","access_token":"at","refresh_token":"rt"}}"#);
+            let parsed = parse_cpa_text(&text).unwrap();
+            assert_eq!(parsed.len(), 1);
+            assert_eq!(parsed[0].platform, "grok");
+            assert!(parsed[0].config_json.contains("\"type\":\"grok\""));
+        }
     }
 
     #[test]
     fn fills_default_grok_cli_headers_when_missing() {
         let text = r#"{"type":"xai","access_token":"at","refresh_token":"rt","base_url":"https://cli-chat-proxy.grok.com/v1"}"#;
-        let parsed = parse_cpa_text("grok", text).unwrap();
+        let parsed = parse_cpa_text(text).unwrap();
         assert!(parsed[0].config_json.contains("xai-grok-workspace/0.2.93"));
         assert!(parsed[0].config_json.contains("x-grok-client-version"));
         assert!(parsed[0].config_json.contains("X-XAI-Token-Auth"));
@@ -462,7 +501,8 @@ mod native_claude_auth_tests {
     #[test]
     fn imports_native_claude_oauth_with_expiry_and_scopes_for_direct_mode() {
         let input = r#"{"claudeAiOauth":{"accessToken":"at","refreshToken":"rt","expiresAt":4070908800000,"scopes":["user:inference","user:profile"],"subscriptionType":"max"}}"#;
-        let rows = parse_cpa_text("claude", input).unwrap();
+        let rows = parse_cpa_text(input).unwrap();
+        assert_eq!(rows[0].platform, "claude");
         let config: Value = serde_json::from_str(&rows[0].config_json).unwrap();
         assert_eq!(config["expired"], 4070908800000i64);
         let secret: Value = serde_json::from_str(&rows[0].secret_payload_json).unwrap();
