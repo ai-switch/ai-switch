@@ -12,6 +12,7 @@ use crate::models::route_credential::{
     ImportOfficialTextInput, ModelMapping, ReorderRouteCredentialInput, RouteCredential,
     RouteCredentialFailurePolicy, RouteCredentialImportFailure, RouteCredentialImportResult,
     RouteCredentialPage, RouteCredentialPageRequest, UpdateRouteCredentialInput,
+    CLAUDE_MODEL_SLOTS, CLAUDE_SUBAGENT_MODEL_ALIAS, FALLBACK_MODEL_ALIAS,
     MAX_ROUTE_CREDENTIAL_COOLDOWN_SECONDS,
 };
 use crate::models::route_credential_model::{
@@ -1555,6 +1556,82 @@ fn validate_model_mappings(value: &str, is_modality_account: bool) -> Result<(),
     Ok(())
 }
 
+/// Replace only the Claude role rows of one account's `model_mappings`, leaving
+/// every other mapping and every other config field untouched. Used by the
+/// Claude config dialog's per-slot routing editor: the six fixed role slots are
+/// stored in the account (the single source of truth shared with the account
+/// form's ClaudeCode tab), while arbitrary general mappings live alongside them.
+///
+/// `slot_mappings_json` is the full desired set of role rows for this account;
+/// role aliases absent from it are removed. Non-role rows in the account are
+/// preserved.
+pub async fn update_claude_account_slot_mappings(
+    pool: &SqlitePool,
+    account_id: &str,
+    slot_mappings_json: &str,
+) -> Result<RouteCredential, AppError> {
+    let credential = RouteCredentialRepository::get(pool, account_id).await?;
+    if credential.kind != "api" {
+        return Err(AppError::Validation {
+            code: "validation.claude_slot_account_not_api",
+            message: "Only API accounts can hold Claude slot mappings".to_string(),
+            details: Some(account_id.to_string()),
+            recoverable: true,
+        });
+    }
+
+    let slots: Vec<ModelMapping> = serde_json::from_str(slot_mappings_json)?;
+    let role_aliases: std::collections::HashSet<&str> = CLAUDE_MODEL_SLOTS
+        .iter()
+        .map(|slot| slot.alias)
+        .chain([CLAUDE_SUBAGENT_MODEL_ALIAS, FALLBACK_MODEL_ALIAS])
+        .collect();
+    if slots
+        .iter()
+        .any(|mapping| !role_aliases.contains(mapping.from.trim()))
+    {
+        return Err(AppError::Validation {
+            code: "validation.claude_slot_alias_unsupported",
+            message: "Only the six Claude role aliases may be saved here".to_string(),
+            details: Some(slot_mappings_json.to_string()),
+            recoverable: true,
+        });
+    }
+    let merged_slots_json = serde_json::to_string(&slots)?;
+    validate_model_mappings(&merged_slots_json, false)?;
+
+    let mut config: Value = serde_json::from_str(&credential.config_json).map_err(|err| {
+        AppError::Validation {
+            code: "validation.claude_slot_config_invalid",
+            message: "Account config could not be read".to_string(),
+            details: Some(err.to_string()),
+            recoverable: false,
+        }
+    })?;
+    let existing: Vec<Value> = config
+        .get("model_mappings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let kept = existing.into_iter().filter(|row| {
+        row.get("from")
+            .and_then(Value::as_str)
+            .map(|from| !role_aliases.contains(from.trim()))
+            .unwrap_or(true)
+    });
+    let mut merged: Vec<Value> = kept.collect();
+    for slot in &slots {
+        merged.push(serde_json::to_value(slot)?);
+    }
+    config["model_mappings"] = Value::Array(merged);
+    let config_json = serde_json::to_string(&config)?;
+
+    // Only config_json changes; write it directly and return the refreshed row.
+    // Stale-config invalidation is driven by updated_at, which this updates.
+    RouteCredentialRepository::update_config_json(pool, account_id, &config_json).await?;
+    RouteCredentialRepository::get(pool, account_id).await
+}
+
 fn parse_fetched_models_json(value: Option<&str>) -> Result<Vec<FetchedRouteModel>, AppError> {
     let Some(value) = value else {
         return Ok(Vec::new());
@@ -1642,6 +1719,55 @@ mod tests {
         .await
         .expect("create")
         .id
+    }
+
+    #[tokio::test]
+    async fn updating_claude_slot_mappings_keeps_general_mappings() {
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let id = RouteCredentialRepository::create(
+            &pool,
+            "codex",
+            "api",
+            "Claude Routing",
+            None,
+            "ok",
+            None,
+            r#"{"api_key":"sk-test"}"#,
+            &serde_json::json!({
+                "base_url": "https://example.com",
+                "interface_format": "anthropic",
+                "model_mappings": [
+                    {"from": "gpt-5", "to": "upstream-gpt"},
+                    {"from": "claude-opus-alias", "to": "old-opus"},
+                    {"from": "claude-subagent", "to": "old-sub"}
+                ]
+            })
+            .to_string(),
+            "{}",
+        )
+        .await
+        .expect("create")
+        .id;
+
+        let slots = r#"[
+            {"from":"claude-opus-alias","to":"new-opus","label":"Opus","supports_1m":true},
+            {"from":"claude-haiku-alias","to":"new-haiku"}
+        ]"#;
+        let updated = update_claude_account_slot_mappings(&pool, &id, slots)
+            .await
+            .expect("update slots");
+        let config: Value = serde_json::from_str(&updated.config_json).expect("config");
+        let mappings = config["model_mappings"].as_array().expect("mappings");
+
+        // General mapping survives; the old subagent role row is removed.
+        assert_eq!(mappings.len(), 3);
+        assert!(mappings.iter().any(|m| m["from"] == "gpt-5" && m["to"] == "upstream-gpt"));
+        assert!(!mappings.iter().any(|m| m["from"] == "claude-subagent"));
+        let opus = mappings.iter().find(|m| m["from"] == "claude-opus-alias").expect("opus");
+        assert_eq!(opus["to"], "new-opus");
+        assert_eq!(opus["supports_1m"], true);
+        assert!(mappings.iter().any(|m| m["from"] == "claude-haiku-alias" && m["to"] == "new-haiku"));
     }
 
     #[tokio::test]

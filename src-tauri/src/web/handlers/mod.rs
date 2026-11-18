@@ -764,6 +764,19 @@ pub async fn dispatch_command(
                     .map_err(to_error)?,
             )
         }
+        "update_claude_account_slot_mappings" => {
+            let id = required_string_arg(&args, "account_id")?;
+            let mappings_json = required_string_arg(&args, "mappings_json")?;
+            to_value(
+                crate::services::route_credential_service::update_claude_account_slot_mappings(
+                    &state.pool,
+                    &id,
+                    &mappings_json,
+                )
+                .await
+                .map_err(to_error)?,
+            )
+        }
         "copy_route_credential" => {
             let id = required_string_arg(&args, "id")?;
             let input = args

@@ -1251,6 +1251,32 @@ export type ClaudeSlotPlanSlot = {
   display_name: string | null;
 };
 
+/** One Claude role mapping an individual pool account has configured. */
+export type ClaudeAccountSlotMapping = {
+  alias: string;
+  model: string;
+  label: string | null;
+  supports_1m: boolean;
+};
+
+/** A pool account and its configured Claude role mappings. */
+export type ClaudeSlotAccount = {
+  id: string;
+  display_name: string;
+  /** Prefixes the proxy accepts for `<prefix>/<alias>` ids of this account. */
+  model_prefixes: string[];
+  mappings: ClaudeAccountSlotMapping[];
+};
+
+/** Aggregate-mode view: one role and the accounts/models it maps to. */
+export type ClaudeAggregateRow = {
+  alias: string;
+  label: string;
+  accounts: ClaudeSlotAccount[];
+  consensus_model: string | null;
+  consensus_display_name: string | null;
+};
+
 /** Read-only preview of the Claude slot plan, resolved by the write path itself. */
 export type ClaudeSlotPlan = {
   slots: ClaudeSlotPlanSlot[];
@@ -1260,6 +1286,10 @@ export type ClaudeSlotPlan = {
   model_mode: string;
   /** 当前模式下代理接受的模型别名；路由模式带 `<账号>/` 前缀。 */
   available_models: string[];
+  /** 池内账号及其已配置的 Claude 角色映射（精确模式预填 / 聚合查看用）。 */
+  accounts: ClaudeSlotAccount[];
+  /** 聚合模式：每个角色聚合到哪些账号的哪些模型。 */
+  aggregate_rows: ClaudeAggregateRow[];
 };
 
 export type AppSettings = {

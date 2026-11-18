@@ -6,6 +6,7 @@ import { ClaudeSlotSettingsDialog } from "../components/accounts/ClaudeSlotSetti
 import {
   getClaudeSlotPlan,
   getCodexLoginState,
+  updateClaudeAccountSlotMappings,
   getClientDirectModes,
   getRoutePool,
   getRouteProxyKey,
@@ -436,9 +437,15 @@ export function ClientSetupScreen({
     mutationFn: async (payload: {
       overridesJson: string;
       clientConfigJson: string | null;
+      accountSlotMappings?: Array<{ accountId: string; mappingsJson: string }> | null;
     }) => {
       const settings = settingsQuery.data;
       if (!settings) throw new Error("设置尚未加载完成。");
+      // Save each touched account's role mappings first (single source of truth),
+      // then the slot overrides/client config. All must succeed together.
+      for (const mapping of payload.accountSlotMappings ?? []) {
+        await updateClaudeAccountSlotMappings(mapping.accountId, mapping.mappingsJson);
+      }
       return saveSettings({
         ...settings,
         claude_slot_overrides_json: payload.overridesJson,
@@ -451,6 +458,7 @@ export function ClientSetupScreen({
       setSlotDialogOpen(false);
       void queryClient.invalidateQueries({ queryKey: ["route-config-stale"] });
       void queryClient.invalidateQueries({ queryKey: ["claude-slot-plan"] });
+      void queryClient.invalidateQueries({ queryKey: ["route-credentials"] });
     },
     onError: (error) => setSlotSettingsError(formatApiError(error, "保存槽位设置失败。")),
   });

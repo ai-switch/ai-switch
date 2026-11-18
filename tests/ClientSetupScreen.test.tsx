@@ -16,6 +16,7 @@ import type {
 
 vi.mock("../src/lib/api/client", () => ({
   getClaudeSlotPlan: vi.fn(),
+  updateClaudeAccountSlotMappings: vi.fn(),
   getCodexLoginState: vi.fn(),
   getClientDirectModes: vi.fn(),
   getRoutePool: vi.fn(),
@@ -39,6 +40,7 @@ vi.mock("../src/lib/transport", () => ({
 
 import {
   getClaudeSlotPlan,
+  updateClaudeAccountSlotMappings,
   getCodexLoginState,
   getClientDirectModes,
   getRoutePool,
@@ -111,7 +113,27 @@ const slotPlan: ClaudeSlotPlan = {
   subagent_model: "claude-subagent",
   fallback_model: null,
   model_mode: "precise",
-  available_models: ["AcctA/claude-sonnet-alias", "AcctA/claude-haiku-alias"],
+  available_models: ["AcctA/claude-sonnet-alias", "AcctA/claude-haiku-alias", "AcctB/claude-opus-alias"],
+  accounts: [
+    {
+      id: "acct-a",
+      display_name: "AcctA",
+      model_prefixes: ["AcctA", "AcctA-acct"],
+      mappings: [
+        { alias: "claude-sonnet-alias", model: "claude-sonnet-4-5", label: "Sonnet", supports_1m: true },
+        { alias: "claude-haiku-alias", model: "claude-haiku-4-5", label: null, supports_1m: false },
+      ],
+    },
+    {
+      id: "acct-b",
+      display_name: "AcctB",
+      model_prefixes: ["AcctB", "AcctB-acct"],
+      mappings: [
+        { alias: "claude-opus-alias", model: "claude-opus-4-5", label: "Opus", supports_1m: true },
+      ],
+    },
+  ],
+  aggregate_rows: [],
 };
 
 function capabilityOf(platform: PlatformId, display_name: string): PlatformCapability {
@@ -198,6 +220,7 @@ describe("ClientSetupScreen", () => {
       auth_mode: "chatgpt",
     });
     vi.mocked(saveSettings).mockImplementation(async (settings) => settings);
+    vi.mocked(updateClaudeAccountSlotMappings).mockImplementation(async (_id, _json) => ({} as never));
     vi.mocked(getRoutePool).mockResolvedValue({ model_mode: "precise" } as RoutePoolState);
     vi.mocked(getClientDirectModes).mockResolvedValue([]);
     vi.mocked(listRouteCredentials).mockResolvedValue([]);
@@ -601,11 +624,16 @@ describe("ClientSetupScreen", () => {
       name: "设置 Claude Code 模型槽位映射",
     });
     expect(dialog).toHaveTextContent("路由模式");
+    // Precise mode gives every slot its own routing-account picker, pre-seeded
+    // from the account that already declares that role.
+    expect(screen.getByTestId("claude-slot-editor")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Sonnet 路由账号" })).toHaveValue("acct-a");
+    expect(screen.getByRole("combobox", { name: "Opus 路由账号" })).toHaveValue("acct-b");
+    expect(screen.getByRole("combobox", { name: "Fable 路由账号" })).toHaveValue("");
     expect(dialog).toHaveTextContent("Sonnet");
     expect(dialog).toHaveTextContent("Subagent");
     expect(dialog).toHaveTextContent("默认兜底模型");
-    expect(screen.getByTestId("claude-slot-editor")).toBeInTheDocument();
-    expect(screen.getByText(/可选模型 2 个/)).toBeInTheDocument();
+    expect(screen.getByText(/池内账号 2 个/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "去调整账号映射" }));
     expect(onOpenAccounts).toHaveBeenCalledWith("claude");
@@ -619,17 +647,93 @@ describe("ClientSetupScreen", () => {
     await user.click(screen.getByRole("button", { name: "设置 Claude Code 槽位映射" }));
     await screen.findByRole("dialog");
 
-    await user.click(screen.getByRole("checkbox", { name: "Sonnet 自动解析" }));
-    fireEvent.change(screen.getByLabelText("Sonnet 模型"), {
-      target: { value: "AcctA/claude-haiku-alias" },
+    // Each slot is pinned to its own account, pre-filled from that account's
+    // configured roles. Edit two slots on two different accounts.
+    expect(screen.getByRole("combobox", { name: "Sonnet 路由账号" })).toHaveValue("acct-a");
+    expect(screen.getByRole("combobox", { name: "Opus 路由账号" })).toHaveValue("acct-b");
+    fireEvent.change(screen.getByLabelText("Sonnet 上游模型"), {
+      target: { value: "provider-sonnet-new" },
+    });
+    fireEvent.change(screen.getByLabelText("Opus 上游模型"), {
+      target: { value: "provider-opus-new" },
     });
     await user.click(screen.getByRole("button", { name: "保存槽位设置" }));
 
     await waitFor(() => expect(saveSettings).toHaveBeenCalled());
     const payload = vi.mocked(saveSettings).mock.calls[0][0];
     const saved = JSON.parse(payload.claude_slot_overrides_json ?? "{}");
-    expect(saved.precise.slots["claude-sonnet-alias"].model).toBe("AcctA/claude-haiku-alias");
+    expect(saved.precise.slots["claude-sonnet-alias"].model).toBe("AcctA/claude-sonnet-alias");
+    expect(saved.precise.slots["claude-opus-alias"].model).toBe("AcctB/claude-opus-alias");
     expect(saved.aggregate).toBeUndefined();
+    // Both accounts get their own role mapping written back.
+    expect(updateClaudeAccountSlotMappings).toHaveBeenCalledWith(
+      "acct-a",
+      expect.stringContaining('"to":"provider-sonnet-new"'),
+    );
+    expect(updateClaudeAccountSlotMappings).toHaveBeenCalledWith(
+      "acct-b",
+      expect.stringContaining('"to":"provider-opus-new"'),
+    );
+    // Writing one account must not drop its other configured Claude roles.
+    const acctAWrite = vi
+      .mocked(updateClaudeAccountSlotMappings)
+      .mock.calls.find((call) => call[0] === "acct-a");
+    expect(acctAWrite?.[1]).toContain('"from":"claude-haiku-alias"');
+  });
+
+  it("keeps other slots untouched when one slot switches accounts", async () => {
+    const user = userEvent.setup();
+    setup();
+
+    await screen.findByRole("checkbox", { name: "写入 Codex CLI" });
+    await user.click(screen.getByRole("button", { name: "设置 Claude Code 槽位映射" }));
+    await screen.findByRole("dialog");
+
+    fireEvent.change(screen.getByLabelText("Sonnet 上游模型"), {
+      target: { value: "edited-sonnet" },
+    });
+    const opusPicker = screen.getByRole("combobox", { name: "Opus 路由账号" });
+    await user.selectOptions(opusPicker, "acct-a");
+    // AcctA has no Opus mapping, so only Opus is cleared; Sonnet survives.
+    expect(screen.getByLabelText("Sonnet 上游模型")).toHaveValue("edited-sonnet");
+    expect(screen.getByLabelText("Opus 上游模型")).toHaveValue("");
+
+    await user.selectOptions(opusPicker, "acct-b");
+    expect(screen.getByLabelText("Opus 上游模型")).toHaveValue("claude-opus-4-5");
+    expect(screen.getByLabelText("Sonnet 上游模型")).toHaveValue("edited-sonnet");
+  });
+
+  it("pins a slot to the selected account's accepted prefix, never another account's", async () => {
+    vi.mocked(getClaudeSlotPlan).mockResolvedValue({
+      ...slotPlan,
+      accounts: [
+        {
+          id: "acct-space",
+          display_name: "My Relay",
+          model_prefixes: ["My-Relay"],
+          mappings: [
+            { alias: "claude-opus-alias", model: "upstream-opus", label: null, supports_1m: false },
+          ],
+        },
+        slotPlan.accounts[1],
+      ],
+      available_models: ["OtherAccount/claude-opus-alias", "My-Relay/claude-opus-alias"],
+    });
+    const user = userEvent.setup();
+    setup();
+
+    await screen.findByRole("checkbox", { name: "写入 Codex CLI" });
+    await user.click(screen.getByRole("button", { name: "设置 Claude Code 槽位映射" }));
+    await screen.findByRole("dialog");
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "Opus 路由账号" }), "acct-space");
+    await user.click(screen.getByRole("button", { name: "保存槽位设置" }));
+
+    await waitFor(() => expect(saveSettings).toHaveBeenCalled());
+    const saved = JSON.parse(
+      vi.mocked(saveSettings).mock.calls[0][0].claude_slot_overrides_json ?? "{}",
+    );
+    expect(saved.precise.slots["claude-opus-alias"].model).toBe("My-Relay/claude-opus-alias");
   });
 
   it("validates and saves the global client config JSON from the dialog", async () => {
@@ -995,8 +1099,10 @@ describe("ClientSetupScreen", () => {
     await user.click(screen.getByRole("button", { name: "设置 Claude Code 槽位映射" }));
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveTextContent("聚合模式");
-    // A precise-mode override must not leak into the aggregate branch.
-    expect(screen.getByRole("checkbox", { name: "Sonnet 自动解析" })).toBeChecked();
+    // Aggregate mode is read-only: no per-slot account pickers, no slot editor.
+    expect(screen.queryByRole("combobox", { name: "Sonnet 路由账号" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("claude-aggregate-view")).toBeInTheDocument();
+    expect(dialog).toHaveTextContent("无需在这里设置");
 
     await user.click(screen.getByRole("button", { name: "保存槽位设置" }));
     await waitFor(() => expect(saveSettings).toHaveBeenCalled());
@@ -1004,6 +1110,7 @@ describe("ClientSetupScreen", () => {
       vi.mocked(saveSettings).mock.calls[0][0].claude_slot_overrides_json ?? "{}",
     );
     expect(saved.precise.slots["claude-sonnet-alias"].model).toBe("AcctA/x");
-    expect(saved.aggregate).toBeDefined();
+    expect(saved.aggregate).toBeUndefined();
+    expect(updateClaudeAccountSlotMappings).not.toHaveBeenCalled();
   });
 });

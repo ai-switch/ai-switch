@@ -2451,11 +2451,22 @@ function CodexMappingCapabilityFields({
   );
 }
 
+/** Which half of an Anthropic account's mappings the editor is showing. */
+type MappingTab = "general" | "claude";
+
+/** Aliases Claude Code drives through fixed `/model` slots + subagent/fallback. */
+const CLAUDE_ROLE_ALIASES = new Set(CLAUDE_ROLES.map((role) => role.alias));
+
+function isClaudeRoleMapping(mapping: ModelMapping): boolean {
+  return CLAUDE_ROLE_ALIASES.has(mapping.from.trim());
+}
+
 function ModelMappingsEditor({
   capabilityFilter,
   error,
   fetchError,
   fetchedModels = [],
+  interfaceFormat,
   isFetchingModels = false,
   label,
   onChange,
@@ -2464,7 +2475,12 @@ function ModelMappingsEditor({
   value,
 }: ModelMappingsEditorProps) {
   const mediaMapping = isMediaCapability(capabilityFilter);
-  const isClaude = !mediaMapping && platform === "claude";
+  // Unified pool: every account is platform="codex". What distinguishes a
+  // Claude-Code account is its Anthropic wire format, not the pool identity.
+  // The fixed role slots therefore key off interface_format instead.
+  const isClaude = !mediaMapping && (platform === "claude" || interfaceFormat === "anthropic");
+  const showMappingTabs = isClaude && !mediaMapping;
+  const [mappingTab, setMappingTab] = useState<MappingTab>("claude");
   // Context and reasoning settings belong only to the general text model list.
   const isCodex = !mediaMapping && platform === "codex";
   const templateValues = new Set<string>(claudeRoleTemplates.map((template) => template.value));
@@ -2529,6 +2545,16 @@ function ModelMappingsEditor({
     onChange(mappingsWithMediaCapability(buildOneClickMappings(fetchedModels, rows), capabilityFilter));
   };
 
+  const showGeneralRows = !showMappingTabs || mappingTab === "general";
+  const showClaudeRows = !showMappingTabs || mappingTab === "claude";
+  const visibleConfiguredCount = rows.filter(
+    (mapping) =>
+      mapping.from.trim() &&
+      mapping.to.trim() &&
+      ((showClaudeRows && isClaudeRoleMapping(mapping)) ||
+        (showGeneralRows && !isClaudeRoleMapping(mapping))),
+  ).length;
+
   return (
     <div className="grid gap-2">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -2545,7 +2571,7 @@ function ModelMappingsEditor({
               {isFetchingModels ? "获取中..." : "获取模型列表"}
             </button>
           ) : null}
-          {isCodex ? (
+          {isCodex && showGeneralRows ? (
             <button
               className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[12px] font-semibold text-emerald-900 motion-control hover:bg-emerald-100 disabled:opacity-50"
               disabled={fetchedModels.length === 0}
@@ -2556,34 +2582,49 @@ function ModelMappingsEditor({
               一键设置
             </button>
           ) : null}
-          <button
-            className="inline-flex items-center gap-1.5 rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 text-[12px] font-semibold text-stone-700 motion-control hover:bg-stone-50"
-            onClick={addRow}
-            type="button"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            新增映射
-          </button>
+          {showGeneralRows ? (
+            <button
+              className="inline-flex items-center gap-1.5 rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 text-[12px] font-semibold text-stone-700 motion-control hover:bg-stone-50"
+              onClick={addRow}
+              type="button"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              新增映射
+            </button>
+          ) : null}
         </div>
       </div>
+      {showMappingTabs ? (
+        <FormTabs<MappingTab>
+          ariaLabel={`${label}类型`}
+          onChange={setMappingTab}
+          tabs={[
+            { value: "claude", label: "ClaudeCode 专用映射" },
+            { value: "general", label: "通用映射" },
+          ]}
+          value={mappingTab}
+        />
+      ) : null}
       <p className="text-[11px] font-medium leading-5 text-stone-500">
-        留空表示不改写模型；获取列表只用于辅助选择，只有保存账号时才写入映射。
-        {isClaude ? " 勾选 1M 会声明该 Claude 角色支持 1M 上下文。" : ""}
-        {isClaude
+        {showMappingTabs && mappingTab === "claude"
+          ? "这里配置 Claude Code 的 6 个固定槽位（/model 菜单四个角色 + Subagent + 兜底），与客户端配置的槽位映射共用同一份数据。"
+          : "留空表示不改写模型；获取列表只用于辅助选择，只有保存账号时才写入映射。"}
+        {showClaudeRows && isClaude ? " 勾选 1M 会声明该 Claude 角色支持 1M 上下文。" : ""}
+        {showClaudeRows && isClaude
           ? " 配置 Subagent 后需要重新写入客户端配置才会生效；默认兜底模型让未匹配的请求也能落到该账号。"
           : ""}
-        {isCodex
+        {showGeneralRows && isCodex
           ? " 上下文与推理程度会写进 Codex 模型清单：不选就跟随基准（上下文按上游模型判断，deepseek-v4 / glm-5.2 / glm-5.3 / qwen-3.8 / kimi-k3 开头的自动 1M，其余 256K；推理程度 GPT 基准模型用各自的档位，其他模型用 low/medium/high）。"
           : ""}
         {fetchedModels.length > 0 ? ` 已获取 ${fetchedModels.length} 个模型。` : ""}
       </p>
-      {configuredCount === 0 ? (
+      {visibleConfiguredCount === 0 ? (
         <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] font-semibold leading-5 text-amber-900">
           如果上游只支持有限模型，建议先获取模型列表并配置模型映射；配置后算力池只会把该账号匹配到映射别名。
         </p>
       ) : (
         <p className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-[11px] font-medium leading-5 text-blue-900">
-          当前账号仅按已配置的本地模型别名参与匹配，共 {configuredCount} 条。
+          当前账号仅按已配置的本地模型别名参与匹配，共 {visibleConfiguredCount} 条。
         </p>
       )}
       {fetchError ? <p className="text-[12px] font-semibold text-red-700">{fetchError}</p> : null}
@@ -2598,12 +2639,26 @@ function ModelMappingsEditor({
       ) : null}
 
       <div className="space-y-2 rounded-xl border border-stone-200 bg-stone-50/70 p-2">
-        {rows.length === 0 ? (
+        {rows.filter((mapping) =>
+          showMappingTabs
+            ? mappingTab === "claude"
+              ? isClaudeRoleMapping(mapping)
+              : !isClaudeRoleMapping(mapping)
+            : true,
+        ).length === 0 ? (
           <div className="rounded-lg border border-dashed border-stone-200 bg-white px-3 py-3 text-[12px] font-medium text-stone-500">
-            暂无模型映射。需要改写上游模型时或者该上游模型有限时再新增。
+            {showMappingTabs && mappingTab === "claude"
+              ? "尚无 ClaudeCode 专用映射。四个 /model 角色 + Subagent + 兜底槽位会在保存时一并写入。"
+              : "暂无模型映射。需要改写上游模型时或者该上游模型有限时再新增。"}
           </div>
         ) : (
           rows.map((mapping, index) => {
+            // Split the single shared array into two views. The index stays the
+            // index into `rows`, so updateRow/removeRow keep addressing the
+            // correct row in the full array — the other tab's rows are never
+            // touched, which is why the two tabs cannot overwrite each other.
+            if (showMappingTabs && isClaudeRoleMapping(mapping) && !showClaudeRows) return null;
+            if (showMappingTabs && !isClaudeRoleMapping(mapping) && !showGeneralRows) return null;
             const isTemplateRow = isClaude && isClaudeTemplateSource(mapping.from);
             const roleTemplate = isClaude
               ? claudeRoleTemplates.find((template) => template.value === mapping.from.trim())

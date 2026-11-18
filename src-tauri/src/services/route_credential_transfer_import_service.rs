@@ -426,6 +426,65 @@ mod tests {
         );
     }
 
+    /// 平台池下 `platform` 是池身份（codex），`cpa_section` / `interface_format` 只是
+    /// 方言标签。导出侧 `classify_api_section` 按 dialect 出分区、从不看 platform，
+    /// 所以 codex 池里的 anthropic 账号会导出成
+    /// `platform=codex + claude-api-key + anthropic`，必须能原样导回来。
+    #[test]
+    fn api_platform_is_pool_identity_independent_of_section_dialect() {
+        let item = api_item("claude-api-key", "codex", "anthropic");
+        let normalized = classify_ok(0, &item, &[]);
+
+        assert_eq!(normalized.platform, "codex");
+        assert_eq!(normalized.kind, "api");
+        assert_eq!(normalized.cpa_section.as_deref(), Some("claude-api-key"));
+
+        let config: Value = serde_json::from_str(&normalized.config_json).expect("config json");
+        assert_eq!(config["interface_format"], json!("anthropic"));
+    }
+
+    /// 原样复现用户导出的完整条目：codex 池 + anthropic 方言 + claude 分区 +
+    /// 完整 model_mappings / source 身份。修复前它在 resolve_api_target 被误判为
+    /// transfer.metadata_conflict，导致上层报 "API Key CPA credential is invalid"。
+    #[test]
+    fn exported_codex_pool_anthropic_account_round_trips() {
+        let text = r#"[{
+            "api-key": "sk-fixture-key-material",
+            "base-url": "https://anyrouter.top",
+            "models": [
+                {"alias": "claude-opus-5-5", "name": "claude-opus-5-5"},
+                {"alias": "claude-fable-5-2", "name": "claude-fable-5-2"}
+            ],
+            "x-ai-switch": {
+                "api_key_field": "ANTHROPIC_AUTH_TOKEN",
+                "cpa_section": "claude-api-key",
+                "display_name": "anyrouter",
+                "format": "ai-switch.route-credential",
+                "in_pool": true,
+                "interface_format": "anthropic",
+                "kind": "api",
+                "model_mappings": [
+                    {"from": "claude-opus-5-5", "reasoning_levels": ["low","medium","high","xhigh","max"], "to": "claude-opus-5-5"},
+                    {"from": "claude-fable-5-2", "reasoning_levels": ["low","medium","high","xhigh","max"], "to": "claude-fable-5-2"}
+                ],
+                "origin_format": "ai-switch",
+                "platform": "codex",
+                "provider": "custom",
+                "responses_custom_tool_compat": false,
+                "schema_version": 1,
+                "source_credential_id": "feb84c15-a570-48b4-a991-1bb26813aec8",
+                "source_instance_id": "eeb13136-086e-4a05-b0cf-2aa66c59f3c3"
+            }
+        }]"#;
+
+        let result = normalize_transfer_items(text, &[]).expect("round trip must not fail");
+        assert_eq!(result.len(), 1);
+        let item = result[0].as_ref().expect("item must normalize cleanly");
+        assert_eq!(item.platform, "codex");
+        assert_eq!(item.cpa_section.as_deref(), Some("claude-api-key"));
+        assert!(item.in_pool);
+    }
+
     #[test]
     fn agent_identity_never_falls_back_to_oauth_requirements() {
         let incomplete = object(json!({
@@ -796,15 +855,21 @@ mod tests {
     }
 
     #[test]
-    fn shape_only_choice_rejects_fixed_section_platform_mismatch() {
+    fn shape_only_choice_accepts_codex_pool_with_anthropic_dialect() {
+        // 平台池下 choice 的 platform 是池身份、interface_format 是方言，二者正交。
+        // shape-only 条目选 codex 池 + anthropic 方言应被接受，不能再由 section
+        // （claude-api-key）反推出「必须是 Claude 平台」而报 choice_incompatible。
         let item = object(json!({
             "api-key": "fixture-key-material",
             "base-url": endpoint()
         }));
 
-        let issue = classify_issue(0, &item, &[choice(0, "codex", "anthropic")]);
+        let normalized = classify_ok(0, &item, &[choice(0, "codex", "anthropic")]);
 
-        assert_eq!(issue.code, "transfer.choice_incompatible");
+        assert_eq!(normalized.platform, "codex");
+        assert_eq!(normalized.cpa_section.as_deref(), Some("claude-api-key"));
+        let config: Value = serde_json::from_str(&normalized.config_json).expect("config json");
+        assert_eq!(config["interface_format"], json!("anthropic"));
     }
 
     #[test]
@@ -3701,20 +3766,14 @@ fn resolve_api_target(
         }
     }
 
+    // 平台池语义：`platform` 是池身份（恒为 codex），`cpa_section` / `interface_format`
+    // 只表达线协议方言，二者正交。旧逻辑用 fixed_platform_for_section(section) 反推出
+    // 「分区必须在某平台」，会把 codex 池里的 anthropic 方言账号
+    // （platform=codex + cpa_section=claude-api-key + interface_format=anthropic）误判为
+    // metadata_conflict。而导出侧 classify_api_section 只按 dialect 出分区、从不看
+    // platform，于是同一份 JSON 导得出、导不进。这里只校验方言一致性，不再让分区
+    // 反向约束平台。
     if let Some(section) = cpa_section.as_deref() {
-        if let Some(expected_platform) = fixed_platform_for_section(section) {
-            if platform != expected_platform {
-                return Err((
-                    transfer_issue(
-                        item_index,
-                        display_name_masked,
-                        "transfer.metadata_conflict",
-                        Some("platform"),
-                    ),
-                    choice_consumed,
-                ));
-            }
-        }
         if expected_dialect_for_section(section) != Some(dialect) {
             return Err((
                 transfer_issue(
@@ -3729,23 +3788,6 @@ fn resolve_api_target(
     }
 
     let derived_section = derive_api_section(platform, dialect, base_url);
-    if let Some(expected_platform) = fixed_platform_for_section(derived_section) {
-        if platform != expected_platform {
-            return Err((
-                transfer_issue(
-                    item_index,
-                    display_name_masked,
-                    if choice_consumed {
-                        "transfer.choice_incompatible"
-                    } else {
-                        "transfer.metadata_conflict"
-                    },
-                    Some("platform"),
-                ),
-                choice_consumed,
-            ));
-        }
-    }
     if let Some(section) = cpa_section.as_deref() {
         if section != derived_section {
             return Err((

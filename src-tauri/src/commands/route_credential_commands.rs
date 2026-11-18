@@ -98,6 +98,23 @@ pub async fn update_route_credential(
         .map_err(ApiError::from)
 }
 
+/// Persist per-slot Claude role mappings for one account, keeping its general
+/// mappings and other config fields untouched.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn update_claude_account_slot_mappings(
+    state: State<'_, AppState>,
+    account_id: String,
+    mappings_json: String,
+) -> Result<RouteCredential, ApiError> {
+    crate::services::route_credential_service::update_claude_account_slot_mappings(
+        &state.pool,
+        &account_id,
+        &mappings_json,
+    )
+    .await
+    .map_err(ApiError::from)
+}
+
 #[tauri::command]
 pub async fn copy_route_credential(
     state: State<'_, AppState>,

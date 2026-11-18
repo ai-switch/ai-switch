@@ -25,7 +25,7 @@ use crate::services::route_model_capability::{
     codex_model_catalog_payload_with_baseline, default_third_party_reasoning_levels,
     normalize_reasoning_levels, parse_model_capability,
 };
-use crate::services::route_pool_model_mode::PoolModelMode;
+use crate::services::route_pool_model_mode::{accepted_prefixes, PoolModelMode};
 use crate::services::settings_service::SettingsService;
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,44 @@ pub struct ClaudeSlotPlanSlot {
     pub display_name: Option<String>,
 }
 
+/// One Claude role mapping an individual pool account has configured.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ClaudeAccountSlotMapping {
+    /// Generic role alias, e.g. `claude-opus-alias` / `claude-subagent` / `claude-model`.
+    pub alias: String,
+    /// Upstream model this account maps the role to.
+    pub model: String,
+    pub label: Option<String>,
+    pub supports_1m: bool,
+}
+
+/// A pool account as shown in the config dialog. Precise mode lets the user
+/// pick a routing account per slot and pre-fills that role from the account's
+/// mappings; aggregate mode lists the same rows under each role for read-only
+/// inspection of where a role fans out.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ClaudeSlotAccount {
+    pub id: String,
+    pub display_name: String,
+    /// Prefixes the proxy accepts for `<prefix>/<alias>` requests to this account.
+    /// The dialog uses these to pin each slot without guessing from display names.
+    pub model_prefixes: Vec<String>,
+    /// The six Claude role mappings this account has configured (to non-empty models).
+    pub mappings: Vec<ClaudeAccountSlotMapping>,
+}
+
+/// One aggregate-mode view row: a role and every account that declares it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ClaudeAggregateRow {
+    pub alias: String,
+    pub label: String,
+    /// Per-account upstream model for this role.
+    pub accounts: Vec<ClaudeSlotAccount>,
+    /// The consensus the write path would put into settings.json for this role.
+    pub consensus_model: Option<String>,
+    pub consensus_display_name: Option<String>,
+}
+
 /// Read-only preview of the Claude env plan for the client-setup page: the same
 /// resolver as the write path, so the UI can show the slot mapping without
 /// duplicating its rules.
@@ -66,6 +104,11 @@ pub struct ClaudeSlotPlan {
     /// These are aliases, NOT upstream model names: Claude Code sends them back
     /// verbatim and the proxy rewrites them per account.
     pub available_models: Vec<String>,
+    /// Pool accounts with their configured Claude role mappings. Powers the
+    /// precise-mode routing-account picker and the aggregate fan-out view.
+    pub accounts: Vec<ClaudeSlotAccount>,
+    /// Aggregate-mode read-only view: each role and the accounts/models it maps to.
+    pub aggregate_rows: Vec<ClaudeAggregateRow>,
 }
 
 /// A user-edited `/model` slot in the Claude Code settings dialog.
@@ -859,6 +902,58 @@ impl RouteConfigService {
         plan
     }
 
+    /// All Claude role aliases: the four `/model` slots plus subagent and fallback.
+    fn claude_role_aliases() -> Vec<&'static str> {
+        CLAUDE_MODEL_SLOTS
+            .iter()
+            .map(|slot| slot.alias)
+            .chain([CLAUDE_SUBAGENT_MODEL_ALIAS, FALLBACK_MODEL_ALIAS])
+            .collect()
+    }
+
+    /// Projects each pool account's configured Claude role mappings, and the
+    /// per-role fan-out used by the aggregate-mode read-only view. Accounts with
+    /// no Claude mappings are still returned (empty `mappings`) so the precise
+    /// picker can offer every account and let the user configure it on the spot.
+    fn claude_slot_accounts(
+        credentials: &[crate::models::route_credential::RouteCredential],
+    ) -> Vec<ClaudeSlotAccount> {
+        credentials
+            .iter()
+            .filter(|credential| credential.kind == "api")
+            .map(|credential| {
+                let mappings = parse_model_capability(&credential.config_json)
+                    .mappings
+                    .into_iter()
+                    .filter(|mapping| {
+                        Self::claude_role_aliases().contains(&mapping.from.trim())
+                            && !mapping.to.trim().is_empty()
+                    })
+                    .map(|mapping| ClaudeAccountSlotMapping {
+                        alias: mapping.from.trim().to_string(),
+                        model: mapping.to.trim().to_string(),
+                        label: mapping
+                            .label
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|label| !label.is_empty())
+                            .map(str::to_string),
+                        supports_1m: mapping.supports_1m == Some(true),
+                    })
+                    .collect::<Vec<_>>();
+                ClaudeSlotAccount {
+                    id: credential.id.clone(),
+                    display_name: credential.display_name.clone(),
+                    model_prefixes: accepted_prefixes(
+                        &credential.display_name,
+                        &credential.id,
+                    ),
+                    mappings,
+                }
+            })
+            .collect()
+    }
+
     /// Read-only view of what the next Claude config write would put into the
     /// `/model` slots and the subagent/fallback env keys. Reuses the write
     /// path's resolver so the client-setup page can explain the mapping without
@@ -886,6 +981,39 @@ impl RouteConfigService {
         available_models.sort();
         available_models.dedup();
 
+        let accounts = Self::claude_slot_accounts(&credentials);
+        let account_mappings = Self::claude_pool_mappings(pool).await?;
+        // One row per role; `accounts` holds the per-account upstream models so
+        // aggregate mode can show exactly where each role fans out.
+        let aggregate_rows = Self::claude_role_aliases()
+            .into_iter()
+            .map(|alias| {
+                let per_account = accounts
+                    .iter()
+                    .filter_map(|account| {
+                        account
+                            .mappings
+                            .iter()
+                            .find(|mapping| mapping.alias == alias)
+                            .map(|mapping| ClaudeSlotAccount {
+                                id: account.id.clone(),
+                                display_name: account.display_name.clone(),
+                                model_prefixes: account.model_prefixes.clone(),
+                                mappings: vec![mapping.clone()],
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                let consensus = Self::resolve_alias_write(&account_mappings, alias);
+                ClaudeAggregateRow {
+                    alias: alias.to_string(),
+                    label: alias.to_string(),
+                    accounts: per_account,
+                    consensus_model: consensus.model,
+                    consensus_display_name: consensus.display_name,
+                }
+            })
+            .collect();
+
         Ok(ClaudeSlotPlan {
             slots: CLAUDE_MODEL_SLOTS
                 .iter()
@@ -901,6 +1029,8 @@ impl RouteConfigService {
             fallback_model: plan.fallback_model,
             model_mode: mode.as_str().to_string(),
             available_models,
+            accounts,
+            aggregate_rows,
         })
     }
 
@@ -2271,6 +2401,30 @@ command = "npx"
         assert_eq!(plan.slots[3].model, None);
         assert_eq!(plan.subagent_model.as_deref(), Some("claude-subagent"));
         assert_eq!(plan.fallback_model, None);
+
+        // The dialog's new data: per-account role mappings and aggregate fan-out.
+        assert_eq!(plan.accounts.len(), 1);
+        let account = &plan.accounts[0];
+        assert_eq!(account.display_name, "Claude Account");
+        assert_eq!(account.mappings.len(), 3);
+        // The precise picker needs the proxy's accepted prefixes so it can pin
+        // a slot without guessing a sanitized/collision-suffixed name.
+        assert_eq!(
+            account.model_prefixes,
+            accepted_prefixes("Claude Account", &account.id)
+        );
+        assert!(account.mappings.iter().any(|m| {
+            m.alias == "claude-sonnet-alias" && m.model == "provider-sonnet" && m.supports_1m
+        }));
+        assert_eq!(plan.aggregate_rows.len(), CLAUDE_MODEL_SLOTS.len() + 2);
+        let sonnet_row = plan
+            .aggregate_rows
+            .iter()
+            .find(|row| row.alias == "claude-sonnet-alias")
+            .expect("sonnet aggregate row");
+        assert_eq!(sonnet_row.accounts.len(), 1);
+        assert_eq!(sonnet_row.accounts[0].mappings[0].model, "provider-sonnet");
+        assert_eq!(sonnet_row.consensus_model.as_deref(), Some("claude-sonnet-alias[1M]"));
     }
 
     #[tokio::test]

@@ -27,7 +27,8 @@ use commands::route_credential_commands::{
     refresh_route_credential_relay_balance, refresh_route_credentials_quota,
     refresh_route_credentials_relay_balance, reorder_route_credentials, restore_route_credentials,
     set_route_credential_cooldown, set_route_credential_model_status,
-    set_route_credential_recovery, set_route_credential_statuses, update_route_credential,
+    set_route_credential_recovery, set_route_credential_statuses, update_claude_account_slot_mappings,
+    update_route_credential,
 };
 use commands::route_credential_transfer_commands::{
     export_route_credentials, import_route_credentials, preview_route_credential_import,
@@ -602,6 +603,7 @@ pub fn run() {
             import_official_route_credentials_from_text,
             import_official_route_credentials_from_files,
             update_route_credential,
+            update_claude_account_slot_mappings,
             delete_route_credential,
             archive_route_credentials,
             restore_route_credentials,

@@ -464,6 +464,18 @@ export function getClaudeSlotPlan(): Promise<ClaudeSlotPlan> {
   return invoke("get_claude_slot_plan");
 }
 
+/// Save the six Claude role mappings of one account (shared with the account
+/// form's ClaudeCode tab). `mappings_json` is the full desired set of role rows.
+export function updateClaudeAccountSlotMappings(
+  accountId: string,
+  mappingsJson: string,
+): Promise<RouteCredential> {
+  return invoke("update_claude_account_slot_mappings", {
+    account_id: accountId,
+    mappings_json: mappingsJson,
+  });
+}
+
 /// Clients this platform can write config for, with each one's current file
 /// state. Drives the write dialog's checkbox list.
 export function listConfigWriteClients(platform: string): Promise<ConfigWriteClientStatus[]> {

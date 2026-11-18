@@ -5320,7 +5320,8 @@ describe("AccountsScreen", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
     await userEvent.click(screen.getByRole("button", { name: "API 账号" }));
-    await userEvent.click(screen.getByRole("button", { name: "新增映射" }));
+    // The Claude tab renders its six fixed role slots up front; no extra row is
+    // needed to inspect which capability controls this editor exposes.
 
     expect(screen.getByLabelText("模型能力 图片输入 1")).toBeInTheDocument();
     expect(screen.queryByLabelText("模型能力 图片生成 1")).not.toBeInTheDocument();
