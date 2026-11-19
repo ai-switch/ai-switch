@@ -36,10 +36,10 @@ use crate::models::route_credential_transfer::{
     ExportRouteCredentialsInput, ImportRouteCredentialsInput, PreviewRouteCredentialImportInput,
 };
 use crate::models::route_pool::{
-    CreateRoutePoolGroupInput, DeleteRoutePoolGroupInput, RouteModelsFetchRequest,
-    RoutePoolModelTestRequest, RoutePoolRouteRequest, SetRoutePoolBaselineModelsInput,
-    SetRoutePoolGroupMembersInput, SetRoutePoolMembersInput, SetRoutePoolModelModeInput,
-    UpdateRoutePoolGroupInput,
+    CreateRoutePoolGroupInput, DeleteClaudeBackupGroupInput, DeleteRoutePoolGroupInput,
+    RouteModelsFetchRequest, RoutePoolModelTestRequest, RoutePoolRouteRequest,
+    SetRoutePoolBaselineModelsInput, SetRoutePoolGroupMembersInput, SetRoutePoolMembersInput,
+    SetRoutePoolModelModeInput, UpdateRoutePoolGroupInput,
 };
 use crate::models::settings::AppSettings;
 use crate::services::agent_launch_service::AgentLaunchService;
@@ -75,6 +75,7 @@ pub fn is_sensitive_command(command: &str) -> bool {
             | "create_route_pool_group"
             | "update_route_pool_group"
             | "delete_route_pool_group"
+            | "delete_claude_backup_group"
             | "set_route_pool_group_members"
             | "move_route_pool_group_members"
             | "export_route_credentials"
@@ -985,6 +986,14 @@ pub async fn dispatch_command(
             let input: DeleteRoutePoolGroupInput = parse_arg(&args, "input")?;
             to_value(
                 RoutePoolService::delete_group(&state.pool, input)
+                    .await
+                    .map_err(to_error)?,
+            )
+        }
+        "delete_claude_backup_group" => {
+            let input: DeleteClaudeBackupGroupInput = parse_arg(&args, "input")?;
+            to_value(
+                RoutePoolService::delete_claude_backup_group(&state.pool, input.platform)
                     .await
                     .map_err(to_error)?,
             )
