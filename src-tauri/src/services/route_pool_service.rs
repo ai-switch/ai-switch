@@ -1,5 +1,6 @@
 use crate::database::repositories::route_credential_repository::RouteCredentialRepository;
-use crate::database::repositories::route_pool_repository::RoutePoolRepository;
+use crate::database::repositories::route_pool_repository::{RoutePoolRepository, UNIFIED_POOL_PLATFORM};
+use crate::database::repositories::CLAUDE_BACKUP_GROUP_IDS;
 use crate::error::AppError;
 use crate::models::platform::{PlatformId, PlatformOperation};
 use crate::models::route_pool::{
@@ -153,6 +154,67 @@ impl RoutePoolService {
         Self::state(
             pool,
             platform.as_str(),
+            None,
+            DEFAULT_REQUEST_PAGE,
+            DEFAULT_REQUEST_PAGE_SIZE,
+        )
+        .await
+    }
+
+    /// 备份分组一键清理：删掉旧 Claude 三个遗留组内的全部账号（硬删，与现有
+    /// 账号删除一致）并软删组本体。被 SaaS 密钥/计费设置引用时拒绝——删组会让
+    /// 那些引用悬空。组已不存在时幂等成功。
+    pub async fn delete_claude_backup_group(
+        pool: &SqlitePool,
+        platform: String,
+    ) -> Result<RoutePoolState, AppError> {
+        let platform = PlatformId::parse(&platform)?;
+        PlatformCapabilityService::require(platform, PlatformOperation::RouteCredentials)?;
+        let platform = UNIFIED_POOL_PLATFORM;
+        let [default_id, out_id, archived_id] = CLAUDE_BACKUP_GROUP_IDS;
+        let group_list = "?, ?, ?";
+        for (table, label) in
+            [("saas_api_keys", "SaaS 密钥"), ("saas_group_settings", "SaaS 计费设置")]
+        {
+            let references = match sqlx::query_scalar::<_, i64>(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE group_id IN ({group_list})"
+            ))
+            .bind(default_id)
+            .bind(out_id)
+            .bind(archived_id)
+            .fetch_one(pool)
+            .await
+            {
+                Ok(count) => count,
+                // SaaS 的表由 SaasRuntime 懒初始化；没启用过 SaaS 的库里
+                // 这两张表不存在——那就不可能有引用，跳过而不是报错。
+                Err(err) if err.to_string().contains("no such table") => continue,
+                Err(err) => {
+                    return Err(AppError::Database {
+                        code: "database.route_group_delete",
+                        message: "Could not check SaaS references for legacy groups".to_string(),
+                        details: Some(err.to_string()),
+                        recoverable: true,
+                    });
+                }
+            };
+            if references > 0 {
+                return Err(AppError::Validation {
+                    code: "validation.claude_backup_group_saas_referenced",
+                    message: format!(
+                        "The legacy Claude backup groups are still referenced by {label}. \
+                         Unbind them before cleaning up."
+                    ),
+                    details: None,
+                    recoverable: true,
+                });
+            }
+        }
+        RoutePoolRepository::delete_claude_backup_groups_atomic(pool, platform).await?;
+        best_effort_sync(pool, platform).await;
+        Self::state(
+            pool,
+            platform,
             None,
             DEFAULT_REQUEST_PAGE,
             DEFAULT_REQUEST_PAGE_SIZE,
@@ -675,6 +737,7 @@ mod tests {
     use super::*;
     use crate::database::repositories::route_credential_repository::RouteCredentialRepository;
     use crate::database::{create_memory_pool, run_migrations};
+    use chrono::Utc;
     use sqlx::SqlitePool;
     use uuid::Uuid;
 
@@ -1689,5 +1752,184 @@ mod tests {
         assert_eq!(rows[0].0, "provider-sonnet");
         assert_eq!(rows[0].1, "stale");
         assert_eq!(rows[0].2, 1000);
+    }
+
+    async fn legacy_group(pool: &SqlitePool, id: &str) {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO route_pool_groups
+             (id, platform, name, sort_order, is_internal, is_active, created_at, updated_at)
+             VALUES (?, 'codex', ?, 0, 0, 0, ?, ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("legacy group");
+    }
+
+    /// `RouteCredentialRepository::create` 自动把账号挂进默认组成员行
+    /// （ON CONFLICT DO NOTHING）；seed 遗留组成员时复用那一行改组。
+    async fn member(pool: &SqlitePool, group_id: &str, account_id: &str) {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE route_pool_members SET group_id = ?, updated_at = ?
+             WHERE route_credential_id = ? AND platform = 'codex'",
+        )
+        .bind(group_id)
+        .bind(&now)
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .expect("member row");
+    }
+
+    async fn count(pool: &SqlitePool, sql: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(sql).fetch_one(pool).await.expect("count")
+    }
+
+    #[tokio::test]
+    async fn cleanup_deletes_accounts_members_and_groups() {
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        for id in ["claude-default", "claude-out", "claude-archived"] {
+            legacy_group(&pool, id).await;
+        }
+        let mut legacy_accounts = Vec::new();
+        for id in ["claude-default", "claude-out", "claude-archived"] {
+            let account_id = credential(&pool, "codex", &format!("Legacy-{id}"), "ok").await;
+            member(&pool, id, &account_id).await;
+            legacy_accounts.push(account_id);
+        }
+        RoutePoolService::create_group(
+            &pool,
+            CreateRoutePoolGroupInput {
+                platform: "codex".to_string(),
+                name: "普通组".to_string(),
+                is_internal: false,
+            },
+        )
+        .await
+        .expect("plain group");
+
+        let state = RoutePoolService::delete_claude_backup_group(&pool, "codex".to_string())
+            .await
+            .expect("cleanup");
+
+        for id in ["claude-default", "claude-out", "claude-archived"] {
+            assert!(
+                !state.groups.iter().any(|group| group.id == id),
+                "{id} must be gone from the pool state"
+            );
+        }
+        assert!(
+            state.groups.iter().any(|group| group.name == "普通组"),
+            "unrelated groups must survive"
+        );
+        for account_id in &legacy_accounts {
+            assert_eq!(
+                count(&pool, &format!(
+                    "SELECT COUNT(*) FROM route_credentials WHERE id = '{account_id}'"
+                ))
+                .await,
+                0,
+                "legacy account must be hard-deleted"
+            );
+            assert_eq!(
+                count(&pool, &format!(
+                    "SELECT COUNT(*) FROM route_pool_members WHERE route_credential_id = '{account_id}'"
+                ))
+                .await,
+                0,
+                "member rows cascade away with the account"
+            );
+        }
+        assert_eq!(
+            count(&pool, "SELECT COUNT(*) FROM route_pool_groups
+                  WHERE id IN ('claude-default','claude-out','claude-archived') AND deleted_at IS NULL")
+                .await,
+            0,
+            "legacy groups must be soft-deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_is_idempotent_when_groups_are_gone() {
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+
+        RoutePoolService::delete_claude_backup_group(&pool, "codex".to_string())
+            .await
+            .expect("cleanup on an empty pool is a no-op, not an error");
+    }
+
+    #[tokio::test]
+    async fn cleanup_is_refused_when_saas_keys_reference_the_archived_group() {
+        let pool = create_memory_pool().await.expect("pool");
+        run_migrations(&pool).await.expect("migrations");
+        // SaaS 表由 SaasRuntime 懒初始化，测试里直接跑它的迁移建表。
+        crate::saas::repository::migrate(&pool).await.expect("saas migrations");
+        legacy_group(&pool, "claude-archived").await;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO saas_users
+             (id, github_id, login, github_created_at, status, balance_micros, frozen_micros, created_at, updated_at)
+             VALUES ('user-1', 'gh-1', 'legacy-user', '2026-01-01T00:00:00Z', 'active', 0, 0, ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("saas user");
+        sqlx::query(
+            "INSERT INTO saas_api_keys
+             (id, user_id, group_id, name, token_hash, prefix, suffix, status, spent_micros, frozen_micros, created_at, updated_at)
+             VALUES ('key-1', 'user-1', 'claude-archived', 'legacy', 'hash', 'pfx', 'sfx', 'active', 0, 0, ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("saas key");
+
+        let error = RoutePoolService::delete_claude_backup_group(&pool, "codex".to_string())
+            .await
+            .expect_err("saas-referenced groups must not be deleted");
+        assert!(matches!(
+            error,
+            AppError::Validation {
+                code: "validation.claude_backup_group_saas_referenced",
+                ..
+            }
+        ));
+
+        // 计费设置引用同样阻止。
+        legacy_group(&pool, "claude-default").await;
+        sqlx::query("DELETE FROM saas_api_keys WHERE id = 'key-1'")
+            .execute(&pool)
+            .await
+            .expect("clear key");
+        sqlx::query(
+            "INSERT INTO saas_group_settings
+             (group_id, multiplier_micros, max_output_tokens, timeout_seconds, max_concurrency, allow_subscription, allow_balance, version, created_at, updated_at)
+             VALUES ('claude-default', 1000000, 4096, 120, 10, 1, 1, 1, ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("saas settings");
+        let error = RoutePoolService::delete_claude_backup_group(&pool, "codex".to_string())
+            .await
+            .expect_err("saas group settings must also block the cleanup");
+        assert!(matches!(
+            error,
+            AppError::Validation {
+                code: "validation.claude_backup_group_saas_referenced",
+                ..
+            }
+        ));
     }
 }

@@ -675,6 +675,15 @@ impl RoutePoolRepository {
         super::route_group_repository::delete_group_atomic(pool, platform, group_id).await
     }
 
+    /// 备份分组一键清理的存储层入口：删除三个遗留组的账号并软删组本体。
+    /// 组不存在视为幂等成功。
+    pub async fn delete_claude_backup_groups_atomic(
+        pool: &SqlitePool,
+        platform: &str,
+    ) -> Result<usize, AppError> {
+        super::route_group_repository::delete_claude_backup_groups_atomic(pool, platform).await
+    }
+
     pub async fn replace_group_members(
         pool: &SqlitePool,
         platform: &str,

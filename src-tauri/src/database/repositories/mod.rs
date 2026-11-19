@@ -10,5 +10,6 @@ pub mod route_credential_transfer_repository;
 mod route_group_repository;
 pub mod route_pool_repository;
 pub mod route_proxy_key_repository;
+pub(crate) use route_group_repository::CLAUDE_BACKUP_GROUP_IDS;
 pub mod target_repository;
 pub mod target_state_repository;

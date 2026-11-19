@@ -147,3 +147,77 @@ pub(super) async fn delete_group_atomic(
         )
     })
 }
+
+/// 旧 Claude 平台三个系统视图组的固定 ID（migrations/202609080001）。
+/// 与前端 `CLAUDE_BACKUP_GROUP_IDS` 一致，不得改名。
+pub(crate) const CLAUDE_BACKUP_GROUP_IDS: [&str; 3] =
+    ["claude-default", "claude-out", "claude-archived"];
+
+/// 备份分组一键清理：删掉三个遗留组内的全部账号（硬删，成员行随
+/// `ON DELETE CASCADE` 消失），再软删除仍存在的遗留组。组不存在时跳过
+/// ——调用方要的是幂等。返回删除的账号数。
+pub(super) async fn delete_claude_backup_groups_atomic(
+    pool: &SqlitePool,
+    platform: &str,
+) -> Result<usize, AppError> {
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await.map_err(|error| {
+        database_error(
+            "database.route_group_delete",
+            "Could not begin backup cleanup",
+            error,
+        )
+    })?;
+    let placeholders = CLAUDE_BACKUP_GROUP_IDS
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let deleted = sqlx::query(&format!(
+        "DELETE FROM route_credentials WHERE id IN (
+             SELECT route_credential_id FROM route_pool_members
+             WHERE platform = ? AND group_id IN ({placeholders})
+         )"
+    ))
+    .bind(platform)
+    .bind(CLAUDE_BACKUP_GROUP_IDS[0])
+    .bind(CLAUDE_BACKUP_GROUP_IDS[1])
+    .bind(CLAUDE_BACKUP_GROUP_IDS[2])
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| {
+        database_error(
+            "database.route_group_delete",
+            "Could not delete backup group accounts",
+            error,
+        )
+    })?
+    .rows_affected() as usize;
+    let now = Utc::now().to_rfc3339();
+    for group_id in CLAUDE_BACKUP_GROUP_IDS {
+        sqlx::query(
+            "UPDATE route_pool_groups SET deleted_at=?,updated_at=?
+             WHERE id=? AND platform=? AND deleted_at IS NULL",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(group_id)
+        .bind(platform)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            database_error(
+                "database.route_group_delete",
+                "Could not delete legacy group",
+                error,
+            )
+        })?;
+    }
+    transaction.commit().await.map_err(|error| {
+        database_error(
+            "database.route_group_delete",
+            "Could not commit backup cleanup",
+            error,
+        )
+    })?;
+    Ok(deleted)
+}
