@@ -61,6 +61,7 @@ import { baselineModelsForPlatform, expandDisplayModelMappings, ModelMappingSumm
 import {
   ExternalClientImportPanel,
   EXTERNAL_IMPORT_CLIENT_LABELS,
+  EXTERNAL_IMPORT_CLIENT_PATH_MODE,
   isImportableExternalItem,
   useExternalClientImportPreview,
 } from "../components/accounts/ExternalClientImportPanel";
@@ -6688,10 +6689,12 @@ export function AccountsScreen({
 
     setFilePickerError(null);
     try {
+      const pathMode = EXTERNAL_IMPORT_CLIENT_PATH_MODE[externalClient];
       const selected = await open({
+        directory: pathMode === "directory",
         multiple: false,
-        title: `选择 ${EXTERNAL_IMPORT_CLIENT_LABELS[externalClient]} 配置文件`,
-        filters: [{ name: "配置文件", extensions: ["db", "json"] }],
+        title: `选择 ${EXTERNAL_IMPORT_CLIENT_LABELS[externalClient]} ${pathMode === "directory" ? "配置目录" : "配置文件"}`,
+        filters: pathMode === "file" ? [{ name: "配置文件", extensions: ["db", "json"] }] : undefined,
       });
       const path = Array.isArray(selected) ? selected[0] : selected;
       if (typeof path === "string" && path.trim()) {
@@ -6701,8 +6704,15 @@ export function AccountsScreen({
         setExternalSourcePath(path);
       }
     } catch (error) {
-      setFilePickerError(error instanceof Error ? error.message : "打开文件选择器失败。");
+      setFilePickerError(error instanceof Error ? error.message : "打开位置选择器失败。");
     }
+  };
+
+  const switchExternalClient = (client: ExternalImportClient) => {
+    if (client === externalClient) return;
+    setExternalClient(client);
+    setExternalSelectedIds(new Set());
+    setExternalSourcePath(null);
   };
 
   const toggleExternalSelection = (sourceId: string) => {
@@ -9486,8 +9496,31 @@ export function AccountsScreen({
             </label>
 
             {createMode === "external" && (
+              <div aria-label="导入来源" className="mt-4 rounded-xl border border-stone-200 bg-white p-3">
+                <p className="mb-2 text-[11px] font-semibold text-stone-500">导入来源</p>
+                <div className="flex flex-wrap gap-1 rounded-lg bg-stone-100 p-1 sm:grid sm:grid-cols-3">
+                  {Object.entries(EXTERNAL_IMPORT_CLIENT_LABELS).map(([client, label]) => {
+                    const value = client as ExternalImportClient;
+                    return (
+                      <button
+                        aria-pressed={externalClient === value}
+                        className={`flex-1 rounded-md px-2 py-1 text-[11px] font-semibold motion-control ${externalClient === value ? "bg-white text-stone-950 shadow-sm" : "text-stone-500 hover:text-stone-800"}`}
+                        key={value}
+                        onClick={() => switchExternalClient(value)}
+                        type="button"
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {createMode === "external" && (
               <ExternalClientImportPanel
                 client={externalClient}
+                pathMode={EXTERNAL_IMPORT_CLIENT_PATH_MODE[externalClient]}
                 desktop={desktop}
                 error={
                   externalImportPreviewQuery.isError

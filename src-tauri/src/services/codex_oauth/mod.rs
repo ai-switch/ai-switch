@@ -1,4 +1,6 @@
-mod credential;
+// 外部导入（Codex++/Magpie）也要用 Codex auth.json 严格解析器，
+// 所以对 crate 内可见而不只是 codex_oauth 内部。
+pub(crate) mod credential;
 mod process;
 
 use crate::error::{ApiError, AppError};

@@ -21,6 +21,10 @@ use crate::models::route_credential::{
     ModelMapping, ANTHROPIC_API_KEY_FIELD, ANTHROPIC_AUTH_TOKEN_FIELD, CLAUDE_ONE_M_SUFFIX,
     CLAUDE_SUBAGENT_MODEL_ALIAS, FALLBACK_MODEL_ALIAS,
 };
+use crate::services::external_client_import_service::{
+    PreparedBody, PreparedExternalEntry, SkipBucket,
+};
+
 use serde_json::{Map, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::path::{Path, PathBuf};
@@ -50,6 +54,9 @@ pub struct ExtractedApiCredential {
     pub api_key_field: Option<&'static str>,
     pub model_mappings: Vec<ModelMapping>,
     pub user_agent: Option<String>,
+    /// Ordered custom upstream headers a reader preserves verbatim. cc-switch
+    /// never sets any; Codex++ relays and Magpie providers carry their own.
+    pub extra_headers: Vec<(String, String)>,
 }
 
 /// Claude Code env keys that carry a per-role upstream model, paired with the
@@ -451,6 +458,7 @@ pub fn extract_api_credential(
         api_key_field,
         model_mappings,
         user_agent,
+        extra_headers: Vec::new(),
     })
 }
 
@@ -725,6 +733,34 @@ fn split_one_m_suffix(value: &str) -> (String, bool) {
         return (base.to_string(), true);
     }
     (trimmed.to_string(), false)
+}
+
+pub async fn prepare_entries(path: &Path) -> Result<Vec<PreparedExternalEntry>, AppError> {
+    Ok(read_providers(path)
+        .await?
+        .into_iter()
+        .map(prepare_provider)
+        .collect())
+}
+
+fn prepare_provider(provider: ExternalClientProvider) -> PreparedExternalEntry {
+    let entry_platform = platform_for_app_type(&provider.app_type);
+    let body = match extract_api_credential(&provider) {
+        Ok(extracted) => PreparedBody::Api(extracted),
+        Err(ExtractIssue::PlatformUnsupported) => PreparedBody::Skipped(
+            SkipBucket::OtherPlatform(None, provider.app_type.trim().to_string()),
+        ),
+        Err(issue) => PreparedBody::Broken {
+            kind: "api".to_string(),
+            display_name: provider.display_name.trim().to_string(),
+            issue_code: issue.code(),
+            platform_hint: entry_platform,
+        },
+    };
+    PreparedExternalEntry {
+        source_id: provider.source_id,
+        body,
+    }
 }
 
 #[cfg(test)]

@@ -560,7 +560,7 @@ export type RouteCredentialImportOutcome = {
 };
 
 /** Third-party desktop clients whose accounts AI Switch can read. */
-export type ExternalImportClient = "cc-switch";
+export type ExternalImportClient = "cc-switch" | "codex-plus" | "magpie";
 
 export type PreviewExternalClientImportInput = {
   client: ExternalImportClient;
@@ -581,6 +581,8 @@ export type ExternalClientAccountPreviewItem = {
   source_id: string;
   display_name: string;
   platform: string;
+  /** `api` (relay/provider) or `official` (OAuth subscription). */
+  kind: "api" | "official";
   interface_format?: string | null;
   base_url?: string | null;
   api_key_masked?: string | null;
@@ -598,8 +600,11 @@ export type ExternalClientImportPreviewCounts = {
   create: number;
   overwrite: number;
   errors: number;
+  official: number;
   other_platform: number;
   other_platform_counts: Record<string, number>;
+  unsupported: number;
+  unsupported_counts: Record<string, number>;
 };
 
 export type ExternalClientImportPreview = {

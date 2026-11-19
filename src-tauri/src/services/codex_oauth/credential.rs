@@ -59,9 +59,25 @@ fn audience(value: &Value) -> Option<String> {
         })
 }
 
-pub(super) fn parse_auth_json(
+pub(crate) fn parse_auth_json(
     input: &str,
     client_id_hint: Option<&str>,
+) -> Result<ParsedOfficialCredential, AppError> {
+    parse_auth_json_inner(input, client_id_hint, false)
+}
+
+/// Validates Codex auth.json for APIs that explicitly allow access-only accounts.
+pub(crate) fn parse_auth_json_access_only(
+    input: &str,
+    client_id_hint: Option<&str>,
+) -> Result<ParsedOfficialCredential, AppError> {
+    parse_auth_json_inner(input, client_id_hint, true)
+}
+
+fn parse_auth_json_inner(
+    input: &str,
+    client_id_hint: Option<&str>,
+    allow_access_only: bool,
 ) -> Result<ParsedOfficialCredential, AppError> {
     if input.len() > MAX_AUTH_BYTES {
         return Err(invalid_credentials());
@@ -75,7 +91,11 @@ pub(super) fn parse_auth_json(
         .filter(|value| value.is_object())
         .ok_or_else(invalid_credentials)?;
     let access_token = text(tokens, "access_token").ok_or_else(invalid_credentials)?;
-    let refresh_token = text(tokens, "refresh_token").ok_or_else(invalid_credentials)?;
+    let refresh_token = if allow_access_only {
+        text(tokens, "refresh_token")
+    } else {
+        Some(text(tokens, "refresh_token").ok_or_else(invalid_credentials)?)
+    };
     let id_token = text(tokens, "id_token").ok_or_else(invalid_credentials)?;
     let id_claims = claims(&id_token);
     let access_claims = claims(&access_token);
@@ -91,6 +111,11 @@ pub(super) fn parse_auth_json(
         .or_else(|| audience(&id_claims))
         .or_else(|| audience(&access_claims))
         .ok_or_else(invalid_credentials)?;
+    let refresh_token = if allow_access_only {
+        refresh_token
+    } else {
+        Some(refresh_token.ok_or_else(invalid_credentials)?)
+    };
     let email = text(&id_claims, "email")
         .or_else(|| text(&access_claims["https://api.openai.com/profile"], "email"));
     let subscription =
@@ -228,6 +253,28 @@ mod tests {
         assert_eq!(config["last_refresh"], "2026-09-14T00:00:00Z");
         assert!(!parsed.config_json.contains("fixture-refresh-secret"));
         assert!(config.get("raw").is_none());
+    }
+
+    #[test]
+    fn access_only_auth_keeps_identity_without_a_refresh_token() {
+        let mut auth: Value = serde_json::from_str(&auth_json()).unwrap();
+        auth["tokens"].as_object_mut().unwrap().remove("refresh_token");
+        let parsed = parse_auth_json_access_only(&auth.to_string(), None)
+            .expect("explicit access-only snapshot can use valid access/id tokens");
+        let secret: Value = serde_json::from_str(&parsed.secret_payload_json).unwrap();
+        assert!(secret["access_token"].as_str().unwrap().starts_with("e30."));
+        assert!(secret["id_token"].as_str().unwrap().starts_with("e30."));
+        assert!(secret["refresh_token"].is_null());
+        let config: Value = serde_json::from_str(&parsed.config_json).unwrap();
+        assert_eq!(config["client_id"], "cli-client-from-token");
+        assert_eq!(config["token_endpoint"], "https://auth.openai.com/oauth/token");
+    }
+
+    #[test]
+    fn strict_codex_auth_still_rejects_missing_refresh_token() {
+        let mut auth: Value = serde_json::from_str(&auth_json()).unwrap();
+        auth["tokens"].as_object_mut().unwrap().remove("refresh_token");
+        assert!(parse_auth_json(&auth.to_string(), None).is_err());
     }
 
     #[test]

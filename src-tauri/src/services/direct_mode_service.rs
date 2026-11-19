@@ -819,7 +819,10 @@ fn refreshed_baseline(
     }
     if platform == "claude" {
         if let Some(exp) = config["expired"].as_i64() {
-            auth[root]["expiresAt"] = json!(exp * 1000);
+            // `expired` 按秒约定（写侧 709 行 /1000）；历史 CPA 导入可能存过毫秒，
+            // 直接乘回会写出天文数字的 expiresAt —— 大数先换回秒。
+            let seconds = if exp > 99_999_999_999 { exp / 1000 } else { exp };
+            auth[root]["expiresAt"] = json!(seconds * 1000);
         }
         if let Some(scopes) = config.get("scopes").filter(|v| v.is_array()) {
             auth[root]["scopes"] = scopes.clone();

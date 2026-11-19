@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, FileSearch, LoaderCircle, RefreshCw } from "lucide-react";
+import { AlertTriangle, FileSearch, FolderSearch, LoaderCircle, RefreshCw } from "lucide-react";
 import { previewExternalClientImport } from "../../lib/api/client";
 import type {
   ExternalClientAccountPreviewItem,
@@ -9,6 +9,20 @@ import type {
 
 export const EXTERNAL_IMPORT_CLIENT_LABELS: Record<ExternalImportClient, string> = {
   "cc-switch": "CC Switch",
+  "codex-plus": "Codex++",
+  magpie: "Magpie",
+};
+
+export const EXTERNAL_IMPORT_CLIENT_HINTS: Record<ExternalImportClient, string> = {
+  "cc-switch": "从本机的 CC Switch 配置中读取 API 账号。",
+  "codex-plus": "默认读取 ~/.codex-session-delete/ 下的配置目录和账号快照。",
+  magpie: "默认读取 ~/.config/magpie/ 下的供应商和订阅账号。",
+};
+
+export const EXTERNAL_IMPORT_CLIENT_PATH_MODE: Record<ExternalImportClient, "file" | "directory"> = {
+  "cc-switch": "file",
+  "codex-plus": "directory",
+  magpie: "directory",
 };
 
 type PreviewArgs = {
@@ -50,7 +64,10 @@ const issueLabels: Record<string, string> = {
   "external_import.api_key_missing": "缺少 API Key",
   "external_import.base_url_missing": "缺少 Base URL",
   "external_import.base_url_invalid": "Base URL 无效",
-  "external_import.conflicting_local_account": "已绑定到其他平台或非 API 账号",
+  "external_import.upstream_missing": "缺少真实上游地址",
+  "external_import.official_snapshot_missing": "缺少官方登录凭据快照",
+  "external_import.official_snapshot_invalid": "官方登录凭据快照无法解析",
+  "external_import.conflicting_local_account": "已绑定到其他平台或其他账号类型",
 };
 
 function issueLabel(code: string) {
@@ -85,6 +102,8 @@ export function isImportableExternalItem(item: ExternalClientAccountPreviewItem)
 
 export type ExternalClientImportPanelProps = {
   client: ExternalImportClient;
+  /** New readers accept a directory (multi-file layout); cc-switch accepts its DB/JSON file. */
+  pathMode: "file" | "directory";
   /** False in a browser: the native file picker only exists on the desktop. */
   desktop: boolean;
   error: string | null;
@@ -102,6 +121,7 @@ export type ExternalClientImportPanelProps = {
 
 export function ExternalClientImportPanel({
   client,
+  pathMode,
   desktop,
   error,
   labelClass,
@@ -119,27 +139,28 @@ export function ExternalClientImportPanel({
   const importable = preview?.items.filter(isImportableExternalItem) ?? [];
   const allSelected = importable.length > 0 && importable.every((item) => selectedIds.has(item.source_id));
   const otherPlatforms = Object.entries(preview?.counts.other_platform_counts ?? {});
+  const unsupported = Object.entries(preview?.counts.unsupported_counts ?? {});
 
   return (
     <div className="mt-4 grid gap-3">
       <p className="text-[13px] leading-5 text-stone-600">
-        从本机的 {clientLabel} 配置中读取 API 账号，勾选后导入。重复导入同一条记录会覆盖上次导入的账号，不会新增重复项。
+        <span className="font-semibold">{clientLabel}</span>：{EXTERNAL_IMPORT_CLIENT_HINTS[client]}重复导入同一条记录会覆盖上次导入的账号，不会新增重复项。
       </p>
 
       <div className="grid gap-2 rounded-xl border border-stone-200 bg-white p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className={labelClass}>配置文件</span>
+          <span className={labelClass}>{pathMode === "directory" ? "配置目录" : "配置文件"}</span>
           <div className="flex items-center gap-1.5">
             <button
-              aria-label="选择客户端配置文件"
+              aria-label={pathMode === "directory" ? "选择客户端配置目录" : "选择客户端配置文件"}
               className="inline-flex items-center gap-1.5 rounded-xl border border-blue-200 bg-blue-50 px-3 py-1.5 text-[12px] font-semibold text-blue-900 motion-control hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
               disabled={!desktop}
               onClick={onChooseSourcePath}
               title={desktop ? undefined : "此功能仅桌面端可用。"}
               type="button"
             >
-              <FileSearch className="h-3.5 w-3.5" />
-              选择文件
+              {pathMode === "directory" ? <FolderSearch className="h-3.5 w-3.5" /> : <FileSearch className="h-3.5 w-3.5" />}
+              {pathMode === "directory" ? "选择目录" : "选择文件"}
             </button>
             {sourcePath ? (
               <button
@@ -192,7 +213,7 @@ export function ExternalClientImportPanel({
         <div className="grid gap-2">
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12px] text-stone-700">
             <span className="font-semibold">
-              可导入 {preview.counts.importable} 项 · 新增 {preview.counts.create} · 覆盖 {preview.counts.overwrite}
+              可导入 {preview.counts.importable} 项 · 订阅 {preview.counts.official} · 新增 {preview.counts.create} · 覆盖 {preview.counts.overwrite}
               {preview.counts.errors > 0 ? ` · 需修正 ${preview.counts.errors}` : ""}
             </span>
             <span className="font-mono text-[11px] text-stone-500">已勾选 {selectedIds.size}</span>
@@ -203,6 +224,12 @@ export function ExternalClientImportPanel({
               另有 {preview.counts.other_platform} 个账号属于其他平台（
               {otherPlatforms.map(([platform, count]) => `${platform} ${count}`).join(" · ")}
               ），请切换到对应平台再导入。
+            </p>
+          ) : null}
+
+          {unsupported.length > 0 ? (
+            <p className="rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-[11px] text-stone-500">
+              另有暂不支持 {preview.counts.unsupported} 项（{unsupported.map(([label, count]) => `${label} ${count}`).join(" · ")}）。
             </p>
           ) : null}
 
@@ -241,6 +268,9 @@ export function ExternalClientImportPanel({
                           <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
                             <span className="min-w-0 truncate text-[13px] font-semibold text-stone-900">
                               {item.display_name}
+                            </span>
+                            <span className="rounded-full border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-800">
+                              {item.kind === "official" ? "订阅" : "API"}
                             </span>
                             <span
                               className={`rounded-full border px-1.5 py-0.5 text-[10px] font-semibold ${dispositionClass(item.disposition)}`}

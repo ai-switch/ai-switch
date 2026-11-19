@@ -150,6 +150,9 @@ const GROK_CLI_TOKEN_AUTH_VALUE: &str = "xai-grok-cli";
 const GROK_CLI_CHAT_PROXY_MARKER: &str = "cli-chat-proxy.grok.com";
 /// Refresh a short time before wall-clock expiry to avoid edge 401s.
 const OAUTH_REFRESH_LEAD: Duration = Duration::from_secs(5 * 60);
+/// 上限是"按秒能表示的合理年份"（约公元 5138）。超过它的数字只能来自毫秒
+/// 时间戳（Claude 的 `expiresAt`），换算成秒再比。
+const EXPIRED_SECONDS_MAX: i64 = 99_999_999_999;
 const CUSTOM_TOOL_INPUT_FIELD: &str = "input";
 const CUSTOM_TOOL_INPUT_DESCRIPTION: &str =
     "Raw string input for the original custom tool. Preserve formatting exactly and follow the original tool definition embedded in the description.";
@@ -7400,6 +7403,10 @@ fn build_api_upstream_request(
         rewritten_body = apply_claude_code_body_identity(&rewritten_body, &credential.id);
     }
     // Everything below this point touches headers and the URL only.
+    // Credential-provided custom headers (imported relays ship them in
+    // `config.headers`) fill gaps first — inbound values win, and the dialect
+    // auth headers inserted below always stay authoritative.
+    apply_config_headers(headers, config)?;
     let merged_query = merge_query_parts(query, upstream_query.as_deref());
     let mut target_url = build_target_url(base_url, &upstream_path, merged_query.as_deref());
 
@@ -8038,7 +8045,12 @@ fn access_token_is_expired_with_secret(config: &Value, secret: Option<&Value>) -
             }
             Value::Number(number) => {
                 if let Some(ts) = number.as_i64() {
-                    // Accept unix seconds.
+                    // Codex stores JWT `exp` (unix seconds); Claude's
+                    // `claudeAiOauth.expiresAt` — also what CPA/external imports
+                    // preserve — is unix millis. Read as seconds, millis looks
+                    // like "expires in year 50000+" so a dead account would
+                    // never rotate. Anything that large can only be millis.
+                    let ts = if ts > EXPIRED_SECONDS_MAX { ts / 1000 } else { ts };
                     return Utc::now().timestamp() + OAUTH_REFRESH_LEAD.as_secs() as i64 >= ts;
                 }
             }
@@ -19313,6 +19325,64 @@ data: [DONE]\n\n";
         assert_ne!(forwarded.body, request.to_vec());
     }
 
+    /// Imported Codex++/cc-switch accounts carry custom relay headers in
+    /// `config.headers`. The API path must forward them upstream, filling only
+    /// missing headers: inbound request values and the dialect's own auth headers
+    /// stay authoritative, and a credential-configured `anthropic-version` beats
+    /// the dialect default.
+    #[test]
+    fn api_upstream_forwards_credential_custom_headers() {
+        let mut openai = reminder_credential("codex", "openai", None);
+        openai.config_json = serde_json::json!({
+            "base_url": "https://api.example.com",
+            "interface_format": "openai",
+            "model_mappings": [],
+            "headers": {"X-Debug": "1", "X-Relay-Signature": "relay-signature"}
+        })
+        .to_string();
+        let (_, headers, _) = build_upstream_request(
+            &openai,
+            "codex",
+            "/v1/chat/completions",
+            None,
+            HeaderMap::new(),
+            br#"{"model":"m"}"#,
+        )
+        .expect("openai request");
+        assert_eq!(headers.get("x-debug").and_then(|value| value.to_str().ok()), Some("1"));
+        assert_eq!(
+            headers.get("x-relay-signature").and_then(|value| value.to_str().ok()),
+            Some("relay-signature")
+        );
+        // The dialect auth header stays authoritative even with custom headers present.
+        assert_eq!(
+            headers.get("authorization").and_then(|value| value.to_str().ok()),
+            Some("Bearer sk-test")
+        );
+
+        let mut anthropic = reminder_credential("claude", "anthropic", None);
+        anthropic.config_json = serde_json::json!({
+            "base_url": "https://api.example.com",
+            "interface_format": "anthropic",
+            "model_mappings": [],
+            "headers": {"anthropic-version": "2024-09-30"}
+        })
+        .to_string();
+        let (_, headers, _) = build_upstream_request(
+            &anthropic,
+            "claude",
+            "/v1/messages",
+            None,
+            HeaderMap::new(),
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#,
+        )
+        .expect("anthropic request");
+        assert_eq!(
+            headers.get("anthropic-version").and_then(|value| value.to_str().ok()),
+            Some("2024-09-30")
+        );
+    }
+
     /// A ChatGPT-subscription Codex account, imported the way the app's own
     /// example JSON produces it: access + refresh token, no `base_url`, no
     /// agent-identity fields.
@@ -19658,6 +19728,27 @@ data: [DONE]\n\n";
         });
         assert!(!access_token_is_expired(&future));
         assert!(access_token_is_expired(&past));
+    }
+
+    /// Claude 的 `claudeAiOauth.expiresAt`（以及历史上 CPA 导入存下的值）是 unix
+    /// 毫秒，而 Codex 的 JWT `exp` 是秒。按秒读毫秒会得到"公元五万年" —— 永不过期，
+    /// 失效账号永远不切号。大数只能解释成毫秒：换算后再比。
+    #[test]
+    fn access_token_is_expired_reads_claude_millis_expiry() {
+        let future_millis = serde_json::json!({
+            "expired": (Utc::now() + chrono::Duration::hours(1)).timestamp_millis()
+        });
+        let past_millis = serde_json::json!({
+            "expired": (Utc::now() - chrono::Duration::hours(1)).timestamp_millis()
+        });
+        assert!(!access_token_is_expired(&future_millis));
+        assert!(access_token_is_expired(&past_millis));
+
+        // Codex 的秒级 exp（约 17 亿）不受影响，仍按秒读。
+        let future_seconds = serde_json::json!({
+            "expired": (Utc::now() + chrono::Duration::hours(1)).timestamp()
+        });
+        assert!(!access_token_is_expired(&future_seconds));
     }
 
     #[test]

@@ -6,8 +6,8 @@ pub mod brotli_codec;
 pub mod cc_switch_import_service;
 pub mod claude_trust_service;
 pub mod client_identity;
-#[cfg(feature = "desktop")]
 pub mod codex_oauth;
+pub mod codex_plus_import_service;
 pub mod codex_reasoning_cache;
 pub mod config_write_service;
 pub mod cpa_export_service;
@@ -18,6 +18,7 @@ pub mod disk_space_service;
 pub mod external_client_import_service;
 pub mod http_client;
 pub mod import_service;
+pub mod magpie_import_service;
 pub mod mobile_pairing;
 pub mod model_image_input;
 pub mod model_pricing;

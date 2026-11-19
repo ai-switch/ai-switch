@@ -232,6 +232,7 @@ function externalPreviewItemFixture(
     source_id: "codex:p1",
     display_name: "kktoken",
     platform: "codex",
+    kind: "api",
     interface_format: "openai-responses",
     base_url: "https://kktoken.cc/v1",
     api_key_masked: "sk-1***7890",
@@ -260,8 +261,11 @@ function externalPreviewFixture(
       create: items.filter((item) => item.disposition === "create").length,
       overwrite: items.filter((item) => item.disposition === "overwrite").length,
       errors: items.filter((item) => item.disposition === "error").length,
+      official: items.filter((item) => item.kind === "official").length,
       other_platform: 0,
       other_platform_counts: {},
+      unsupported: 0,
+      unsupported_counts: {},
       ...overrides,
     },
     items,
@@ -3978,6 +3982,32 @@ describe("AccountsScreen", () => {
     expect(screen.getByRole("checkbox", { name: "导入 No key" })).toBeDisabled();
     expect(screen.getByRole("checkbox", { name: "全选可导入账号" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "导入所选账号" })).toBeDisabled();
+  });
+
+  it("selects Magpie as a directory-based source and previews that directory", async () => {
+    renderScreen();
+
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "导入其他客户端" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Magpie" }));
+
+    vi.mocked(open).mockResolvedValue("D:\\backup\\magpie");
+    await userEvent.click(screen.getByRole("button", { name: "选择客户端配置目录" }));
+
+    await waitFor(() =>
+      expect(open).toHaveBeenLastCalledWith({
+        directory: true,
+        multiple: false,
+        title: "选择 Magpie 配置目录",
+      }),
+    );
+    await waitFor(() =>
+      expect(previewExternalClientImport).toHaveBeenLastCalledWith({
+        client: "magpie",
+        platform: "codex",
+        source_path: "D:\\backup\\magpie",
+      }),
+    );
   });
 
   it("re-reads the preview from a hand-picked config file", async () => {
