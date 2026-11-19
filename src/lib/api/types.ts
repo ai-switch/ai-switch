@@ -758,6 +758,10 @@ export type DeleteRoutePoolGroupInput = {
   id: string;
 };
 
+export type DeleteClaudeBackupGroupInput = {
+  platform: string;
+};
+
 export type SetRoutePoolBaselineModelsInput = {
   platform: string;
   /** Ordered model ids; blank rows are ignored and an all-blank list resets defaults. */

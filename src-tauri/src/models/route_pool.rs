@@ -157,6 +157,11 @@ pub struct DeleteRoutePoolGroupInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeleteClaudeBackupGroupInput {
+    pub platform: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SetRoutePoolGroupMembersInput {
     pub platform: String,
     pub group_id: String,

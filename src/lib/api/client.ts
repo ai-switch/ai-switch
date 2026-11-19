@@ -18,6 +18,7 @@ import type {
   DirectModeStatus,
   CopyRouteCredentialInput,
   CreateRoutePoolGroupInput,
+  DeleteClaudeBackupGroupInput,
   DeleteRoutePoolGroupInput,
   DiskSpaceStatus,
   ExternalClientImportOutcome,
@@ -203,6 +204,12 @@ export function deleteRoutePoolGroup(
   input: DeleteRoutePoolGroupInput,
 ): Promise<RoutePoolState> {
   return invoke("delete_route_pool_group", { input });
+}
+
+export function deleteClaudeBackupGroup(
+  input: DeleteClaudeBackupGroupInput,
+): Promise<RoutePoolState> {
+  return invoke("delete_claude_backup_group", { input });
 }
 
 export function setRoutePoolGroupMembers(

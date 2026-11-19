@@ -35,11 +35,11 @@ use commands::route_credential_transfer_commands::{
     save_route_credential_export,
 };
 use commands::route_pool_commands::{
-    create_route_pool_group, delete_route_pool_group, fetch_route_models, get_route_pool,
-    move_route_pool_group_members, route_pool_route_once, route_pool_test_model,
-    set_route_pool_baseline_models, set_route_pool_group_members, set_route_pool_members,
-    set_route_pool_model_mode, subscribe_route_proxy_live_log, unsubscribe_route_proxy_live_log,
-    update_route_pool_group,
+    create_route_pool_group, delete_claude_backup_group, delete_route_pool_group,
+    fetch_route_models, get_route_pool, move_route_pool_group_members, route_pool_route_once,
+    route_pool_test_model, set_route_pool_baseline_models, set_route_pool_group_members,
+    set_route_pool_members, set_route_pool_model_mode, subscribe_route_proxy_live_log,
+    unsubscribe_route_proxy_live_log, update_route_pool_group,
 };
 use commands::route_proxy_commands::{
     get_claude_slot_plan, get_route_proxy_active_attempts, get_route_proxy_key,
@@ -623,6 +623,7 @@ pub fn run() {
             create_route_pool_group,
             update_route_pool_group,
             delete_route_pool_group,
+            delete_claude_backup_group,
             set_route_pool_group_members,
             move_route_pool_group_members,
             set_route_pool_members,

@@ -1,11 +1,11 @@
 use crate::app_state::AppState;
 use crate::error::{ApiError, AppError};
 use crate::models::route_pool::{
-    CreateRoutePoolGroupInput, DeleteRoutePoolGroupInput, FetchedRouteModel,
-    RouteModelsFetchRequest, RoutePoolModelTestOutcome, RoutePoolModelTestRequest,
-    RoutePoolRouteOutcome, RoutePoolRouteRequest, RoutePoolState, SetRoutePoolBaselineModelsInput,
-    SetRoutePoolGroupMembersInput, SetRoutePoolMembersInput, SetRoutePoolModelModeInput,
-    UpdateRoutePoolGroupInput,
+    CreateRoutePoolGroupInput, DeleteClaudeBackupGroupInput, DeleteRoutePoolGroupInput,
+    FetchedRouteModel, RouteModelsFetchRequest, RoutePoolModelTestOutcome,
+    RoutePoolModelTestRequest, RoutePoolRouteOutcome, RoutePoolRouteRequest, RoutePoolState,
+    SetRoutePoolBaselineModelsInput, SetRoutePoolGroupMembersInput, SetRoutePoolMembersInput,
+    SetRoutePoolModelModeInput, UpdateRoutePoolGroupInput,
 };
 use crate::services::route_model_fetch_service::RouteModelFetchService;
 use crate::services::route_model_test_service::RouteModelTestService;
@@ -87,6 +87,16 @@ pub async fn delete_route_pool_group(
     input: DeleteRoutePoolGroupInput,
 ) -> Result<RoutePoolState, ApiError> {
     RoutePoolService::delete_group(&state.pool, input)
+        .await
+        .map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub async fn delete_claude_backup_group(
+    state: State<'_, AppState>,
+    input: DeleteClaudeBackupGroupInput,
+) -> Result<RoutePoolState, ApiError> {
+    RoutePoolService::delete_claude_backup_group(&state.pool, input.platform)
         .await
         .map_err(ApiError::from)
 }
