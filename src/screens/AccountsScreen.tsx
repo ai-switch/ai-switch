@@ -128,6 +128,7 @@ import {
   setRouteCredentialRecovery,
   createApiRouteCredential,
   deleteRouteCredential,
+  deleteClaudeBackupGroup,
   deleteRoutePoolGroup,
   fetchRouteModels,
   getRoutePool,
@@ -5260,6 +5261,20 @@ export function AccountsScreen({
       });
     },
   });
+
+  const backupCleanupMutation = useMutation({
+    mutationFn: () => deleteClaudeBackupGroup({ platform: activePlatform }),
+    onSuccess: () => {
+      setRoutePoolFeedback({ type: "success", message: "备份分组已清理。" });
+      void invalidateAccountData();
+    },
+    onError: (error) => {
+      setRoutePoolFeedback({
+        type: "error",
+        message: `备份分组清理失败：${formatApiError(error, "请求未成功。")}`,
+      });
+    },
+  });
   const modelTestMutation = useMutation({
     mutationFn: (request: RoutePoolModelTestRequest) => {
       const credential = request.account_id
@@ -8575,29 +8590,49 @@ export function AccountsScreen({
                 const containsActive = item.children.some((child) => child.is_active);
                 const backupLabel = `${t("accounts.backupGroup.label")}${containsActive ? ` · ${t("accounts.backupGroup.containsActive")}` : ""}`;
                 return (
-                  <button
-                    aria-label={backupLabel}
-                    aria-pressed={backupSelected}
-                    className={`relative inline-flex h-6 shrink-0 items-center justify-center rounded-md px-1.5 text-[11px] font-semibold motion-control ${backupSelected ? "bg-stone-900 text-white shadow-sm" : "text-stone-600 hover:bg-stone-100"}`}
-                    data-testid="claude-backup-group-button"
-                    key={item.key}
-                    onClick={() => selectRouteGroup(CLAUDE_BACKUP_VIEW_ID)}
-                    title={backupLabel}
-                    type="button"
-                  >
-                    <span className="whitespace-nowrap">{t("accounts.backupGroup.label")}</span>
-                    {containsActive ? (
-                      <span aria-hidden="true" className="ml-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400 ring-1 ring-amber-500/40" />
-                    ) : null}
-                    {backupSelected ? (
-                      <motion.span
-                        aria-hidden="true"
-                        className="pointer-events-none absolute inset-x-1 bottom-0 h-0.5 rounded-full bg-amber-400"
-                        layoutId="account-view-active-indicator"
-                        transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-                      />
-                    ) : null}
-                  </button>
+                  <div className="flex shrink-0 items-center gap-0.5" key={item.key}>
+                    <button
+                      aria-label={backupLabel}
+                      aria-pressed={backupSelected}
+                      className={`relative inline-flex h-6 shrink-0 items-center justify-center rounded-md px-1.5 text-[11px] font-semibold motion-control ${backupSelected ? "bg-stone-900 text-white shadow-sm" : "text-stone-600 hover:bg-stone-100"}`}
+                      data-testid="claude-backup-group-button"
+                      onClick={() => selectRouteGroup(CLAUDE_BACKUP_VIEW_ID)}
+                      title={backupLabel}
+                      type="button"
+                    >
+                      <span className="whitespace-nowrap">{t("accounts.backupGroup.label")}</span>
+                      {containsActive ? (
+                        <span aria-hidden="true" className="ml-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400 ring-1 ring-amber-500/40" />
+                      ) : null}
+                      {backupSelected ? (
+                        <motion.span
+                          aria-hidden="true"
+                          className="pointer-events-none absolute inset-x-1 bottom-0 h-0.5 rounded-full bg-amber-400"
+                          layoutId="account-view-active-indicator"
+                          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                        />
+                      ) : null}
+                    </button>
+                    <button
+                      aria-label={t("accounts.backupGroup.cleanupTitle")}
+                      className="inline-flex h-6 shrink-0 items-center justify-center rounded-md px-1 text-[11px] font-semibold text-stone-400 hover:bg-red-50 hover:text-red-600 motion-control disabled:opacity-50"
+                      data-testid="claude-backup-group-delete"
+                      disabled={backupCleanupMutation.isPending}
+                      onClick={() => {
+                        const count = item.children.reduce(
+                          (sum, child) => sum + child.account_count,
+                          0,
+                        );
+                        if (window.confirm(t("accounts.backupGroup.cleanupConfirm", { count }))) {
+                          backupCleanupMutation.mutate();
+                        }
+                      }}
+                      title={t("accounts.backupGroup.cleanupTitle")}
+                      type="button"
+                    >
+                      <Trash2 aria-hidden="true" className="h-3 w-3" />
+                    </button>
+                  </div>
                 );
               }
               const group = item.group;

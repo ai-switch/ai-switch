@@ -13,6 +13,7 @@ import {
   copyRouteCredential,
   createApiRouteCredential,
   createRoutePoolGroup,
+  deleteClaudeBackupGroup,
   deleteRouteCredential,
   deleteRoutePoolGroup,
   fetchRouteModels,
@@ -101,6 +102,7 @@ vi.mock("../src/lib/api/client", () => ({
   copyRouteCredential: vi.fn(),
   createApiRouteCredential: vi.fn(),
   createRoutePoolGroup: vi.fn(),
+  deleteClaudeBackupGroup: vi.fn(),
   deleteRouteCredential: vi.fn(),
   deleteRoutePoolGroup: vi.fn(),
   fetchRouteModels: vi.fn(),
@@ -691,6 +693,8 @@ describe("AccountsScreen", () => {
     vi.mocked(createRoutePoolGroup).mockReset();
     vi.mocked(updateRoutePoolGroup).mockReset();
     vi.mocked(deleteRoutePoolGroup).mockReset();
+    vi.mocked(deleteClaudeBackupGroup).mockReset();
+    vi.spyOn(window, "confirm").mockRestore();
     vi.mocked(moveRoutePoolGroupMembers).mockReset();
     vi.mocked(startRouteProxy).mockReset();
     vi.mocked(stopRouteProxy).mockReset();
@@ -2668,7 +2672,7 @@ describe("AccountsScreen", () => {
         sort_order: 5,
         is_internal: false,
         is_active: false,
-        account_count: 0,
+        account_count: 1,
         created_at: "2026-09-08T00:00:00Z",
         updated_at: "2026-09-08T00:00:00Z",
       },
@@ -2704,23 +2708,24 @@ describe("AccountsScreen", () => {
       await renderBackupScreen(groups);
 
       const footer = screen.getByTestId("account-workspace-status-bar");
-      await within(footer).findByRole("button", { name: /Claude(?:备份分组| backup group)/ });
+      await within(footer).findByRole("button", { name: /^Claude(?:备份分组| backup group)$/ });
       // codex views stay; the legacy claude trio must collapse into one entry.
       expect(within(footer).getByRole("button", { name: "默认组，当前激活" })).toBeInTheDocument();
       expect(within(footer).queryByRole("button", { name: /^默认组 · 2 个账号/ })).not.toBeInTheDocument();
       expect(within(footer).queryByRole("button", { name: /^未入池 · 1 个账号/ })).not.toBeInTheDocument();
       expect(within(footer).queryByRole("button", { name: /^已归档 · 0 个账号 · / })).not.toBeInTheDocument();
-      // 备份入口是底栏最后一个分组按钮（新建分组按钮之前）。
+      // 备份入口在分组栏末尾，右侧紧邻清理按钮，其后是新建分组按钮。
       const groupButtons = within(footer).getAllByRole("button").filter(
         (button) => button.closest('[aria-label="账号分组"]') !== null,
       );
-      expect(groupButtons.at(-2)).toBe(await within(footer).findByRole("button", { name: /Claude(?:备份分组| backup group)/ }));
+      expect(groupButtons.at(-3)).toBe(await within(footer).findByRole("button", { name: /^Claude(?:备份分组| backup group)$/ }));
+      expect(groupButtons.at(-2)).toHaveAttribute("data-testid", "claude-backup-group-delete");
     });
 
     it("merges accounts from every surviving legacy group in one list", async () => {
       const groups = [...routePoolGroupsFixture("codex"), ...claudeGroupsFixture()];
       await renderBackupScreen(groups);
-      await userEvent.click(await screen.findByRole("button", { name: /Claude(?:备份分组| backup group)/ }));
+      await userEvent.click(await screen.findByRole("button", { name: /^Claude(?:备份分组| backup group)$/ }));
 
       // The merged view asks the backend once for the union of the surviving
       // legacy groups — no sub-view tabs, no per-group stitching.
@@ -2735,8 +2740,46 @@ describe("AccountsScreen", () => {
 
       // The container exposes no context-menu edit and no move/delete path.
       const footer = screen.getByTestId("account-workspace-status-bar");
-      await fireEvent.contextMenu(within(footer).getByRole("button", { name: /Claude(?:备份分组| backup group)/ }));
+      await fireEvent.contextMenu(within(footer).getByRole("button", { name: /^Claude(?:备份分组| backup group)$/ }));
       expect(screen.queryByRole("dialog", { name: "编辑分组" })).not.toBeInTheDocument();
+    });
+
+    it("cleans up the backup group after confirmation", async () => {
+      const groups = [...routePoolGroupsFixture("codex"), ...claudeGroupsFixture()];
+      await renderBackupScreen(groups);
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+      vi.mocked(deleteClaudeBackupGroup).mockResolvedValue({
+        platform: "codex",
+        groups: routePoolGroupsFixture("codex"),
+        group_id: "codex-default",
+        active_group_id: "codex-default",
+        account_ids: [],
+        model_mode: "aggregate",
+        baseline_models: [],
+        default_baseline_models: [],
+        stats: statsFixture({ member_count: 2 }),
+      });
+
+      // 三个遗留组 account_count 之和：2 + 1 + 1。
+      await userEvent.click(await screen.findByTestId("claude-backup-group-delete"));
+
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(confirmSpy.mock.calls[0][0]).toContain("4");
+      expect(vi.mocked(deleteClaudeBackupGroup)).toHaveBeenCalledWith({ platform: "codex" });
+      await waitFor(() =>
+        expect(screen.getByText("备份分组已清理。")).toBeInTheDocument(),
+      );
+    });
+
+    it("does nothing when the confirmation is dismissed", async () => {
+      const groups = [...routePoolGroupsFixture("codex"), ...claudeGroupsFixture()];
+      await renderBackupScreen(groups);
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+      await userEvent.click(await screen.findByTestId("claude-backup-group-delete"));
+
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(deleteClaudeBackupGroup)).not.toHaveBeenCalled();
     });
 
     it("labels legacy claude groups in the move menu without folding same-named custom groups", async () => {
