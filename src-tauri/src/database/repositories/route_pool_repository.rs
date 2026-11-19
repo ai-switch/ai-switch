@@ -684,6 +684,89 @@ impl RoutePoolRepository {
         super::route_group_repository::delete_claude_backup_groups_atomic(pool, platform).await
     }
 
+    /// 确保固定 ID 的保留组存在（`<platform>-out` / `<platform>-archived`）。
+    /// 备份分组清理会删掉它们；archive/restore 的落点必须自动重建，否则清理后
+    /// 这两个功能就是 `route_pool_group_not_found`。存在 → no-op；软删过 →
+    /// 复活（deleted_at 清空）；没有 → 按固定 ID 新建。
+    pub async fn ensure_reserved_group(
+        pool: &SqlitePool,
+        platform: &str,
+        group_id: &str,
+        name: &str,
+    ) -> Result<(), AppError> {
+        let platform = UNIFIED_POOL_PLATFORM;
+        let now = Utc::now().to_rfc3339();
+        let state = sqlx::query(
+            "SELECT deleted_at IS NOT NULL AS deleted FROM route_pool_groups WHERE id = ?",
+        )
+        .bind(group_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|err| AppError::Database {
+            code: "database.route_pool_group_ensure",
+            message: "Could not check the reserved route group".to_string(),
+            details: Some(err.to_string()),
+            recoverable: true,
+        })?;
+        match state {
+            // 存在且活着：nothing to do。
+            Some(row) if !row.get::<bool, _>("deleted") => Ok(()),
+            // 软删过的行复活（主键是同一个 id，不能重新 INSERT）。
+            Some(_) => {
+                sqlx::query(
+                    "UPDATE route_pool_groups SET deleted_at = NULL, updated_at = ? WHERE id = ?",
+                )
+                .bind(&now)
+                .bind(group_id)
+                .execute(pool)
+                .await
+                .map_err(|err| AppError::Database {
+                    code: "database.route_pool_group_ensure",
+                    message: "Could not resurrect the reserved route group".to_string(),
+                    details: Some(err.to_string()),
+                    recoverable: true,
+                })?;
+                Ok(())
+            }
+            None => {
+                let sort_order = sqlx::query_scalar::<_, i64>(
+                    "SELECT COALESCE(MAX(sort_order), -1) + 1
+                     FROM route_pool_groups
+                     WHERE platform = ? AND deleted_at IS NULL",
+                )
+                .bind(platform)
+                .fetch_one(pool)
+                .await
+                .map_err(|err| AppError::Database {
+                    code: "database.route_pool_group_ensure",
+                    message: "Could not allocate reserved group order".to_string(),
+                    details: Some(err.to_string()),
+                    recoverable: true,
+                })?;
+                sqlx::query(
+                    "INSERT INTO route_pool_groups
+                     (id, platform, name, sort_order, is_internal, is_active, created_at, updated_at)
+                     VALUES (?, ?, ?, ?, 1, 0, ?, ?)",
+                )
+                .bind(group_id)
+                .bind(platform)
+                .bind(name)
+                .bind(sort_order)
+                .bind(&now)
+                .bind(&now)
+                .execute(pool)
+                .await
+                .map_err(|err| AppError::Database {
+                    code: "database.route_pool_group_ensure",
+                    message: "Could not create the reserved route group".to_string(),
+                    details: Some(err.to_string()),
+                    recoverable: true,
+                })?;
+                Ok(())
+            }
+        }
+    }
+
     pub async fn replace_group_members(
         pool: &SqlitePool,
         platform: &str,

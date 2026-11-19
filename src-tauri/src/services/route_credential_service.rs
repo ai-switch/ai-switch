@@ -609,6 +609,13 @@ impl RouteCredentialService {
 
         for (platform, platform_ids) in &by_platform {
             let group_id = format!("{platform}-{slug}");
+            // 保留组可能被备份分组清理删掉；落点缺失时按固定 ID 重建。
+            let name = match slug {
+                "out" => "未入池",
+                "archived" => "已归档",
+                _ => slug,
+            };
+            RoutePoolRepository::ensure_reserved_group(pool, platform, &group_id, name).await?;
             RoutePoolRepository::move_group_members(pool, platform, &group_id, platform_ids)
                 .await?;
         }
@@ -3802,6 +3809,109 @@ mod tests {
         .expect("new row");
         assert_eq!(pending, "pending_pricing");
     }
+
+    /// 备份分组一键清理会删掉 `<platform>-out` / `<platform>-archived`；这两个
+    /// 保留组是 archive/restore 的固定落点，组缺失时必须按固定 ID 自动重建，
+    /// 否则清理后再点归档/恢复就是 `route_pool_group_not_found`。
+    /// 主迁移默认建好 `codex-*` 保留组；模拟"清理后"的状态：软删/删掉指定组。
+    async fn remove_reserved_group(pool: &SqlitePool, id: &str, soft_only: bool) {
+        if soft_only {
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query("UPDATE route_pool_groups SET deleted_at = ? WHERE id = ?")
+                .bind(&now)
+                .bind(id)
+                .execute(pool)
+                .await
+                .expect("soft-delete reserved group");
+        } else {
+            sqlx::query("DELETE FROM route_pool_groups WHERE id = ?")
+                .bind(id)
+                .execute(pool)
+                .await
+                .expect("drop reserved group");
+        }
+    }
+
+    async fn group_exists(pool: &SqlitePool, id: &str) -> bool {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM route_pool_groups WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("group exists")
+        == 1
+    }
+
+    #[tokio::test]
+    async fn archiving_after_cleanup_rebuilds_the_reserved_group() {
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let id = dual_model_credential(&pool).await;
+        remove_reserved_group(&pool, "codex-archived", false).await;
+        assert!(!group_exists(&pool, "codex-archived").await);
+
+        RouteCredentialService::archive(&pool, vec![id.clone()]).await.unwrap();
+
+        assert!(group_exists(&pool, "codex-archived").await);
+        let members: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM route_pool_members WHERE group_id = 'codex-archived'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(members, 1, "the archived account lands in the rebuilt group");
+        let archived: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM route_credentials WHERE id = ? AND archived_at IS NOT NULL",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(archived, 1);
+    }
+
+    #[tokio::test]
+    async fn restoring_after_cleanup_rebuilds_the_out_group() {
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let id = dual_model_credential(&pool).await;
+        RouteCredentialService::archive(&pool, vec![id.clone()]).await.unwrap();
+        sqlx::query("DELETE FROM route_pool_groups WHERE id = 'codex-out'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        RouteCredentialService::restore(&pool, vec![id.clone()]).await.unwrap();
+
+        assert!(group_exists(&pool, "codex-out").await);
+        let members: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM route_pool_members WHERE group_id = 'codex-out'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(members, 1);
+    }
+
+    #[tokio::test]
+    async fn resurrects_a_soft_deleted_reserved_group() {
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        remove_reserved_group(&pool, "codex-archived", true).await;
+        let id = dual_model_credential(&pool).await;
+
+        RouteCredentialService::archive(&pool, vec![id.clone()]).await.unwrap();
+
+        assert!(group_exists(&pool, "codex-archived").await);
+        let members: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM route_pool_members WHERE group_id = 'codex-archived'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(members, 1);
+    }
 }
 
 #[cfg(test)]
@@ -4350,4 +4460,6 @@ mod proxy_setting_tests {
         let config: Value = serde_json::from_str(&cleared.config_json).unwrap();
         assert!(config.get("proxy_url").is_none());
     }
+
+
 }
