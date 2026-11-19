@@ -36,7 +36,9 @@ export function presentRoutePoolGroups(
   const legacy = new Map<string, RoutePoolGroup>();
   for (const id of CLAUDE_BACKUP_GROUP_IDS) {
     const match = groups.find((group) => group.id === id);
-    if (match) {
+    // 空的遗留组不折叠：一键清理删掉三个组后，归档/恢复会按固定 ID 自动重建
+    // 空的保留组——空备份没有展示意义，折叠它只会让入口"复活"。
+    if (match && match.account_count > 0) {
       legacy.set(id, match);
     }
   }

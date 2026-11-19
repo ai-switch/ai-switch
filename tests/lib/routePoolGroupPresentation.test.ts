@@ -36,9 +36,9 @@ describe("routePoolGroupPresentation", () => {
       group("codex-default", { name: "默认组", is_active: true }),
       group("codex-out", { name: "未入池" }),
       group("codex-archived", { name: "已归档" }),
-      group("claude-default", { name: "默认组", sort_order: 3 }),
-      group("claude-out", { name: "未入池", sort_order: 4 }),
-      group("claude-archived", { name: "已归档", sort_order: 5 }),
+      group("claude-default", { name: "默认组", sort_order: 3, account_count: 1 }),
+      group("claude-out", { name: "未入池", sort_order: 4, account_count: 2 }),
+      group("claude-archived", { name: "已归档", sort_order: 5, account_count: 3 }),
     ];
     const { items, backup } = presentRoutePoolGroups(groups);
     expect(ids(items)).toEqual([
@@ -62,8 +62,8 @@ describe("routePoolGroupPresentation", () => {
   it("only folds the exact legacy ids, keeping renamed, custom and claude-saas groups visible", () => {
     const groups = [
       group("codex-default", { name: "默认组", is_active: true }),
-      group("claude-default", { name: "Claude 主力", sort_order: 1 }),
-      group("claude-out", { name: "未入池", sort_order: 2 }),
+      group("claude-default", { name: "Claude 主力", sort_order: 1, account_count: 1 }),
+      group("claude-out", { name: "未入池", sort_order: 2, account_count: 1 }),
       group("claude-saas", { name: "默认组", sort_order: 3 }),
       group("custom-uuid", { name: "默认组", sort_order: 4 }),
     ];
@@ -82,8 +82,8 @@ describe("routePoolGroupPresentation", () => {
 
   it("sorts surviving children in the canonical default → out → archived order", () => {
     const groups = [
-      group("claude-archived", { name: "已归档" }),
-      group("claude-out", { name: "未入池" }),
+      group("claude-archived", { name: "已归档", account_count: 1 }),
+      group("claude-out", { name: "未入池", account_count: 1 }),
     ];
     const { backup } = presentRoutePoolGroups(groups);
     expect(backup!.children.map((child) => child.id)).toEqual([
@@ -102,6 +102,36 @@ describe("routePoolGroupPresentation", () => {
     expect(ids(items)).toEqual(["codex-default", "custom-uuid"]);
     expect(backup).toBeUndefined();
     expect(items.every((item) => "group" in item)).toBe(true);
+  });
+
+  it("skips empty legacy groups", () => {
+    // 一键清理后归档/恢复会自动重建空的保留组——空备份不该让入口复活。
+    const groups = [
+      group("codex-default", { name: "默认组", is_active: true }),
+      group("claude-default", { account_count: 0 }),
+      group("claude-out", { account_count: 0 }),
+      group("claude-archived", { account_count: 0 }),
+    ];
+    const { items, backup } = presentRoutePoolGroups(groups);
+    expect(backup).toBeUndefined();
+    expect(ids(items)).toEqual(["codex-default", "claude-default", "claude-out", "claude-archived"]);
+  });
+
+  it("folds only nonempty legacy groups", () => {
+    const groups = [
+      group("codex-default", { name: "默认组", is_active: true }),
+      group("claude-default", { account_count: 2 }),
+      group("claude-out", { account_count: 0 }),
+      group("claude-archived", { account_count: 0 }),
+    ];
+    const { items, backup } = presentRoutePoolGroups(groups);
+    expect(backup?.children.map((child) => child.id)).toEqual(["claude-default"]);
+    expect(ids(items)).toEqual([
+      "codex-default",
+      "claude-out",
+      "claude-archived",
+      "claude-backup",
+    ]);
   });
 
   it("exposes every legacy id it knows about, even when the backend dropped some", () => {
