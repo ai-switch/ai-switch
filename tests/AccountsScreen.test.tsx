@@ -2771,6 +2771,40 @@ describe("AccountsScreen", () => {
       );
     });
 
+    it("exits the backup view after cleanup instead of listing live accounts", async () => {
+      const groups = [...routePoolGroupsFixture("codex"), ...claudeGroupsFixture()];
+      await renderBackupScreen(groups);
+      await userEvent.click(await screen.findByTestId("claude-backup-group-button"));
+      await waitFor(() => {
+        const pageRequest = vi.mocked(listRouteCredentialPage).mock.calls.at(-1)?.[0];
+        expect(pageRequest?.group_ids).toEqual(["claude-default", "claude-out", "claude-archived"]);
+      });
+
+      // 清理成功：返回的池状态已无遗留组。
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+      vi.mocked(deleteClaudeBackupGroup).mockResolvedValue({
+        platform: "codex",
+        groups: routePoolGroupsFixture("codex"),
+        group_id: "codex-default",
+        active_group_id: "codex-default",
+        account_ids: [],
+        model_mode: "aggregate",
+        baseline_models: [],
+        default_baseline_models: [],
+        stats: statsFixture({ member_count: 2 }),
+      });
+      await userEvent.click(await screen.findByTestId("claude-backup-group-delete"));
+
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      // 恢复后的查询必须是普通组视图。哨兵残留的 group_ids: [] 会落进 InPool
+      // 兜底，把当前活跃组的真实账号填进一个已经不存在的"备份"列表里。
+      await waitFor(() => {
+        const pageRequest = vi.mocked(listRouteCredentialPage).mock.calls.at(-1)?.[0];
+        expect(pageRequest?.group_ids).toBeUndefined();
+        expect(pageRequest?.group_id).toBe("codex-default");
+      });
+    });
+
     it("does nothing when the confirmation is dismissed", async () => {
       const groups = [...routePoolGroupsFixture("codex"), ...claudeGroupsFixture()];
       await renderBackupScreen(groups);

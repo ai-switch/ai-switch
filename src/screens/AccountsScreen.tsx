@@ -5264,7 +5264,10 @@ export function AccountsScreen({
 
   const backupCleanupMutation = useMutation({
     mutationFn: () => deleteClaudeBackupGroup({ platform: activePlatform }),
-    onSuccess: () => {
+    onSuccess: (state) => {
+      // 清理后哨兵视图失去了全部子组：若不退出，账号列表会落进 InPool 兜底，
+      // 把当前活跃组的真实账号填进一个已经不存在的"备份"列表。
+      setSelectedGroupId(state.group_id ?? state.active_group_id ?? null);
       setRoutePoolFeedback({ type: "success", message: "备份分组已清理。" });
       void invalidateAccountData();
     },
