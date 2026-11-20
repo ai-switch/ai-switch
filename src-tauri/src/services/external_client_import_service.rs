@@ -493,10 +493,10 @@ fn classify(
     }
 }
 
-struct CredentialPayload {
-    secret_payload_json: String,
-    config_json: String,
-    preview_json: String,
+pub(crate) struct CredentialPayload {
+    pub(crate) secret_payload_json: String,
+    pub(crate) config_json: String,
+    pub(crate) preview_json: String,
 }
 
 /// Official entries carry their payload ready-made from the CPA parser; only
@@ -536,7 +536,7 @@ fn official_masked_token(credential: &ParsedOfficialCredential) -> Option<String
 /// It deliberately mirrors that function's key set rather than calling it: the
 /// import runs inside one transaction, and `create_api` owns its own connection.
 /// Any key added there needs adding here too.
-fn build_payload(extracted: &ExtractedApiCredential) -> CredentialPayload {
+pub(crate) fn build_payload(extracted: &ExtractedApiCredential) -> CredentialPayload {
     let secret_payload_json = json!({ "api_key": extracted.api_key.trim() }).to_string();
     let mut config = json!({
         "base_url": extracted.base_url.trim(),

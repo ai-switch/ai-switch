@@ -24,7 +24,11 @@ use crate::models::route_relay_balance::{
     RelayBalanceConfig, RelayBalanceProvider, RELAY_BALANCE_ACCESS_TOKEN_KEY,
     RELAY_BALANCE_ACCESS_TOKEN_USER_ID_KEY, RELAY_BALANCE_CONFIG_KEY,
 };
+use crate::services::cc_switch_import_service::ExtractedApiCredential;
 use crate::services::cpa_import_service::{parse_cpa_text, ParsedOfficialCredential};
+use crate::services::external_client_import_service::{build_payload, PreparedBody};
+use crate::services::external_client_json_import_service;
+use crate::models::external_client_import::{EXTERNAL_CLIENT_MAX_ITEMS, EXTERNAL_CLIENT_MAX_SOURCE_BYTES};
 use crate::services::platform_capability_service::PlatformCapabilityService;
 use crate::services::route_credential_activity::RouteCredentialActivityRegistry;
 use crate::services::route_credential_transfer_import_service::{
@@ -42,11 +46,22 @@ use url::Url;
 #[path = "sub2api_import_service.rs"]
 mod sub2api_import_service;
 
+#[cfg(test)]
+#[path = "route_credential_service/external_export_tests.rs"]
+mod external_export_tests;
+
 pub struct RouteCredentialService;
 
 enum ParsedBatchCredential {
     Official(ParsedOfficialCredential),
     Api(NormalizedImportItem),
+    PreparedApi(ExtractedApiCredential),
+}
+
+#[derive(Default)]
+struct ParsedBatchImport {
+    credentials: Vec<ParsedBatchCredential>,
+    failed: Vec<RouteCredentialImportFailure>,
 }
 
 impl RouteCredentialService {
@@ -308,11 +323,15 @@ impl RouteCredentialService {
         // 官方导入是池级能力，用池身份做一次能力检查即可。
         let pool_platform = PlatformId::Codex.as_str();
         PlatformCapabilityService::require(PlatformId::Codex, PlatformOperation::OfficialImport)?;
-        let batch_id = ensure_required_batch(pool, input.batch_name).await?;
         let parsed = parse_batch_credentials_text(&input.text)?;
-        let mut imported = Vec::with_capacity(parsed.len());
+        let batch_id = if parsed.credentials.is_empty() {
+            None
+        } else {
+            ensure_required_batch(pool, input.batch_name).await?
+        };
+        let mut imported = Vec::with_capacity(parsed.credentials.len());
 
-        for credential in parsed {
+        for credential in parsed.credentials {
             imported
                 .push(create_batch_credential(pool, batch_id.clone(), credential).await?);
         }
@@ -320,7 +339,7 @@ impl RouteCredentialService {
         best_effort_sync(pool, pool_platform).await;
         Ok(RouteCredentialImportResult {
             imported,
-            failed: Vec::new(),
+            failed: parsed.failed,
         })
     }
 
@@ -330,34 +349,53 @@ impl RouteCredentialService {
     ) -> Result<RouteCredentialImportResult, AppError> {
         let pool_platform = PlatformId::Codex.as_str();
         PlatformCapabilityService::require(PlatformId::Codex, PlatformOperation::OfficialImport)?;
-        let batch_id = ensure_required_batch(pool, input.batch_name).await?;
-        let mut imported = Vec::new();
-        let mut failed = Vec::new();
-
+        let mut parsed = ParsedBatchImport::default();
         for path in input.file_paths {
-            match tokio::fs::read_to_string(&path).await {
-                Ok(content) => match parse_batch_credentials_file(&path, &content) {
-                    Ok(credentials) => {
-                        for credential in credentials {
-                            imported.push(
-                                create_batch_credential(pool, batch_id.clone(), credential).await?,
-                            );
-                        }
+            let result = async {
+                use tokio::io::AsyncReadExt;
+                let file = tokio::fs::File::open(&path).await?;
+                let mut content = Vec::new();
+                file.take((EXTERNAL_CLIENT_MAX_SOURCE_BYTES + 1) as u64)
+                    .read_to_end(&mut content).await?;
+                validate_batch_source_size(content.len())?;
+                let content = std::str::from_utf8(&content).map_err(|_| AppError::Validation {
+                    code: "external_import.export_invalid",
+                    message: "账号 JSON 文件必须为 UTF-8 文本。".to_string(),
+                    details: None,
+                    recoverable: true,
+                })?;
+                parse_batch_credentials_file(&path, content)
+            }.await;
+            match result {
+                Ok(mut file) => {
+                    if parsed.credentials.len() + file.credentials.len() > EXTERNAL_CLIENT_MAX_ITEMS {
+                        parsed.failed.push(RouteCredentialImportFailure {
+                            label: path,
+                            error: "单次最多导入 2000 个账号条目。".to_string(),
+                        });
+                        continue;
                     }
-                    Err(err) => failed.push(RouteCredentialImportFailure {
-                        label: path,
-                        error: err.to_string(),
-                    }),
-                },
-                Err(err) => failed.push(RouteCredentialImportFailure {
+                    parsed.credentials.append(&mut file.credentials);
+                    parsed.failed.append(&mut file.failed);
+                }
+                Err(err) => parsed.failed.push(RouteCredentialImportFailure {
                     label: path,
                     error: err.to_string(),
                 }),
             }
         }
+        let batch_id = if parsed.credentials.is_empty() {
+            None
+        } else {
+            ensure_required_batch(pool, input.batch_name).await?
+        };
+        let mut imported = Vec::with_capacity(parsed.credentials.len());
+        for credential in parsed.credentials {
+            imported.push(create_batch_credential(pool, batch_id.clone(), credential).await?);
+        }
 
         best_effort_sync(pool, pool_platform).await;
-        Ok(RouteCredentialImportResult { imported, failed })
+        Ok(RouteCredentialImportResult { imported, failed: parsed.failed })
     }
 
     pub async fn update(
@@ -1272,8 +1310,116 @@ fn parse_official_credentials_text(text: &str) -> Result<Vec<ParsedOfficialCrede
     }
 }
 
-fn parse_batch_credentials_text(text: &str) -> Result<Vec<ParsedBatchCredential>, AppError> {
-    let value: Value = serde_json::from_str(text)?;
+fn parse_batch_credentials_text(text: &str) -> Result<ParsedBatchImport, AppError> {
+    validate_batch_source_size(text.len())?;
+    let value: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))?;
+    if value.get("type").and_then(Value::as_str) == Some("sub2api-data") {
+        if value.get("version").and_then(Value::as_u64) != Some(1) {
+            return Err(AppError::Validation {
+                code: "external_import.export_version_unsupported",
+                message: "不支持此 Sub2API 导出版本，请使用版本 1 的账号 JSON。".to_string(),
+                details: None,
+                recoverable: true,
+            });
+        }
+        let accounts = value.get("accounts").and_then(Value::as_array).ok_or_else(|| AppError::Validation {
+            code: "external_import.export_invalid",
+            message: "Sub2API 导出必须包含 accounts 数组。".to_string(),
+            details: None,
+            recoverable: true,
+        })?;
+        if accounts.len() > EXTERNAL_CLIENT_MAX_ITEMS {
+            return Err(batch_items_limit());
+        }
+        if accounts.is_empty() {
+            return Err(AppError::Validation {
+                code: "external_import.export_empty",
+                message: "此 Sub2API 导出中没有账号条目。".to_string(),
+                details: None,
+                recoverable: true,
+            });
+        }
+        let mut parsed = ParsedBatchImport::default();
+        for (index, item) in accounts.iter().enumerate() {
+            match parse_legacy_batch_value(item.clone(), &item.to_string()) {
+                Ok(credentials) => {
+                    if parsed.credentials.len() + credentials.len() > EXTERNAL_CLIENT_MAX_ITEMS {
+                        return Err(batch_items_limit());
+                    }
+                    parsed.credentials.extend(credentials);
+                }
+                Err(_) => parsed.failed.push(RouteCredentialImportFailure {
+                    label: format!("条目 {}", index + 1),
+                    error: "Sub2API 账号凭据无效，请检查厂商及访问令牌。".to_string(),
+                }),
+            }
+        }
+        return Ok(parsed);
+    }
+    if let Some(entries) = external_client_json_import_service::prepare_json(&value) {
+        let entries = entries?;
+        let mut parsed = ParsedBatchImport::default();
+        for (index, entry) in entries.into_iter().enumerate() {
+            let issue = match entry.body {
+                PreparedBody::Api(api) => {
+                    parsed.credentials.push(ParsedBatchCredential::PreparedApi(api));
+                    continue;
+                }
+                PreparedBody::Official(official) => {
+                    parsed.credentials.push(ParsedBatchCredential::Official(official));
+                    continue;
+                }
+                PreparedBody::Broken { issue_code, .. } => issue_code,
+                PreparedBody::Skipped(_) => "external_import.entry_unsupported",
+            };
+            parsed.failed.push(RouteCredentialImportFailure {
+                label: format!("条目 {}", index + 1),
+                error: external_entry_issue_message(issue),
+            });
+        }
+        return Ok(parsed);
+    }
+    let credentials = parse_legacy_batch_value(value, text)?;
+    if credentials.len() > EXTERNAL_CLIENT_MAX_ITEMS {
+        return Err(batch_items_limit());
+    }
+    Ok(ParsedBatchImport { credentials, failed: Vec::new() })
+}
+
+fn validate_batch_source_size(bytes: usize) -> Result<(), AppError> {
+    if bytes > EXTERNAL_CLIENT_MAX_SOURCE_BYTES {
+        return Err(AppError::Validation {
+            code: "external_import.source_too_large",
+            message: "账号 JSON 超过 8 MiB，请分批导入。".to_string(),
+            details: None,
+            recoverable: true,
+        });
+    }
+    Ok(())
+}
+
+fn batch_items_limit() -> AppError {
+    AppError::Validation {
+        code: "external_import.too_many_items",
+        message: "单次最多导入 2000 个账号条目。".to_string(),
+        details: None,
+        recoverable: true,
+    }
+}
+
+fn external_entry_issue_message(issue: &str) -> String {
+    let reason = match issue {
+        "external_import.api_key_missing" => "缺少可用 API Key",
+        "external_import.upstream_missing" => "缺少真实上游地址",
+        "external_import.official_snapshot_missing" => "导出中缺少官方账号快照",
+        "external_import.official_snapshot_invalid" => "官方账号快照无效",
+        "external_import.entry_unsupported" => "不支持此账号条目",
+        _ => "客户端账号条目无效",
+    };
+    format!("{reason}（{issue}）")
+}
+
+fn parse_legacy_batch_value(value: Value, text: &str) -> Result<Vec<ParsedBatchCredential>, AppError> {
     let items = match value {
         Value::Object(object) if object.contains_key("accounts") => {
             return parse_official_credentials_text(text).map(|credentials| {
@@ -1324,8 +1470,15 @@ fn parse_batch_credentials_text(text: &str) -> Result<Vec<ParsedBatchCredential>
 fn parse_batch_credentials_file(
     path: &str,
     content: &str,
-) -> Result<Vec<ParsedBatchCredential>, AppError> {
-    parse_batch_credentials_text(content).map_err(|error| match error {
+) -> Result<ParsedBatchImport, AppError> {
+    parse_batch_credentials_text(content)
+        .map(|mut parsed| {
+            for failure in &mut parsed.failed {
+                failure.label = format!("{path} · {}", failure.label);
+            }
+            parsed
+        })
+        .map_err(|error| match error {
         AppError::Validation {
             code,
             message,
@@ -1366,6 +1519,18 @@ async fn create_batch_credential(
                     credential.secret_payload_json,
                     credential.config_json,
                     preview_json,
+                )
+            }
+            ParsedBatchCredential::PreparedApi(credential) => {
+                let payload = build_payload(&credential);
+                (
+                    credential.platform.as_str().to_string(),
+                    "api",
+                    credential.display_name,
+                    None,
+                    payload.secret_payload_json,
+                    payload.config_json,
+                    payload.preview_json,
                 )
             }
             ParsedBatchCredential::Api(credential) => (

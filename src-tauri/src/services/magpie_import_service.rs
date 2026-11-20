@@ -110,18 +110,33 @@ pub async fn prepare_entries(dir: &Path) -> Result<Vec<PreparedExternalEntry>, A
         });
     }
 
+    prepare_values(providers.as_ref(), logins.as_ref())
+}
+
+pub(crate) fn prepare_values(
+    providers: Option<&Value>,
+    logins: Option<&Value>,
+) -> Result<Vec<PreparedExternalEntry>, AppError> {
     let mut entries = Vec::new();
     if let Some(provider_list) = providers
         .as_ref()
         .and_then(|value| value.get("providers"))
         .and_then(Value::as_array)
     {
-        for provider in provider_list {
+        for (index, provider) in provider_list.iter().enumerate() {
+            if value_string_field(provider, "id").is_none() {
+                push_invalid_entry("provider", index, "api", &mut entries);
+                continue;
+            }
             prepare_provider(provider, &mut entries);
         }
     }
-    if let Some(login_list) = logins.as_ref().and_then(Value::as_array) {
-        for login in login_list {
+    if let Some(login_list) = logins.and_then(Value::as_array) {
+        for (index, login) in login_list.iter().enumerate() {
+            if value_string_field(login, "agent").is_none() {
+                push_invalid_entry("login", index, "official", &mut entries);
+                continue;
+            }
             prepare_login(login, &mut entries);
         }
     }
@@ -135,6 +150,22 @@ pub async fn prepare_entries(dir: &Path) -> Result<Vec<PreparedExternalEntry>, A
         });
     }
     Ok(entries)
+}
+
+fn value_string_field(value: &Value, key: &str) -> Option<String> {
+    value.as_object().and_then(|object| string_field(object, key))
+}
+
+fn push_invalid_entry(prefix: &str, index: usize, kind: &str, entries: &mut Vec<PreparedExternalEntry>) {
+    entries.push(PreparedExternalEntry {
+        source_id: format!("{prefix}-row:{}", index + 1),
+        body: PreparedBody::Broken {
+            kind: kind.to_string(),
+            display_name: format!("{} {}", prefix, index + 1),
+            issue_code: "external_import.entry_invalid",
+            platform_hint: None,
+        },
+    });
 }
 
 /// A key as providers.json stores it: the value plus the one protocol it may

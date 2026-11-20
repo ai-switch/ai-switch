@@ -3846,6 +3846,27 @@ describe("AccountsScreen", () => {
     expect(importOfficialRouteCredentialsFromFiles).not.toHaveBeenCalled();
   });
 
+  it("accepts exported client JSON and shows individual failures from a partial import", async () => {
+    vi.mocked(importOfficialRouteCredentialsFromText).mockResolvedValue({
+      imported: [credentialsFixture[1]],
+      failed: [{ label: "条目 2", error: "官方账号快照无效" }],
+    });
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: "新增账号" }));
+    await userEvent.click(screen.getByRole("button", { name: "批量导入" }));
+    expect(screen.getByText(/支持 Codex\+\+ 完整配置导出/)).toHaveTextContent("Magpie");
+    const exported = '{"schema":1,"settings":{"relayProfiles":[]}}';
+    fireEvent.change(screen.getByLabelText("账号 JSON"), { target: { value: exported } });
+    await userEvent.type(screen.getByLabelText("导入批量名称"), "Exported JSON");
+    await userEvent.click(screen.getByRole("button", { name: "保存账号" }));
+    expect(await screen.findByText("批量导入完成：成功 1 个，失败 1 个。")).toBeInTheDocument();
+    const failureDetails = screen.getByLabelText("批量导入失败明细");
+    expect(failureDetails).toHaveTextContent("条目 2：官方账号快照无效");
+    // Details must expand in the workspace, outside the fixed-height clipped status bar.
+    expect(screen.getByTestId("account-workspace-status-bar")).not.toContainElement(failureDetails);
+    expect(importOfficialRouteCredentialsFromText).toHaveBeenCalledWith({ text: exported, batch_name: "Exported JSON" });
+  });
+
   it("imports a single official CPA credential from the add dialog", async () => {
     renderScreen();
 

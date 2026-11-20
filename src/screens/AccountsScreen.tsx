@@ -294,6 +294,7 @@ type RoutePoolAction = "add" | "remove" | "sync" | "move";
 type RoutePoolFeedback = {
   type: "success" | "error";
   message: string;
+  details?: string[];
 } | null;
 type RoutePoolMutationInput = {
   platform: string;
@@ -5144,7 +5145,17 @@ export function AccountsScreen({
       const poolCandidateIds = external
         ? external.created_ids
         : imported.map((credential) => credential.id);
-      await finishCreatedAccounts(poolCandidateIds, !external);
+      const failures = result && typeof result === "object" && "failed" in result
+        ? result.failed
+        : [];
+      if (!external && failures.length > 0) {
+        setRoutePoolFeedback({
+          type: "error",
+          message: `批量导入完成：成功 ${imported.length} 个，失败 ${failures.length} 个。`,
+          details: failures.map((failure) => `${failure.label}：${failure.error}`),
+        });
+      }
+      await finishCreatedAccounts(poolCandidateIds, !external && failures.length === 0);
     },
   });
 
@@ -8580,6 +8591,14 @@ export function AccountsScreen({
         </> : null}
 
         </div>
+        {routePoolFeedback?.details?.length ? (
+          <details className="shrink-0 border-t border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-700">
+            <summary className="cursor-pointer font-semibold">批量导入失败明细（{routePoolFeedback.details.length}）</summary>
+            <ul aria-label="批量导入失败明细" className="mt-2 grid max-h-48 gap-1 overflow-y-auto break-words">
+              {routePoolFeedback.details.map((detail, index) => <li key={index}>{detail}</li>)}
+            </ul>
+          </details>
+        ) : null}
         <footer
           className="flex h-8 min-h-0 items-center justify-between gap-1 overflow-hidden border-t border-stone-300 bg-stone-100 px-2 text-[11px] text-stone-600"
           data-testid="account-workspace-status-bar"
@@ -9876,6 +9895,9 @@ export function AccountsScreen({
               <div className="mt-4 grid gap-3">
                 <p className="text-[13px] leading-5 text-stone-600">
                   厂商来源从每条凭据自动识别，一个列表可混合 OpenAI / Claude / Gemini / Grok 订阅与 API。粘贴 CPA、Sub2API、session JSON 或 auth.json。
+                </p>
+                <p className="text-[12px] leading-5 text-stone-500">
+                  支持 Codex++ 完整配置导出，以及 Magpie 的 Sub2API / CLIProxyAPI 账号导出、providers.json / logins.json。可粘贴 JSON 或选择 JSON 文件；Magpie 加密备份请先在原客户端导出账号 JSON。
                 </p>
                 <details className="overflow-hidden rounded-xl border border-stone-200 bg-white">
                   <summary className="flex cursor-pointer list-none items-center gap-2 border-b border-stone-100 px-3 py-2 text-[12px] font-semibold text-stone-700">

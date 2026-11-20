@@ -122,8 +122,10 @@ fn parse_sub2api_object(
         object,
         &[
             &["credentials", "email"],
+            &["credentials", "email_address"],
             &["email"],
             &["extra", "email"],
+            &["extra", "email_address"],
             &["credentials", "extra", "email"],
             &["credentials", "live_identity", "email"],
         ],
@@ -200,7 +202,10 @@ fn parse_sub2api_object(
             &["lastRefresh"],
         ],
     );
-    let expired = first_value_path(object, &[&["credentials", "expired"], &["expired"]]);
+    let expired = first_value_path(object, &[
+        &["credentials", "expired"], &["credentials", "expires_at"],
+        &["expired"], &["expires_at"],
+    ]);
     let expires_in = first_value_path(
         object,
         &[
@@ -314,6 +319,23 @@ fn parse_sub2api_object(
     insert_optional_string(&mut config, "base_url", base_url);
     insert_optional_string(&mut config, "token_endpoint", token_endpoint);
     insert_optional_string(&mut config, "subscription_type", subscription_type);
+    for field in ["client_id", "account_uuid", "org_uuid"] {
+        insert_optional_string(
+            &mut config,
+            field,
+            first_string_path(object, &[&["credentials", field], &[field], &["extra", field]]),
+        );
+    }
+    if let Some(scopes) = first_value_path(object, &[
+        &["credentials", "scopes"], &["credentials", "scope"], &["scopes"], &["scope"],
+    ]) {
+        let scopes = match scopes {
+            Value::String(scope) => scope.split_whitespace().map(|scope| json!(scope)).collect(),
+            Value::Array(scopes) => scopes.into_iter().filter(Value::is_string).collect(),
+            _ => Vec::new(),
+        };
+        config.insert("scopes".to_string(), Value::Array(scopes));
+    }
     insert_optional_string(
         &mut config,
         "email_source",

@@ -173,7 +173,15 @@ async fn prepare_entries(dir: &Path, pointer_allowed: bool) -> Result<Vec<Prepar
         None => None,
     };
 
-    let settings_relays = settings.as_ref().and_then(|value| value.get("relayProfiles"))
+    prepare_values(settings.as_ref(), gateway.as_ref(), claude_providers.as_ref())
+}
+
+pub(crate) fn prepare_values(
+    settings: Option<&Value>,
+    gateway: Option<&Value>,
+    claude_providers: Option<&Value>,
+) -> Result<Vec<PreparedExternalEntry>, AppError> {
+    let settings_relays = settings.and_then(|value| value.get("relayProfiles"))
         .and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
     let gateway_relays: Vec<_> = gateway.as_ref().and_then(|value| value.get("providers"))
         .and_then(Value::as_array).into_iter().flatten()
@@ -189,8 +197,19 @@ async fn prepare_entries(dir: &Path, pointer_allowed: bool) -> Result<Vec<Prepar
     }
     let mut emitted = HashSet::new();
     let mut entries = Vec::new();
-    for relay in settings_relays.iter().chain(gateway_relays) {
-        let Some(id) = value_string_field(relay, "id") else { continue };
+    for (index, relay) in settings_relays.iter().chain(gateway_relays).enumerate() {
+        let Some(id) = value_string_field(relay, "id") else {
+            entries.push(PreparedExternalEntry {
+                source_id: format!("relay-row:{}", index + 1),
+                body: PreparedBody::Broken {
+                    kind: "api".to_string(),
+                    display_name: format!("Relay {}", index + 1),
+                    issue_code: "external_import.entry_invalid",
+                    platform_hint: None,
+                },
+            });
+            continue;
+        };
         if emitted.insert(id) {
             prepare_relay(relay, &gateway_auth, &mut entries);
         }
